@@ -95,6 +95,48 @@ def test_capture_and_restore_uses_isolated_target(local_tmp: Path) -> None:
     assert (target / source.name / "control.sqlite3").read_text(encoding="utf-8") == "control"
 
 
+def test_sent_snapshot_is_not_copied_again_from_staging(local_tmp: Path) -> None:
+    tmp_path = local_tmp
+    source = tmp_path / "appdata"
+    source.mkdir()
+    (source / "control.sqlite3").write_text("control", encoding="utf-8")
+    staging = tmp_path / "staging"
+    repository = tmp_path / "repository"
+    restore_root = tmp_path / "restore-root"
+    config = tmp_path / "backup.env"
+    config.write_text(
+        "\n".join(
+            [
+                f"BACKUP_STAGING_ROOT={_bash_path(staging)}",
+                f"BACKUP_REPOSITORY={_bash_path(repository)}",
+                f"BACKUP_RESTORE_ROOT={_bash_path(restore_root)}",
+                f"BACKUP_ITEMS={_bash_path(source)}",
+                "BACKUP_MAX_BYTES=20000000",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    script = _bash_path(Path("scripts/backup.sh"))
+    first = subprocess.run(
+        [_bash(), script, "--config", _bash_path(config), "--capture-and-send"],
+        text=True,
+        capture_output=True,
+    )
+    assert first.returncode == 0, first.stderr
+    snapshots = list(repository.glob("*/manifest.sha256"))
+    assert len(snapshots) == 1
+    snapshot_id = snapshots[0].parent.name
+    assert (staging / snapshot_id / ".sent").exists()
+
+    second = subprocess.run(
+        [_bash(), script, "--config", _bash_path(config), "--send-pending"],
+        text=True,
+        capture_output=True,
+    )
+    assert second.returncode == 0, second.stderr
+    assert len(list(repository.glob("*/manifest.sha256"))) == 1
+
+
 def test_restore_rejects_production_roots(local_tmp: Path) -> None:
     tmp_path = local_tmp
     config = tmp_path / "backup.env"

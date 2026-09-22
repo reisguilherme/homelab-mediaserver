@@ -68,7 +68,7 @@ Ação: completar I04/O02 com um artefato extraído e validado, atualização re
 
 ### R05 — P1: backup não implementa consistência, transporte e retenção planejados
 
-`scripts/backup.sh:54` executa `cp -a` sem parar a stack ou usar exportação consistente dos bancos. O envio é outra cópia local, sem Restic/SFTP. O teto é verificado depois de copiar e por geração; não há retenção de três gerações nem limite acumulado de staging. Na captura, `.sent` é criado no destino, mas não na origem; a próxima tentativa pode copiar a geração novamente para dentro do diretório já existente.
+`scripts/backup.sh:54` ainda executa `cp -a` sem parar a stack ou usar exportação consistente dos bancos, e o envio continua sendo uma cópia local sem Restic/SFTP. O incremento atual marca `.sent` também na origem, evita recópia e poda gerações enviadas conforme os limites de staging. O teto por snapshot e a poda não substituem a consistência dos bancos nem o transporte externo.
 
 Consequência: os testes provam cópia/checksum de fixtures, não recuperação consistente de SQLite/WAL e dos bancos de todas as aplicações, nem envio com desktop offline.
 

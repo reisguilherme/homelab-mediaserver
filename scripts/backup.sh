@@ -25,6 +25,8 @@ source "$config"
 : "${BACKUP_STAGING_ROOT:?BACKUP_STAGING_ROOT is required}"
 : "${BACKUP_REPOSITORY:?BACKUP_REPOSITORY is required}"
 : "${BACKUP_MAX_BYTES:=20000000000}"
+: "${BACKUP_STAGING_MAX_BYTES:=$BACKUP_MAX_BYTES}"
+: "${BACKUP_STAGING_GENERATIONS:=3}"
 : "${BACKUP_ITEMS:=}"
 : "${BACKUP_LOCK:=.runtime/backup.lock}"
 
@@ -39,6 +41,46 @@ trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
 checksum_manifest() {
   local root=$1
   (cd "$root" && find . -type f ! -name manifest.sha256 ! -name .sent -print0 | sort -z | xargs -0 sha256sum > manifest.sha256)
+}
+
+prune_staging() {
+  local -a candidates=()
+  local snapshot total
+  shopt -s nullglob
+  for snapshot in "$BACKUP_STAGING_ROOT"/*; do
+    [[ -d "$snapshot" && "$snapshot" != *.incomplete-* ]] || continue
+    [[ -f "$snapshot/.sent" ]] || continue
+    candidates+=("$snapshot")
+  done
+  while (( ${#candidates[@]} > BACKUP_STAGING_GENERATIONS )); do
+    rm -rf -- "${candidates[0]}"
+    candidates=("${candidates[@]:1}")
+  done
+  total=$(du -sb "$BACKUP_STAGING_ROOT" | awk '{print $1}')
+  while (( total > BACKUP_STAGING_MAX_BYTES && ${#candidates[@]} > 1 )); do
+    rm -rf -- "${candidates[0]}"
+    candidates=("${candidates[@]:1}")
+    total=$(du -sb "$BACKUP_STAGING_ROOT" | awk '{print $1}')
+  done
+  if (( total > BACKUP_STAGING_MAX_BYTES )); then
+    echo "backup staging retains the newest snapshot above the configured limit: $total > $BACKUP_STAGING_MAX_BYTES" >&2
+  fi
+}
+
+send_snapshot() {
+  local snapshot=$1 id destination
+  id=$(basename "$snapshot")
+  destination="$BACKUP_REPOSITORY/$id"
+  if [[ -f "$destination/.sent" ]]; then
+    touch "$snapshot/.sent"
+    return 0
+  fi
+  [[ ! -e "$destination" ]] || {
+    echo "backup destination exists without a completion marker: $destination" >&2
+    return 1
+  }
+  cp -a "$snapshot" "$destination"
+  touch "$destination/.sent" "$snapshot/.sent"
 }
 
 capture() {
@@ -62,24 +104,23 @@ capture() {
   checksum_manifest "$tmp"
   printf '{"schema_version":1,"snapshot_id":"%s","bytes":%s,"admission_enabled":false}\n' "$id" "$bytes" > "$tmp/metadata.json"
   mv "$tmp" "$final"
-  cp -a "$final" "$BACKUP_REPOSITORY/$id"
-  touch "$BACKUP_REPOSITORY/$id/.sent"
+  send_snapshot "$final"
+  prune_staging
   echo "backup snapshot ready: $id"
 }
 
 send_pending() {
-  local snapshot id
+  local snapshot
   shopt -s nullglob
   for snapshot in "$BACKUP_STAGING_ROOT"/*; do
     [[ -d "$snapshot" && "$snapshot" != *.incomplete-* ]] || continue
     [[ -f "$snapshot/.sent" ]] && continue
     [[ -f "$snapshot/manifest.sha256" ]] || continue
     (cd "$snapshot" && sha256sum -c manifest.sha256 >/dev/null)
-    id=$(basename "$snapshot")
-    cp -a "$snapshot" "$BACKUP_REPOSITORY/$id"
-    touch "$BACKUP_REPOSITORY/$id/.sent" "$snapshot/.sent"
-    echo "sent backup snapshot: $id"
+    send_snapshot "$snapshot"
+    echo "sent backup snapshot: $(basename "$snapshot")"
   done
+  prune_staging
 }
 
 verify_repository() {
