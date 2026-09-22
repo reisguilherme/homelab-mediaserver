@@ -9,6 +9,13 @@ def test_production_deploy_is_manual_and_serialized() -> None:
     assert "scripts/deploy.sh" in workflow
     assert "tailscale" in workflow.lower()
     assert "on:\n  push:" not in workflow
+    assert "manifest:" in workflow
+    assert "Verify the requested commit has a successful CI run" in workflow
+    assert "actions/runs?head_sha=" in workflow
+    assert '.head_branch == "main"' in workflow
+    assert "GH_TOKEN" in workflow
+    assert 'scp "$MANIFEST_FILE"' in workflow
+    assert "--manifest" in workflow
 
 
 def test_ci_runs_on_pull_requests_without_production_secrets() -> None:
@@ -16,4 +23,5 @@ def test_ci_runs_on_pull_requests_without_production_secrets() -> None:
     assert "pull_request" in workflow
     assert "make test-unit" in workflow
     assert "make compose-check" in workflow
+    assert "make smoke" in workflow
     assert "production" not in workflow.lower()

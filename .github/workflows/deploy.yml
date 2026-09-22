@@ -11,6 +11,10 @@ on:
         description: Release artifact path or URL
         required: true
         type: string
+      manifest:
+        description: Release manifest path or URL
+        required: true
+        type: string
 
 concurrency:
   group: homeserver-production
@@ -28,20 +32,105 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: ${{ inputs.commit }}
+      - name: Validate requested release
+        env:
+          TARGET_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo 'commit must be a lowercase 40-character SHA' >&2
+            exit 2
+          }
       - name: Verify commit is the requested revision
-        run: test "$(git rev-parse HEAD)" = "${{ inputs.commit }}"
+        env:
+          TARGET_COMMIT: ${{ inputs.commit }}
+        run: test "$(git rev-parse HEAD)" = "$TARGET_COMMIT"
+      - name: Verify the requested commit has a successful CI run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          run_ids="$(gh api --paginate \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs?head_sha=${TARGET_COMMIT}&status=completed&per_page=100" \
+            --jq '.workflow_runs[] | select(.path == ".github/workflows/ci.yml" and .name == "HomeServer CI" and .event == "push" and .head_branch == "main" and .head_sha == env.TARGET_COMMIT and .conclusion == "success") | .id' \
+            )"
+          [[ -n "$run_ids" ]] || {
+            echo "no successful HomeServer CI run for ${TARGET_COMMIT} on main" >&2
+            exit 1
+          }
+          echo "using successful HomeServer CI run ${run_ids%%$'\n'*}"
+      - name: Acquire artifact and manifest
+        env:
+          ARTIFACT_INPUT: ${{ inputs.artifact }}
+          MANIFEST_INPUT: ${{ inputs.manifest }}
+          TARGET_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          output_dir="$RUNNER_TEMP/homeserver-release-${TARGET_COMMIT}"
+          mkdir -p "$output_dir"
+
+          acquire() {
+            local input="$1"
+            local output="$2"
+            case "$input" in
+              https://*)
+                curl --fail --location --proto '=https' --tlsv1.2 --output "$output" "$input"
+                ;;
+              http://*|ftp://*|file://*)
+                echo 'release inputs must use HTTPS URLs or workspace-relative paths' >&2
+                return 2
+                ;;
+              *)
+                local candidate
+                if [[ "$input" = /* ]]; then
+                  candidate="$input"
+                else
+                  candidate="$GITHUB_WORKSPACE/$input"
+                fi
+                candidate="$(realpath --canonicalize-existing -- "$candidate")"
+                case "$candidate" in
+                  "$GITHUB_WORKSPACE"/*) ;;
+                  *) echo 'local release inputs must resolve inside the workspace' >&2; return 2 ;;
+                esac
+                cp -- "$candidate" "$output"
+                ;;
+            esac
+            [[ -s "$output" ]] || { echo "empty release input: $input" >&2; return 1; }
+          }
+
+          acquire "$ARTIFACT_INPUT" "$output_dir/artifact.tar"
+          acquire "$MANIFEST_INPUT" "$output_dir/release.json"
+          printf 'artifact=%s\nmanifest=%s\n' "$output_dir/artifact.tar" "$output_dir/release.json" >> "$GITHUB_OUTPUT"
+        id: release
       - name: Connect to the private tailnet
         uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:homeserver-ci
-      - name: Transfer and deploy the identified artifact
+      - name: Transfer and deploy the identified release
         env:
           HOMESERVER_SSH_HOST: ${{ secrets.HOMESERVER_SSH_HOST }}
           HOMESERVER_SSH_USER: ${{ secrets.HOMESERVER_SSH_USER }}
+          TARGET_COMMIT: ${{ inputs.commit }}
+          ARTIFACT_FILE: ${{ steps.release.outputs.artifact }}
+          MANIFEST_FILE: ${{ steps.release.outputs.manifest }}
         run: |
           set -euo pipefail
-          scp "${{ inputs.artifact }}" "$HOMESERVER_SSH_USER@$HOMESERVER_SSH_HOST:/tmp/homeserver-release"
-          ssh "$HOMESERVER_SSH_USER@$HOMESERVER_SSH_HOST" \
-            "bash /opt/homeserver/current/scripts/deploy.sh --release '${{ inputs.commit }}' --artifact /tmp/homeserver-release --config /etc/homeserver/deploy.env"
+          remote="${HOMESERVER_SSH_USER}@${HOMESERVER_SSH_HOST}"
+          remote_artifact="/tmp/homeserver-release-${TARGET_COMMIT}.tar"
+          remote_manifest="/tmp/homeserver-release-${TARGET_COMMIT}.json"
+          cleanup() {
+            ssh "$remote" "rm -f -- '$remote_artifact' '$remote_manifest'" || true
+          }
+          trap cleanup EXIT
+          scp "$ARTIFACT_FILE" "$remote:$remote_artifact"
+          scp "$MANIFEST_FILE" "$remote:$remote_manifest"
+          ssh "$remote" \
+            bash /opt/homeserver/current/scripts/deploy.sh \
+            --release "$TARGET_COMMIT" \
+            --artifact "$remote_artifact" \
+            --manifest "$remote_manifest" \
+            --config /etc/homeserver/deploy.env

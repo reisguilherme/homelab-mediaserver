@@ -1,34 +1,33 @@
 # Revisão da implementação — 22/09/2026
 
-## Incremento executado nesta revisão
+## Incremento executado nesta revisao
 
-Após o diagnóstico inicial, o branch `codex/implementation-safety` recebeu uma primeira correção de base: fixtures de FFprobe portáveis, permits com transição atômica em memória/SQLite e digest de metadado, readiness dependente de banco/capacidade, restore confinado por caminho canônico e configuração do gateway para o banco compartilhado. Os testes regressivos foram escritos antes das correções; a validação Linux posterior passou. Os demais bloqueios deste documento continuam abertos.
+Apos o diagnostico inicial, o branch codex/implementation-safety recebeu correcoes de seguranca e operacao: fixtures de FFprobe portaveis, permits atomicos em memoria/SQLite com digest de metadado, readiness dependente de banco/capacidade, restore confinado por caminho canonico, worker fail-closed com reservas persistentes, extracao segura de releases e staging de backup sem reenvio duplicado. O workflow de producao agora continua manual, exige manifesto, valida CI bem-sucedido para o SHA exato em main e usa Dockerfiles com uv sync --frozen.
 
-O worker também passou a ter um ciclo explícito de reconciliação de pedidos Seerr aprovados para reservas persistentes. Ele permanece fail-closed quando URL, credencial ou snapshot de capacidade não estão configurados e não dispara Arr/qBittorrent; busca, validação, importação, eventos e retomada continuam etapas posteriores.
+Os testes regressivos foram escritos antes das correcoes. A validacao Linux final passou; os bloqueios de integracao real e hardware continuam abertos.
 
 ## Parecer
 
 O projeto tem uma base de código e testes útil, mas os planos não foram integralmente executados. O estado observado é de implementação parcial, com componentes isolados e fluxos de produção ainda incompletos. Não há evidência suficiente para aprovar G0–G6 ou liberar aquisições reais.
 
-Referências: design v1.3 de 21/09/2026 e os cinco documentos em `docs/superpowers/plans`. A revisão considerou os arquivos atuais, inclusive arquivos ainda não rastreados pelo Git. Nenhum serviço do Legion foi acessado ou alterado. Não foram feitas correções no código nesta revisão.
+Referencias: design v1.3 de 21/09/2026 e os cinco documentos em docs/superpowers/plans. A analise considerou o checkout atual e nao acessou nem alterou servicos do Legion. As correcoes descritas acima estao no Git; nenhuma evidencia fixture e tratada como prova fisica.
 
-## Validação executada
+## Validacao executada
 
-Foi criada uma cópia temporária em filesystem Linux do WSL Ubuntu 24.04, em `/tmp/homeserver-review-Wip2QL/project`, com Python 3.12.3 e `uv sync --frozen`.
+Foi criada uma copia temporaria em filesystem Linux do WSL Ubuntu 24.04, com Python 3.12.3 e uv sync --frozen.
 
-| Verificação | Resultado observado |
+| Verificacao | Resultado observado |
 |---|---|
-| `make lint` | Ruff, compilação Python e sintaxe Bash passaram; ShellCheck não estava instalado e foi pulado pelo Makefile |
-| `make test-unit` | 25 passaram, 1 falhou |
-| `make test-contract` | 15 passaram |
-| `make test-integration` | 16 passaram, usando fixtures e filesystem local |
-| `make smoke` | 2 testes Python de política do workflow passaram; não executa os scripts Bash de sistema |
-| Quatro scripts em `tests/system/*.sh`, executados explicitamente | Todos passaram com fixtures |
-| `make compose-check` no WSL | Pulado por indisponibilidade do Compose nesse ambiente |
-| Render do Compose dev pelo Docker CLI Windows | Passou; o merge revelou problemas de mounts descritos abaixo |
-| Testes unitários e de contrato no Python 3.12.14 Windows | 41 passaram; isso não substitui a execução Linux |
+| make lint | Ruff em services/tests/scripts, compileall e sintaxe Bash passaram; ShellCheck nao estava instalado e foi pulado pelo Makefile |
+| make test-unit | 32 passaram |
+| make test-contract | 18 passaram |
+| make test-integration | 19 passaram |
+| make smoke | 2 testes de politica e quatro scripts Bash passaram |
+| suites Windows (unit/contract/integration + politica) | 66 passaram, 5 skips esperados por filesystem Linux |
+| Compose dev renderizado no Docker CLI Windows | passou |
+| build de imagens e validacao fisica | ainda nao executados |
 
-Total pytest no Linux: **58 passaram e 1 falhou**. Os avisos de depreciação do TestClient não foram a causa da falha. Não foram executados builds de imagens, integração com containers vivos, ShellCheck, ESPHome ou testes físicos.
+Total pytest Linux: **71 passaram**. Os avisos de deprecacao do TestClient nao foram causa de falha.
 
 ## Achados prioritários
 
@@ -50,13 +49,13 @@ O adapter qBittorrent exige URL, enquanto o multipart do gateway produz `torrent
 
 Ação: fechar C01 com contratos observados nas versões escolhidas, usar exatamente os metadados verificados e implementar a validação integral de C04 antes de liberar o upstream.
 
-### R03 — P1: permits não são persistentes nem atômicos
+### R03 — P1: permits exigem reconciliacao externa antes da producao
 
-`gateway/permits.py:26` mantém um dicionário local. `authorize`, nas linhas 70–71, verifica resultado e executa o efeito sem lock ou transação. Campos de reserva são opcionais e não são conferidos no SQLite.
+gateway/permits.py agora usa locks por token em memoria e uma tabela SQLite com transicao atomica authorized -> dispatching -> confirmed/unknown. O estado sobrevive a reinicio quando o gateway recebe HOMESERVER_DB_PATH, e uma segunda chamada retorna o resultado confirmado ou bloqueia um efeito cujo resultado ficou incerto. O digest de metadado tambem e comparado ao permit.
 
-Reprodução local com duas threads e uma barreira: **duas chamadas ao efeito remoto para o mesmo permit**. Reiniciar o processo apaga o registro; uma falha após o efeito e antes de salvar o resultado deixa a operação sem reconciliação de resultado incerto.
+Ainda falta reconciliar unknown por identidade no qBittorrent e integrar a emissao dos permits ao scheduler persistente; portanto a garantia nao esta pronta para aquisicao real.
 
-Ação: usar a tabela persistente de permits, transições atômicas e reconciliação por identidade antes de repetir efeitos. Cobrir concorrência, crash e resposta perdida.
+Acao: implementar a consulta por infohash/categoria antes de qualquer repeticao e ligar a emissao ao fluxo de reserva.
 
 ### R04 — P1: deploy e rollback alteram o marcador sem implantar a aplicação
 
@@ -74,13 +73,13 @@ Consequência: os testes provam cópia/checksum de fixtures, não recuperação 
 
 Ação: implementar O01 antes de introduzir biblioteca real: captura consistente com recuperação do estado da stack, staging limitado e envio externo criptografado com retenção.
 
-### R06 — P1: restore escapa da raiz permitida e recovery não bloqueia a aplicação
+### R06 — P1: restore agora e confinado, mas recovery ainda nao bloqueia a aplicacao
 
-`scripts/restore.sh:35` confere prefixo textual e apenas o symlink do destino final. Não canonicaliza `..` nem valida symlinks nos ancestrais. Reprodução Linux com dados sintéticos: `allowed/../escaped` retornou 0 e escreveu fora de `BACKUP_RESTORE_ROOT`. Nenhum diretório de produção foi usado.
+restore.sh agora canonicaliza raiz e destino, exige caminho absoluto, recusa .., symlinks ancestrais e destinos fora de BACKUP_RESTORE_ROOT. O teste de regressao cobre o escape allowed/../escaped.
 
-O arquivo `RECOVERY_MODE` escrito na linha 46 não é lido pela API, worker ou gateway. `ControlState.admission_enabled` começa como `True`. Portanto, o marcador não implementa o bloqueio de recuperação previsto em O01.
+O marcador RECOVERY_MODE ainda nao e consumido pela API, worker ou gateway; ControlState.admission_enabled continua iniciando habilitado. O bloqueio efetivo de recuperacao permanece aberto.
 
-Ação: validar caminhos resolvidos e confinamento de origem/destino; implementar modo recovery efetivo nos processos e testá-lo iniciando uma instância restaurada.
+Acao: ler o marcador em todos os processos, iniciar restauracoes com admissao desabilitada e testar a liberacao somente apos reconciliacao.
 
 ### R07 — P1: Compose bloqueia saída externa e contém inconsistências de volumes
 
@@ -92,13 +91,13 @@ Em produção, Seerr, Prowlarr, telemetria e Mosquitto mantêm volumes nomeados 
 
 Ação: validar o Compose combinado por ambiente, corrigir mounts/egress/persistência e ensaiar permissões e hardlinks dentro dos containers.
 
-### R08 — P1: readiness pode declarar pronto sem invariantes essenciais
+### R08 — P1: readiness foi endurecida, mas ainda depende do processo operacional
 
-`api/app.py:125` testa tokens, raízes configuradas e existência do planner, mas não banco/schema, UUID, idade da medição de capacidade ou disponibilidade operacional do worker.
+api/app.py agora exige tokens, raizes/planner, caminho de banco inicializado e snapshot de capacidade com filesystem, total/free e timestamp validos. Os testes cobrem ausencia de banco e capacidade.
 
-Reprodução: `ControlState` com diretório comum existente, dois tokens e sem banco nem UUID retornou **HTTP 200, `admission_enabled: true`**. Diretórios inexistentes são rejeitados pelo planner, mas um diretório existente não comprova a montagem física esperada.
+Ainda falta distinguir liveness, readiness e recovery e registrar a saude do worker separado. Uma resposta 200 local nao substitui a montagem UUID real.
 
-Ação: tornar readiness dependente das invariantes persistentes e da medição validada; separar liveness, readiness e recuperação. Incorporar esses casos no smoke.
+Acao: incorporar estado do worker e idade maxima da medicao no smoke e validar no Legion.
 
 ### R09 — P1: telemetria e notificações não têm execução integrada
 
@@ -108,31 +107,27 @@ Eventos e ack da API estão em memória; a rota de limite de upload apenas salva
 
 Ação: completar M01/M02 com coleta periódica, snapshot, cursor/outbox persistentes e transportes reais; depois implementar e validar M03 na revisão exata da placa.
 
-### R10 — P1: CI Linux falha e imagens não reproduzem o ambiente testado
+### R10 — P1: base Linux e imagens foram corrigidas; builds ainda precisam de prova
 
-`tests/unit/test_probe.py:17` escreve um `.cmd` com `@echo` e tenta executá-lo diretamente no Linux. A falha reproduzida é `PermissionError`, encapsulada em `MediaProbeError`. O teste de JSON inválido também usa `.cmd` e pode passar pelo erro de execução em vez de verificar o parser.
+As fixtures de FFprobe usam o interpretador Python, e make lint agora inclui scripts. Os Dockerfiles copiam uv.lock, instalam uv fixado e executam uv sync --frozen --no-dev --no-install-project; o control tambem instala FFmpeg.
 
-Ambos os Dockerfiles usam `pip install` sem versões e não copiam `uv.lock`; as imagens não usam necessariamente as dependências da suíte. O Dockerfile control também não instala o FFprobe necessário à validação de mídia.
+A suite Linux passou. Ainda falta construir as imagens em um daemon Docker e provar que os processos reais iniciam com os healthchecks. O CI agora executa o alvo smoke completo, incluindo os scripts Bash.
 
-`make smoke` ignora os quatro testes `.sh`, e o CI não chama esse alvo. O teste de deploy verifica somente rejeição de um manifesto inválido; o de restauração usa texto chamado `control.sqlite3`, sem iniciar um controlador restaurado. Essas coberturas não comprovam O01/O02.
+### R11 — P1: workflow de deploy agora exige CI aprovado e manifesto
 
-Ação: fixtures portáveis com o interpretador Python, instalação travada nas imagens, dependências de execução explícitas e testes dos processos/serviços reais.
+.github/workflows/deploy.yml permanece somente workflow_dispatch, serializado sem cancelamento. O job valida SHA lowercase, confirma o checkout, consulta HomeServer CI concluido com sucesso para o mesmo SHA em main, aceita somente caminhos do workspace ou HTTPS, transfere artefato e manifesto e chama deploy.sh --manifest sem interpolar inputs diretamente em comandos shell.
 
-### R11 — P1: workflow de deploy não exige CI aprovado nem disponibiliza o artefato
+A publicacao automatica de artefatos pelo CI, a identidade do host e a transferencia Tailscale/SCP ainda nao foram verificadas em uma conta/Legion reais. O deploy continua manual e fail-closed.
 
-`.github/workflows/deploy.yml:32` compara o checkout ao SHA informado, mas não verifica resultado de CI ou pertencimento à branch/release confiável. O input de artefato diz aceitar caminho/URL, mas o job apenas passa esse texto a `scp`; não baixa artefato do CI, não transfere seu manifesto e o CI atual não o constrói/publica.
+Acao: adicionar build/publicacao identificada no CI quando o contrato de release estiver fechado e fazer um ensaio manual com host/known-hosts administrados.
 
-Ação: produzir artefato e manifesto identificados, exigir CI aprovado para o SHA exato, validar origem confiável e transferir ambos antes do acesso de implantação. Evitar interpolação direta de inputs em shell; passar valores por ambiente e validá-los.
+### R12 — P2: bootstrap e evidencias ainda nao correspondem ao aceite
 
-### R12 — P2: bootstrap e evidências ainda não correspondem ao aceite
+scripts/lib/bootstrap.sh ainda verifica apenas um subconjunto das dependencias; apply_missing registra estados sem instalar requisitos, e check_power nao prova a politica efetiva. A auditoria fixture nao e evidencia fisica.
 
-`scripts/lib/bootstrap.sh` verifica apenas um subconjunto das dependências; `apply_missing` registra estados, mas não instala os requisitos faltantes. `check_power` confere existência de logind.conf, não a política efetiva. Não atende ainda a reconstrução fresh de I02.
+acceptance.md continua sem matriz individual A01-A34. O repositorio agora esta inicializado e os commits sao rastreaveis, mas bootstrap, inventario real e aceite permanecem abertos.
 
-A auditoria marca qualquer comando bem-sucedido como `verified`, sem interpretar suas propriedades. O teste de auditoria deixa `AUDIT_REPORT_PATH` no padrão e sobrescreve `docs/evidence/server-audit.md` com fixtures. O arquivo atual já contém `fixture-safe-value` com status geral `verified`, que não deve ser usado como evidência física.
-
-`acceptance.md` contém uma declaração geral, sem matriz individual A01–A34. Parte das pendências é de implementação local, não apenas `blocked_external`. A maior parte do código ainda aparece como não rastreada no Git; o checkout Linux existente em `/home/reis/HomeServer` contém somente documentos e não representa esta implementação.
-
-Ação: separar fixtures de relatórios reais, classificar fatos corretamente, implementar bootstrap conforme escopo e manter uma matriz por tarefa/critério com evidência e ambiente.
+Acao: separar relatorios fixture dos reais, classificar cada observacao como reported, verified, missing ou unknown e preencher a matriz por ambiente.
 
 ## Estado dos subplanos
 

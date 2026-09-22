@@ -3,8 +3,8 @@
 PYTHON ?= python3
 
 lint:
-	$(PYTHON) -m ruff check services tests
-	$(PYTHON) -m compileall -q services
+	$(PYTHON) -m ruff check services tests scripts
+	$(PYTHON) -m compileall -q services scripts
 	@if command -v shellcheck >/dev/null 2>&1; then shellcheck scripts/*.sh scripts/lib/*.sh; fi
 	@for file in scripts/*.sh scripts/lib/*.sh; do bash -n "$$file"; done
 
@@ -22,3 +22,4 @@ compose-check:
 
 smoke:
 	$(PYTHON) -m pytest tests/system -q
+	@for file in tests/system/*.sh; do bash "$$file"; done

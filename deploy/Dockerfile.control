@@ -1,6 +1,12 @@
 FROM python:3.12.11-slim
 WORKDIR /app
-COPY pyproject.toml /app/pyproject.toml
+COPY pyproject.toml uv.lock /app/
 COPY services/control/src /app/services/control/src
 ENV PYTHONPATH=/app/services/control/src
-RUN pip install --no-cache-dir fastapi uvicorn httpx python-multipart pydantic PyYAML
+ENV PATH=/app/.venv/bin:$PATH
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir uv==0.8.0 \
+    && uv sync --frozen --no-dev --no-install-project \
+    && rm -rf /root/.cache

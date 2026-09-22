@@ -29,3 +29,5 @@ jobs:
         run: uv run make test-integration
       - name: Compose render
         run: uv run make compose-check
+      - name: Smoke tests
+        run: uv run make smoke
