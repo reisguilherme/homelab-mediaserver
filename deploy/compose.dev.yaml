@@ -1,20 +1,21 @@
-# Development state is isolated below HOMESERVER_RUNTIME (default .runtime/dev).
+# Development state is isolated below HOMESERVER_RUNTIME (default
+# ../.runtime/dev because Compose resolves relative bind sources from this deploy directory).
 services:
   jellyfin:
     ports:
       - "127.0.0.1:18096:8096"
     volumes:
       - type: bind
-        source: ${HOMESERVER_APPDATA_ROOT:-.runtime/dev/appdata}/jellyfin
+        source: ${HOMESERVER_APPDATA_ROOT:-../.runtime/dev/appdata}/jellyfin
         target: /config
         bind: {create_host_path: false}
       - type: bind
-        source: ${HOMESERVER_MEDIA_ROOT:-.runtime/dev/data}
-        target: /data
+        source: ${HOMESERVER_MEDIA_ROOT:-../.runtime/dev/data}
+        target: /data/media
         read_only: true
         bind: {create_host_path: false}
       - type: bind
-        source: ${HOMESERVER_TRANSCODE_ROOT:-.runtime/dev/transcode}
+        source: ${HOMESERVER_TRANSCODE_ROOT:-../.runtime/dev/transcode}
         target: /transcode
         bind: {create_host_path: false}
   seerr:
@@ -23,33 +24,33 @@ services:
     ports: ["127.0.0.1:18989:8989"]
     volumes:
       - type: bind
-        source: ${HOMESERVER_APPDATA_ROOT:-.runtime/dev/appdata}/sonarr
+        source: ${HOMESERVER_APPDATA_ROOT:-../.runtime/dev/appdata}/sonarr
         target: /config
         bind: {create_host_path: false}
       - type: bind
-        source: ${HOMESERVER_MEDIA_ROOT:-.runtime/dev/data}
+        source: ${HOMESERVER_MEDIA_ROOT:-../.runtime/dev/data}
         target: /data
         bind: {create_host_path: false}
   radarr:
     ports: ["127.0.0.1:17878:7878"]
     volumes:
       - type: bind
-        source: ${HOMESERVER_APPDATA_ROOT:-.runtime/dev/appdata}/radarr
+        source: ${HOMESERVER_APPDATA_ROOT:-../.runtime/dev/appdata}/radarr
         target: /config
         bind: {create_host_path: false}
       - type: bind
-        source: ${HOMESERVER_MEDIA_ROOT:-.runtime/dev/data}
+        source: ${HOMESERVER_MEDIA_ROOT:-../.runtime/dev/data}
         target: /data
         bind: {create_host_path: false}
   qbittorrent:
     ports: ["127.0.0.1:18080:8080"]
     volumes:
       - type: bind
-        source: ${HOMESERVER_APPDATA_ROOT:-.runtime/dev/appdata}/qbittorrent
+        source: ${HOMESERVER_APPDATA_ROOT:-../.runtime/dev/appdata}/qbittorrent
         target: /config
         bind: {create_host_path: false}
       - type: bind
-        source: ${HOMESERVER_MEDIA_ROOT:-.runtime/dev/data}
+        source: ${HOMESERVER_MEDIA_ROOT:-../.runtime/dev/data}
         target: /data
         bind: {create_host_path: false}
   control-api:
@@ -62,28 +63,48 @@ services:
       HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
     volumes:
       - type: bind
-        source: ${HOMESERVER_APPDATA_ROOT:-.runtime/dev/appdata}/control
+        source: ${HOMESERVER_APPDATA_ROOT:-../.runtime/dev/appdata}/control
         target: /var/lib/homeserver
         bind: {create_host_path: false}
       - type: bind
-        source: ${HOMESERVER_MEDIA_ROOT:-.runtime/dev/data}
+        source: ${HOMESERVER_MEDIA_ROOT:-../.runtime/dev/data}
         target: /data
         read_only: true
         bind: {create_host_path: false}
   telemetry:
     ports: ["127.0.0.1:18081:8080"]
+  control-worker:
+    environment:
+      HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
+      HOMESERVER_SEERR_URL: ${HOMESERVER_SEERR_URL:-}
+      HOMESERVER_SEERR_API_KEY: ${HOMESERVER_SEERR_API_KEY:-}
+      HOMESERVER_CAPACITY_SNAPSHOT: ${HOMESERVER_CAPACITY_SNAPSHOT:-/run/homeserver/capacity.json}
+    volumes:
+      - type: bind
+        source: ${HOMESERVER_APPDATA_ROOT:-../.runtime/dev/appdata}/control
+        target: /var/lib/homeserver
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HOMESERVER_MEDIA_ROOT:-../.runtime/dev/data}
+        target: /data
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HOMESERVER_RUNTIME:-../.runtime/dev}/run
+        target: /run/homeserver
+        read_only: true
+        bind: {create_host_path: false}
   download-gateway:
     environment:
       HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
     volumes:
       - type: bind
-        source: ${HOMESERVER_APPDATA_ROOT:-.runtime/dev/appdata}/control
+        source: ${HOMESERVER_APPDATA_ROOT:-../.runtime/dev/appdata}/control
         target: /var/lib/homeserver
         bind: {create_host_path: false}
   mosquitto:
     volumes:
       - type: bind
-        source: ${HOMESERVER_MQTT_PASSWD:-.runtime/dev/mosquitto/passwd}
+        source: ${HOMESERVER_MQTT_PASSWD:-../.runtime/dev/mosquitto/passwd}
         target: /mosquitto/config/passwd
         read_only: true
         bind: {create_host_path: false}

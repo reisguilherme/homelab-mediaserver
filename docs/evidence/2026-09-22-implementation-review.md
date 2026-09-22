@@ -4,6 +4,8 @@
 
 Após o diagnóstico inicial, o branch `codex/implementation-safety` recebeu uma primeira correção de base: fixtures de FFprobe portáveis, permits com transição atômica em memória/SQLite e digest de metadado, readiness dependente de banco/capacidade, restore confinado por caminho canônico e configuração do gateway para o banco compartilhado. Os testes regressivos foram escritos antes das correções; a validação Linux posterior passou. Os demais bloqueios deste documento continuam abertos.
 
+O worker também passou a ter um ciclo explícito de reconciliação de pedidos Seerr aprovados para reservas persistentes. Ele permanece fail-closed quando URL, credencial ou snapshot de capacidade não estão configurados e não dispara Arr/qBittorrent; busca, validação, importação, eventos e retomada continuam etapas posteriores.
+
 ## Parecer
 
 O projeto tem uma base de código e testes útil, mas os planos não foram integralmente executados. O estado observado é de implementação parcial, com componentes isolados e fluxos de produção ainda incompletos. Não há evidência suficiente para aprovar G0–G6 ou liberar aquisições reais.
@@ -32,9 +34,9 @@ Total pytest no Linux: **58 passaram e 1 falhou**. Os avisos de depreciação do
 
 ### R01 — P1: o worker não executa o ciclo de automação
 
-`services/control/src/homeserver_control/worker/__main__.py:29` apenas espera com `time.sleep`. Não instancia nem chama polling do Seerr, seleção, scheduler, dispatch, reconciliação, validação, importação, exclusão ou emissão de eventos. A API mantém fila, catálogo e eventos em memória; o processo worker separado não compartilha esses objetos.
+Na revisão inicial, `services/control/src/homeserver_control/worker/__main__.py:29` apenas esperava com `time.sleep`. O incremento atual adicionou `worker/runtime.py` e um ciclo opcional de polling do Seerr que cria reservas persistentes. Ainda não instancia seleção, dispatch, reconciliação de downloads, validação, importação, exclusão ou emissão persistente de eventos. A API mantém fila, catálogo e eventos em memória; o processo worker separado ainda não compartilha esses objetos.
 
-Consequência: subir os containers não produz o fluxo pedido → reserva → download → disponível. C01–C06 permanecem parcialmente implementadas. As telas HTML são textos estáticos e não apresentam fila dinâmica, login por sessão ou confirmação operacional de exclusão.
+Consequência: com as variáveis de integração ausentes, subir os containers continua em modo ocioso seguro; mesmo configurado, o ciclo atual termina em pedido → reserva. O fluxo reserva → download → disponível ainda não é executado. C01–C06 permanecem parcialmente implementadas. As telas HTML são textos estáticos e não apresentam fila dinâmica, login por sessão ou confirmação operacional de exclusão.
 
 Ação: implementar a composição dos serviços e máquina de estados persistente; testar o fluxo completo e retomada após reinício em processos separados.
 

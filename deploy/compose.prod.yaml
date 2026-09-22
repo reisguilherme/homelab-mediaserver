@@ -82,6 +82,9 @@ services:
   control-worker:
     environment:
       HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
+      HOMESERVER_SEERR_URL: ${HOMESERVER_SEERR_URL:-}
+      HOMESERVER_SEERR_API_KEY: ${HOMESERVER_SEERR_API_KEY:-}
+      HOMESERVER_CAPACITY_SNAPSHOT: ${HOMESERVER_CAPACITY_SNAPSHOT:-/run/homeserver/capacity.json}
     volumes:
       - type: bind
         source: /srv/appdata/control
@@ -90,6 +93,11 @@ services:
       - type: bind
         source: /srv/data
         target: /data
+        bind: {create_host_path: false}
+      - type: bind
+        source: /run/homeserver
+        target: /run/homeserver
+        read_only: true
         bind: {create_host_path: false}
   download-gateway:
     environment:
