@@ -140,10 +140,10 @@ Acao: separar relatorios fixture dos reais, classificar cada observacao como rep
 
 ## Próximos passos recomendados
 
-1. **Estabelecer a base Linux reproduzível:** preservar o trabalho atual, registrar arquivos em Git após revisão de segredos, definir checkout canônico no WSL e corrigir R10. Critério: suíte Linux e build das imagens com lockfile aprovados.
-2. **Fechar a prova de arquitetura G2 em dev:** corrigir Compose, capturar contratos nas versões fixadas e demonstrar Arr → gateway → qBittorrent com torrent de teste autorizado. Provar bloqueio de todas as rotas sem autorização e rejeição de metadados adulterados.
-3. **Completar o controlador/G3:** worker, permits persistentes, reconciliação, catálogo/fila/eventos e exclusão coordenada. Ensaiar filme, temporada completa e em lançamento, falta de espaço, concorrência e crash sem efeitos duplicados.
-4. **Concluir recuperação e release:** R04–R06, R08 e R11; demonstrar backup consistente, restore isolado sem admissão, deploy real e retorno após migração incompatível. Fazer isso antes de introduzir biblioteca real.
+1. **Concluir a base Linux reproduzível:** construir as imagens com lockfile em um daemon Docker e provar que os processos reais iniciam com healthchecks. O Git, a suíte Linux e o Compose renderizado já estão validados.
+2. **Fechar a prova de arquitetura G2 em dev:** corrigir o egress/persistência do Compose, capturar contratos nas versões fixadas e demonstrar Arr → gateway → qBittorrent com torrent de teste autorizado. Provar rejeição de conteúdo adulterado e URLs fora da allowlist.
+3. **Completar o controlador/G3:** integrar worker, permits persistentes, reconciliação, catálogo/fila/eventos e exclusão coordenada. Ensaiar filme, temporada completa e em lançamento, falta de espaço, concorrência e crash sem efeitos duplicados.
+4. **Concluir backup e release:** R04/R05/R08/R11; demonstrar backup consistente, restore isolado com RECOVERY_MODE, deploy real, migrações e retorno após falha incompatível. Fazer isso antes de introduzir biblioteca real.
 5. **Concluir a experiência:** coleta, MQTT, notificações e limite de upload; UI operacional; firmware CYD após identificar placa/tela/touch.
 6. **Validar no Legion:** inventário e UUID reais, UID/GID, hardlinks dentro dos containers, Intel UHD, SSH/Tailscale, destino Windows/SFTP, duas sessões de reprodução e ensaio de 48–72 horas. Preencher A01–A34 com data, versão e evidência.
 
