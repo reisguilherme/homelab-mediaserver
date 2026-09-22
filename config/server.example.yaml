@@ -1,0 +1,36 @@
+schema_version: 1
+server:
+  name: homeserver
+  mode: adopt
+  timezone: America/Sao_Paulo
+  ssh_alias: homeserver
+storage:
+  media_mount: /srv/data
+  media_uuid: REPLACE_WITH_FILESYSTEM_UUID
+  media_fstype: ext4
+  appdata: /srv/appdata
+  transcode: /srv/transcode
+  backup_staging: /srv/backup-staging
+  required_mount_options:
+    - noatime
+network:
+  allowed_lan_cidrs:
+    - 192.168.0.0/16
+  tailscale_required: true
+services:
+  required:
+    - docker
+    - tailscaled
+    - ssh
+    - lenovo-conservation.service
+  compose_project: homeserver
+identities:
+  linux_user: REPLACE_WITH_LINUX_USER
+  media_uid: REPLACE_WITH_MEDIA_UID
+  media_gid: REPLACE_WITH_MEDIA_GID
+  render_gid: REPLACE_WITH_RENDER_GID
+  video_gid: REPLACE_WITH_VIDEO_GID
+policy:
+  preserve_existing_power_config: true
+  preserve_existing_mounts: true
+  rtx_enabled: false

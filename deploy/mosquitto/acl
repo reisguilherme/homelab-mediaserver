@@ -1,0 +1,6 @@
+user telemetry-publisher
+topic write homeserver/v1/server/#
+
+user cyd-01
+topic read homeserver/v1/server/#
+topic write homeserver/v1/cyd-01/availability

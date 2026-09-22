@@ -1,0 +1,6 @@
+FROM python:3.12.11-slim
+WORKDIR /app
+COPY pyproject.toml /app/pyproject.toml
+COPY services/telemetry/src /app/services/telemetry/src
+ENV PYTHONPATH=/app/services/telemetry/src
+RUN pip install --no-cache-dir fastapi uvicorn pydantic httpx

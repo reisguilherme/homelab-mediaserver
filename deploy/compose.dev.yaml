@@ -1,0 +1,89 @@
+# Development state is isolated below HOMESERVER_RUNTIME (default .runtime/dev).
+services:
+  jellyfin:
+    ports:
+      - "127.0.0.1:18096:8096"
+    volumes:
+      - type: bind
+        source: ${HOMESERVER_APPDATA_ROOT:-.runtime/dev/appdata}/jellyfin
+        target: /config
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HOMESERVER_MEDIA_ROOT:-.runtime/dev/data}
+        target: /data
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HOMESERVER_TRANSCODE_ROOT:-.runtime/dev/transcode}
+        target: /transcode
+        bind: {create_host_path: false}
+  seerr:
+    ports: ["127.0.0.1:18091:5055"]
+  sonarr:
+    ports: ["127.0.0.1:18989:8989"]
+    volumes:
+      - type: bind
+        source: ${HOMESERVER_APPDATA_ROOT:-.runtime/dev/appdata}/sonarr
+        target: /config
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HOMESERVER_MEDIA_ROOT:-.runtime/dev/data}
+        target: /data
+        bind: {create_host_path: false}
+  radarr:
+    ports: ["127.0.0.1:17878:7878"]
+    volumes:
+      - type: bind
+        source: ${HOMESERVER_APPDATA_ROOT:-.runtime/dev/appdata}/radarr
+        target: /config
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HOMESERVER_MEDIA_ROOT:-.runtime/dev/data}
+        target: /data
+        bind: {create_host_path: false}
+  qbittorrent:
+    ports: ["127.0.0.1:18080:8080"]
+    volumes:
+      - type: bind
+        source: ${HOMESERVER_APPDATA_ROOT:-.runtime/dev/appdata}/qbittorrent
+        target: /config
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HOMESERVER_MEDIA_ROOT:-.runtime/dev/data}
+        target: /data
+        bind: {create_host_path: false}
+  control-api:
+    ports: ["127.0.0.1:18082:8080"]
+    environment:
+      HOMESERVER_MEDIA_ROOTS: /data/media:/data/torrents
+      HOMESERVER_ADMIN_TOKEN: ${HOMESERVER_ADMIN_TOKEN:-local-dev-only-admin}
+      HOMESERVER_CSRF_TOKEN: ${HOMESERVER_CSRF_TOKEN:-local-dev-only-csrf}
+      HOMESERVER_COLLECTOR_TOKEN: ${HOMESERVER_COLLECTOR_TOKEN:-local-dev-only-collector}
+      HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
+    volumes:
+      - type: bind
+        source: ${HOMESERVER_APPDATA_ROOT:-.runtime/dev/appdata}/control
+        target: /var/lib/homeserver
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HOMESERVER_MEDIA_ROOT:-.runtime/dev/data}
+        target: /data
+        read_only: true
+        bind: {create_host_path: false}
+  telemetry:
+    ports: ["127.0.0.1:18081:8080"]
+  download-gateway:
+    environment:
+      HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
+    volumes:
+      - type: bind
+        source: ${HOMESERVER_APPDATA_ROOT:-.runtime/dev/appdata}/control
+        target: /var/lib/homeserver
+        bind: {create_host_path: false}
+  mosquitto:
+    volumes:
+      - type: bind
+        source: ${HOMESERVER_MQTT_PASSWD:-.runtime/dev/mosquitto/passwd}
+        target: /mosquitto/config/passwd
+        read_only: true
+        bind: {create_host_path: false}

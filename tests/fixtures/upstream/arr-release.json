@@ -1,0 +1,9 @@
+[
+  {
+    "guid": "fixture-guid",
+    "indexerId": 1,
+    "title": "Fixture 2160p",
+    "size": 1000000,
+    "downloadUrl": "https://indexer.invalid/fixture.torrent"
+  }
+]

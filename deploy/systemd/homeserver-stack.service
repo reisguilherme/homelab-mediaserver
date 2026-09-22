@@ -1,0 +1,21 @@
+[Unit]
+Description=HomeServer Compose stack
+Requires=docker.service
+After=docker.service network-online.target tailscaled.service
+Wants=network-online.target
+RequiresMountsFor=/srv/data
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/homeserver/server.env
+WorkingDirectory=/opt/homeserver/current/deploy
+ExecStartPre=/opt/homeserver/current/scripts/check-mount.sh /srv/data ${HOMESERVER_MEDIA_UUID}
+ExecStartPre=/usr/bin/docker compose -f /opt/homeserver/current/deploy/compose.yaml -f /opt/homeserver/current/deploy/compose.prod.yaml config --quiet
+ExecStart=/usr/bin/docker compose -f /opt/homeserver/current/deploy/compose.yaml -f /opt/homeserver/current/deploy/compose.prod.yaml up --abort-on-container-exit
+ExecStop=/usr/bin/docker compose -f /opt/homeserver/current/deploy/compose.yaml -f /opt/homeserver/current/deploy/compose.prod.yaml stop
+Restart=always
+RestartSec=10s
+TimeoutStopSec=120s
+
+[Install]
+WantedBy=multi-user.target

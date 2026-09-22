@@ -1,0 +1,10 @@
+[Unit]
+Description=HomeServer consistent configuration backup
+After=homeserver-stack.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/homeserver/current/scripts/backup.sh --config /etc/homeserver/backup.env --capture-and-send
+Nice=10
+IOSchedulingClass=best-effort
+

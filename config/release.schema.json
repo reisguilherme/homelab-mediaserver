@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["schema_version", "git_commit", "database_schema", "requires_backup", "images", "config_checksums", "artifact_sha256"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "git_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "database_schema": {"type": "integer", "minimum": 1},
+    "requires_backup": {"type": "boolean"},
+    "images": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}},
+    "config_checksums": {"type": "object"},
+    "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

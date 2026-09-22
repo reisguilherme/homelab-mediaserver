@@ -1,0 +1,7 @@
+[Unit]
+Description=Stop HomeServer stack when the media UUID disappears
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/homeserver/server.env
+ExecStart=/usr/bin/bash -c 'if ! /opt/homeserver/current/scripts/check-mount.sh /srv/data ${HOMESERVER_MEDIA_UUID}; then /usr/bin/systemctl stop homeserver-stack.service; exit 1; fi'

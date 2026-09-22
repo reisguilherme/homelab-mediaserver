@@ -1,0 +1,110 @@
+services:
+  jellyfin:
+    ports:
+      - "${LAN_BIND_IP:-127.0.0.1}:8096:8096"
+    volumes:
+      - type: bind
+        source: /srv/appdata/jellyfin
+        target: /config
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/data/media
+        target: /data/media
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/transcode
+        target: /transcode
+        bind: {create_host_path: false}
+    devices:
+      - "${INTEL_RENDER_DEVICE:-/dev/dri/renderD128}:${INTEL_RENDER_DEVICE:-/dev/dri/renderD128}"
+  seerr:
+    ports:
+      - "${TAILSCALE_BIND_IP:-127.0.0.1}:5055:5055"
+  sonarr:
+    volumes:
+      - type: bind
+        source: /srv/appdata/sonarr
+        target: /config
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/data
+        target: /data
+        bind: {create_host_path: false}
+  radarr:
+    volumes:
+      - type: bind
+        source: /srv/appdata/radarr
+        target: /config
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/data
+        target: /data
+        bind: {create_host_path: false}
+  qbittorrent:
+    volumes:
+      - type: bind
+        source: /srv/appdata/qbittorrent
+        target: /config
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/data
+        target: /data
+        bind: {create_host_path: false}
+  bazarr:
+    volumes:
+      - type: bind
+        source: /srv/appdata/bazarr
+        target: /config
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/data/media
+        target: /data/media
+        bind: {create_host_path: false}
+  control-api:
+    ports: ["${TAILSCALE_BIND_IP:-127.0.0.1}:8080:8080"]
+    environment:
+      HOMESERVER_MEDIA_ROOTS: /data/media:/data/torrents
+      HOMESERVER_ADMIN_TOKEN: ${HOMESERVER_ADMIN_TOKEN:?set in /etc/homeserver/server.env}
+      HOMESERVER_CSRF_TOKEN: ${HOMESERVER_CSRF_TOKEN:?set in /etc/homeserver/server.env}
+      HOMESERVER_COLLECTOR_TOKEN: ${HOMESERVER_COLLECTOR_TOKEN:?set in /etc/homeserver/server.env}
+      HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
+    volumes:
+      - type: bind
+        source: /srv/appdata/control
+        target: /var/lib/homeserver
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/data
+        target: /data
+        read_only: true
+        bind: {create_host_path: false}
+  control-worker:
+    environment:
+      HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
+    volumes:
+      - type: bind
+        source: /srv/appdata/control
+        target: /var/lib/homeserver
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/data
+        target: /data
+        bind: {create_host_path: false}
+  download-gateway:
+    environment:
+      HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
+    volumes:
+      - type: bind
+        source: /srv/appdata/control
+        target: /var/lib/homeserver
+        bind: {create_host_path: false}
+  telemetry:
+    ports: ["${TAILSCALE_BIND_IP:-127.0.0.1}:8081:8080"]
+    environment:
+      HOMESERVER_TELEMETRY_SNAPSHOT: /run/homeserver/snapshot.json
+  mosquitto:
+    ports: ["${LAN_BIND_IP:-127.0.0.1}:8883:8883"]
+    volumes:
+      - /etc/homeserver/mqtt-certs:/mosquitto/certs:ro
+      - ./mosquitto/mosquitto.prod.conf:/mosquitto/config/mosquitto.conf:ro

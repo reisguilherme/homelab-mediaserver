@@ -1,0 +1,15 @@
+[Unit]
+Description=HomeServer host metrics snapshot
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/env python3 /opt/homeserver/current/scripts/host-metrics.py --output /run/homeserver/host.json
+RuntimeDirectory=homeserver
+RuntimeDirectoryMode=0750
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+

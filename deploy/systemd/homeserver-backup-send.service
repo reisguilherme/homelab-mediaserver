@@ -1,0 +1,7 @@
+[Unit]
+Description=Send pending HomeServer backups
+
+[Service]
+Type=oneshot
+ExecStart=/opt/homeserver/current/scripts/backup.sh --config /etc/homeserver/backup.env --send-pending
+

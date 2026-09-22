@@ -1,0 +1,133 @@
+name: homeserver
+
+networks:
+  apps:
+    internal: true
+  transfer:
+    internal: true
+  telemetry:
+    internal: true
+
+volumes:
+  jellyfin_appdata:
+  seerr_appdata:
+  sonarr_appdata:
+  radarr_appdata:
+  prowlarr_appdata:
+  qbittorrent_appdata:
+  bazarr_appdata:
+  control_state:
+  telemetry_state:
+  mosquitto_state:
+  media:
+  transcode:
+  host_metrics:
+    name: homeserver_host_metrics
+
+services:
+  jellyfin:
+    image: ${JELLYFIN_IMAGE:-jellyfin/jellyfin:10.10.7}
+    restart: "no"
+    networks: [apps, telemetry]
+    volumes:
+      - jellyfin_appdata:/config
+      - media:/data/media:ro
+      - transcode:/transcode
+
+  seerr:
+    image: ${SEERR_IMAGE:-fallenbagel/jellyseerr:2.7.3}
+    restart: "no"
+    networks: [apps]
+    volumes:
+      - seerr_appdata:/app/config
+
+  sonarr:
+    image: ${SONARR_IMAGE:-linuxserver/sonarr:4.0.15}
+    restart: "no"
+    networks: [apps]
+    volumes:
+      - sonarr_appdata:/config
+      - media:/data
+
+  radarr:
+    image: ${RADARR_IMAGE:-linuxserver/radarr:5.20.0}
+    restart: "no"
+    networks: [apps]
+    volumes:
+      - radarr_appdata:/config
+      - media:/data
+
+  prowlarr:
+    image: ${PROWLARR_IMAGE:-linuxserver/prowlarr:1.35.1}
+    restart: "no"
+    networks: [apps]
+    volumes:
+      - prowlarr_appdata:/config
+
+  qbittorrent:
+    image: ${QBITTORRENT_IMAGE:-linuxserver/qbittorrent:5.1.2}
+    restart: "no"
+    networks: [transfer]
+    volumes:
+      - qbittorrent_appdata:/config
+      - media:/data
+
+  bazarr:
+    image: ${BAZARR_IMAGE:-linuxserver/bazarr:1.5.1}
+    restart: "no"
+    networks: [apps]
+    volumes:
+      - bazarr_appdata:/config
+      - media:/data/media
+
+  control-api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.control
+    image: ${CONTROL_IMAGE:-homeserver-control:dev}
+    command: ["uvicorn", "homeserver_control.api.app:app", "--host", "0.0.0.0", "--port", "8080"]
+    restart: "no"
+    networks: [apps, telemetry]
+    volumes:
+      - control_state:/var/lib/homeserver
+
+  control-worker:
+    image: ${CONTROL_IMAGE:-homeserver-control:dev}
+    command: ["python", "-m", "homeserver_control.worker"]
+    restart: "no"
+    networks: [apps, transfer]
+    volumes:
+      - control_state:/var/lib/homeserver
+      - media:/data
+
+  download-gateway:
+    image: ${CONTROL_IMAGE:-homeserver-control:dev}
+    command: ["uvicorn", "homeserver_control.gateway.app:app", "--host", "0.0.0.0", "--port", "8081"]
+    restart: "no"
+    networks: [apps, transfer]
+    volumes:
+      - control_state:/var/lib/homeserver
+
+  telemetry:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.telemetry
+    image: ${TELEMETRY_IMAGE:-homeserver-telemetry:dev}
+    command: ["uvicorn", "homeserver_telemetry.app:app", "--host", "0.0.0.0", "--port", "8080"]
+    restart: "no"
+    networks: [telemetry]
+    volumes:
+      - telemetry_state:/var/lib/homeserver
+      - type: volume
+        source: host_metrics
+        target: /run/homeserver
+        read_only: true
+
+  mosquitto:
+    image: ${MOSQUITTO_IMAGE:-eclipse-mosquitto:2.0.22}
+    restart: "no"
+    networks: [telemetry]
+    volumes:
+      - mosquitto_state:/mosquitto/data
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/acl:/mosquitto/config/acl:ro

@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh HomeServer host metrics
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=15s
+AccuracySec=1s
+Unit=homeserver-metrics.service
+
+[Install]
+WantedBy=timers.target

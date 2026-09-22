@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://homeserver.invalid/contracts/telemetry-v1.schema.json",
+  "type": "object",
+  "required": ["schema_version", "sequence", "generated_at", "sources", "host", "capacity", "transfers", "downloads", "playback", "alerts"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "sequence": {"type": "integer", "minimum": 0},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "sources": {"type": "object", "additionalProperties": {"$ref": "#/$defs/source"}},
+    "host": {"$ref": "#/$defs/host"},
+    "capacity": {"$ref": "#/$defs/capacity"},
+    "transfers": {"$ref": "#/$defs/transfers"},
+    "downloads": {"type": "array", "items": {"$ref": "#/$defs/download"}, "maxItems": 100},
+    "playback": {"$ref": "#/$defs/playback"},
+    "alerts": {"type": "array", "items": {"$ref": "#/$defs/alert"}, "maxItems": 100}
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "required": ["status", "age_seconds"],
+      "properties": {
+        "status": {"enum": ["ok", "stale", "unknown", "error"]},
+        "age_seconds": {"type": ["number", "null"], "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "host": {
+      "type": "object",
+      "required": ["cpu_percent", "ram_percent", "cpu_celsius", "uptime_seconds"],
+      "properties": {
+        "cpu_percent": {"type": ["number", "null"], "minimum": 0, "maximum": 100},
+        "ram_percent": {"type": ["number", "null"], "minimum": 0, "maximum": 100},
+        "cpu_celsius": {"type": ["number", "null"]},
+        "uptime_seconds": {"type": ["integer", "null"], "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "capacity": {
+      "type": "object",
+      "required": ["total_bytes", "free_bytes", "reserved_unallocated_bytes", "admissible_bytes"],
+      "properties": {
+        "total_bytes": {"type": "integer", "minimum": 0},
+        "free_bytes": {"type": "integer", "minimum": 0},
+        "reserved_unallocated_bytes": {"type": "integer", "minimum": 0},
+        "admissible_bytes": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "transfers": {
+      "type": "object",
+      "required": ["download_bps", "upload_bps", "active_count", "queue_count"],
+      "properties": {
+        "download_bps": {"type": "integer", "minimum": 0},
+        "upload_bps": {"type": "integer", "minimum": 0},
+        "active_count": {"type": "integer", "minimum": 0},
+        "queue_count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "download": {
+      "type": "object",
+      "required": ["id", "title", "progress", "download_bps", "eta_seconds", "state"],
+      "properties": {
+        "id": {"type": "string"},
+        "title": {"type": "string"},
+        "progress": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "download_bps": {"type": "integer", "minimum": 0},
+        "eta_seconds": {"type": ["integer", "null"], "minimum": 0},
+        "state": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "playback": {
+      "type": "object",
+      "required": ["active_count", "remote_count", "items"],
+      "properties": {
+        "active_count": {"type": ["integer", "null"], "minimum": 0},
+        "remote_count": {"type": ["integer", "null"], "minimum": 0},
+        "items": {"type": "array", "items": {"type": "object"}}
+      },
+      "additionalProperties": false
+    },
+    "alert": {
+      "type": "object",
+      "required": ["id", "severity", "message"],
+      "properties": {
+        "id": {"type": "string"},
+        "severity": {"enum": ["info", "warning", "critical"]},
+        "message": {"type": "string"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

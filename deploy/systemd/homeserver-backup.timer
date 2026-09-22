@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily HomeServer backup capture
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=homeserver-backup.service
+
+[Install]
+WantedBy=timers.target
+

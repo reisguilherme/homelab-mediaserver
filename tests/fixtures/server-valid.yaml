@@ -1,0 +1,6 @@
+schema_version: 1
+server:
+  mode: adopt
+storage:
+  media_mount: /srv/data
+  media_uuid: fixture-uuid

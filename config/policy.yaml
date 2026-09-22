@@ -1,0 +1,28 @@
+schema_version: 1
+limits:
+  movie_bytes: 50000000000
+  episode_bytes: 5000000000
+  season_bytes: 100000000000
+  resolutions: [2160, 1080]
+  automatic_upgrades: false
+capacity:
+  media_mount: /data
+  floor_bytes: 20000000000
+  floor_fraction: 0.05
+  operation_margin_bytes: 1000000000
+  ongoing_season_reservation_bytes: 100000000000
+downloads:
+  max_active: 2
+  reconcile_seconds: 60
+  search_retry_minutes: 60
+  seed_upload_bps_idle: 2500000
+  seed_upload_bps_remote_playback: 625000
+telemetry:
+  transfer_seconds: 5
+  host_seconds: 15
+  stale_seconds: 30
+backup:
+  external_stale_hours: 72
+  retry_minutes: 60
+  staging_max_bytes: 20000000000
+  staging_generations: 3

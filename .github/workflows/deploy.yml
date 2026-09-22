@@ -1,0 +1,47 @@
+name: Deploy HomeServer
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Commit already validated by CI
+        required: true
+        type: string
+      artifact:
+        description: Release artifact path or URL
+        required: true
+        type: string
+
+concurrency:
+  group: homeserver-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.commit }}
+      - name: Verify commit is the requested revision
+        run: test "$(git rev-parse HEAD)" = "${{ inputs.commit }}"
+      - name: Connect to the private tailnet
+        uses: tailscale/github-action@780049a30b6ff5c378a9e7b389d15ece7a204888
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:homeserver-ci
+      - name: Transfer and deploy the identified artifact
+        env:
+          HOMESERVER_SSH_HOST: ${{ secrets.HOMESERVER_SSH_HOST }}
+          HOMESERVER_SSH_USER: ${{ secrets.HOMESERVER_SSH_USER }}
+        run: |
+          set -euo pipefail
+          scp "${{ inputs.artifact }}" "$HOMESERVER_SSH_USER@$HOMESERVER_SSH_HOST:/tmp/homeserver-release"
+          ssh "$HOMESERVER_SSH_USER@$HOMESERVER_SSH_HOST" \
+            "bash /opt/homeserver/current/scripts/deploy.sh --release '${{ inputs.commit }}' --artifact /tmp/homeserver-release --config /etc/homeserver/deploy.env"

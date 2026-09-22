@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "status": "development-fixtures-only",
+  "services": {
+    "seerr": {"image": "fallenbagel/jellyseerr:2.7.3", "api_contract": "v1"},
+    "sonarr": {"image": "linuxserver/sonarr:4.0.15", "api_contract": "v3"},
+    "radarr": {"image": "linuxserver/radarr:5.20.0", "api_contract": "v3"},
+    "qbittorrent": {"image": "linuxserver/qbittorrent:5.1.2", "api_contract": "v2"},
+    "bazarr": {"image": "linuxserver/bazarr:1.5.1", "api_contract": "v1"},
+    "jellyfin": {"image": "jellyfin/jellyfin:10.10.7", "api_contract": "sessions"}
+  },
+  "production_verified": false,
+  "note": "Replace with observed release/digest and sanitized captures before enabling acquisition."
+}

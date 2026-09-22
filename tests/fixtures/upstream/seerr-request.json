@@ -1,0 +1,6 @@
+{
+  "pageInfo": {"pages": 1, "page": 1},
+  "results": [
+    {"id": 1, "isApproved": true, "media": {"tmdbId": 123, "mediaType": "movie"}}
+  ]
+}

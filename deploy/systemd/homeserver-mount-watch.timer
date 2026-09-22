@@ -1,0 +1,11 @@
+[Unit]
+Description=Check HomeServer media mount frequently
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=15s
+AccuracySec=1s
+Unit=homeserver-mount-watch.service
+
+[Install]
+WantedBy=timers.target

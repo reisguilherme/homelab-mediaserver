@@ -1,0 +1,6 @@
+FROM python:3.12.11-slim
+WORKDIR /app
+COPY pyproject.toml /app/pyproject.toml
+COPY services/control/src /app/services/control/src
+ENV PYTHONPATH=/app/services/control/src
+RUN pip install --no-cache-dir fastapi uvicorn httpx python-multipart pydantic PyYAML
