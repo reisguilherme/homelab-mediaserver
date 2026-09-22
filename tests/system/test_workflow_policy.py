@@ -25,3 +25,14 @@ def test_ci_runs_on_pull_requests_without_production_secrets() -> None:
     assert "make compose-check" in workflow
     assert "make smoke" in workflow
     assert "production" not in workflow.lower()
+
+
+def test_capacity_snapshot_is_published_and_available_to_control_api() -> None:
+    service = Path("deploy/systemd/homeserver-metrics.service").read_text(encoding="utf-8")
+    compose = Path("deploy/compose.prod.yaml").read_text(encoding="utf-8")
+    assert "capacity-snapshot.py" in service
+    assert "HOMESERVER_MEDIA_UUID" in service
+    assert "RuntimeDirectoryPreserve=yes" in service
+    api = compose.split("  control-api:\n", 1)[1].split("  control-worker:\n", 1)[0]
+    assert "HOMESERVER_CAPACITY_SNAPSHOT:" in api
+    assert "source: /run/homeserver" in api

@@ -19,10 +19,10 @@ def recovery_mode_blocks(path: str | Path | None) -> bool:
         return False
     marker = Path(path)
     try:
-        if not marker.exists():
-            return False
         if marker.is_symlink():
             return True
+        if not marker.exists():
+            return False
         if not marker.is_file():
             return True
         values: dict[str, str] = {}

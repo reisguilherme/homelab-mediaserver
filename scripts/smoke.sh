@@ -19,7 +19,7 @@ if [[ "$environment" == prod ]]; then
   : "${HOMESERVER_MEDIA_UUID:?HOMESERVER_MEDIA_UUID is required for prod smoke}"
   bash "$(dirname "${BASH_SOURCE[0]}")/check-mount.sh" "$HOMESERVER_MEDIA_PATH" "$HOMESERVER_MEDIA_UUID" >/dev/null
 fi
-if [[ -n "${HOMESERVER_HEALTH_URL:-}" ]] && command -v curl >/dev/null 2>&1; then
-  curl --fail --silent --show-error --max-time 5 "$HOMESERVER_HEALTH_URL/health/live" >/dev/null
-fi
+: "${HOMESERVER_HEALTH_URL:?HOMESERVER_HEALTH_URL is required for smoke}"
+command -v curl >/dev/null 2>&1 || { echo 'curl is required for smoke' >&2; exit 2; }
+curl --fail --silent --show-error --max-time 5 "${HOMESERVER_HEALTH_URL%/}/health/ready" >/dev/null
 echo "smoke checks passed: $environment"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +29,31 @@ def _default_capacity() -> dict[str, Any]:
         "admissible_bytes": 0,
         "measured_at": None,
     }
+
+
+def _capacity_from_snapshot(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return _default_capacity()
+        measured = payload.get("measured_at")
+        total = payload.get("total_bytes")
+        free = payload.get("free_bytes")
+        if (
+            not isinstance(payload.get("filesystem_id"), str)
+            or not payload["filesystem_id"]
+            or type(total) is not int
+            or total <= 0
+            or type(free) is not int
+            or free < 0
+            or free > total
+            or type(measured) not in (int, float)
+            or not 0 <= time.time() - measured <= 30
+        ):
+            return _default_capacity()
+        return payload
+    except (OSError, ValueError, TypeError):
+        return _default_capacity()
 
 
 @dataclass
@@ -62,8 +89,6 @@ class ControlState:
         if self.db_path is not None:
             self.repository = ReservationRepository(self.db_path)
             self.repository.initialize()
-        if recovery_mode_blocks(self.recovery_mode_path):
-            self.admission_enabled = False
 
 
 class DeletionPreviewRequest(BaseModel):
@@ -104,9 +129,19 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
             recovery_mode_path=os.environ.get(
                 "HOMESERVER_RECOVERY_MODE", "/var/lib/homeserver/RECOVERY_MODE"
             ),
+            capacity_provider=lambda: _capacity_from_snapshot(
+                Path(
+                    os.environ.get(
+                        "HOMESERVER_CAPACITY_SNAPSHOT", "/run/homeserver/capacity.json"
+                    )
+                )
+            ),
         )
 
     app = FastAPI(title="HomeServer control API", version="1")
+
+    def admission_enabled() -> bool:
+        return state.admission_enabled and not recovery_mode_blocks(state.recovery_mode_path)
 
     def require_admin(
         x_admin_token: str | None,
@@ -118,10 +153,14 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
             raise HTTPException(status_code=401, detail="invalid admin credential")
         if mutation and csrf != state.csrf_token:
             raise HTTPException(status_code=403, detail="csrf token required")
+        if mutation and not admission_enabled():
+            raise HTTPException(status_code=503, detail="admission blocked by recovery mode")
 
-    def require_collector(x_collector_token: str | None) -> None:
+    def require_collector(x_collector_token: str | None, *, mutation: bool = False) -> None:
         if not _configured(state.collector_token) or x_collector_token != state.collector_token:
             raise HTTPException(status_code=401, detail="invalid collector credential")
+        if mutation and not admission_enabled():
+            raise HTTPException(status_code=503, detail="admission blocked by recovery mode")
 
     @app.get("/health/live")
     def health_live() -> dict[str, str]:
@@ -137,14 +176,15 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
             isinstance(capacity, dict)
             and isinstance(capacity.get("filesystem_id"), str)
             and bool(capacity["filesystem_id"])
-            and isinstance(capacity.get("total_bytes"), int)
+            and type(capacity.get("total_bytes")) is int
             and capacity["total_bytes"] > 0
-            and isinstance(capacity.get("free_bytes"), int)
+            and type(capacity.get("free_bytes")) is int
             and capacity["free_bytes"] >= 0
-            and capacity.get("measured_at") is not None
+            and type(capacity.get("measured_at")) in (int, float)
+            and 0 <= time.time() - capacity["measured_at"] <= 30
         )
         ready = (
-            state.admission_enabled
+            admission_enabled()
             and _configured(state.admin_token)
             and _configured(state.collector_token)
             and bool(state.media_roots)
@@ -155,7 +195,7 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
         if not ready:
             return JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"status": "blocked", "admission_enabled": state.admission_enabled},
+                content={"status": "blocked", "admission_enabled": admission_enabled()},
             )
         return {"status": "ready", "admission_enabled": True}
 
@@ -295,7 +335,7 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
         payload: EventAckRequest,
         x_collector_token: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        require_collector(x_collector_token)
+        require_collector(x_collector_token, mutation=True)
         if payload.sequence < state.acknowledged_event_id:
             raise HTTPException(status_code=409, detail="acknowledgement moved backwards")
         state.acknowledged_event_id = payload.sequence
@@ -306,7 +346,7 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
         payload: SeedLimitRequest,
         x_collector_token: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        require_collector(x_collector_token)
+        require_collector(x_collector_token, mutation=True)
         state.seed_limit = payload.model_dump()
         return state.seed_limit
 

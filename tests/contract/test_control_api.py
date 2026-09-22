@@ -1,4 +1,6 @@
+import json
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -29,7 +31,7 @@ def client() -> TestClient:
             "free_bytes": 70_000_000_000,
             "reserved_unallocated_bytes": 0,
             "admissible_bytes": 49_000_000_000,
-            "measured_at": "2026-09-22T12:00:00Z",
+            "measured_at": datetime.now(UTC).timestamp(),
         },
     )
     test_client = TestClient(create_app(state=state))
@@ -142,7 +144,7 @@ def test_recovery_marker_blocks_readiness_on_process_start() -> None:
             "filesystem_id": "uuid-fixture",
             "total_bytes": 100,
             "free_bytes": 50,
-            "measured_at": "2026-09-22T12:00:00Z",
+            "measured_at": datetime.now(UTC).timestamp(),
         },
     )
     try:
@@ -150,6 +152,53 @@ def test_recovery_marker_blocks_readiness_on_process_start() -> None:
         response = client.get("/health/ready")
         assert response.status_code == 503
         assert response.json()["admission_enabled"] is False
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_recovery_marker_added_after_start_blocks_readiness_and_mutations() -> None:
+    root = Path(".runtime") / f"recovery-live-{uuid4().hex}"
+    root.mkdir(parents=True)
+    media = root / "media"
+    media.mkdir()
+    item = media / "movie.mkv"
+    item.write_bytes(b"fixture")
+    marker = root / "RECOVERY_MODE"
+    state = ControlState(
+        media_roots=(media,),
+        media_catalog={"movie:tmdb:1": (item,)},
+        admin_token="admin-token",
+        csrf_token="csrf-token",
+        collector_token="collector-token",
+        db_path=root / "control.sqlite",
+        recovery_mode_path=marker,
+        capacity_provider=lambda: {
+            "filesystem_id": "uuid-fixture",
+            "total_bytes": 100,
+            "free_bytes": 50,
+            "measured_at": datetime.now(UTC).timestamp(),
+        },
+    )
+    try:
+        client = TestClient(create_app(state=state))
+        assert client.get("/health/ready").status_code == 200
+        marker.write_text("admission_enabled=false\n", encoding="utf-8")
+        blocked = client.get("/health/ready")
+        assert blocked.status_code == 503
+        assert blocked.json()["admission_enabled"] is False
+        preview = client.post(
+            "/api/v1/deletions/preview",
+            headers=_admin_headers(),
+            json={"media_key": "movie:tmdb:1"},
+        )
+        assert preview.status_code == 503
+        seed_limit = client.post(
+            "/internal/v1/seed-limit",
+            headers={"X-Collector-Token": "collector-token"},
+            json={"bytes_per_second": 625_000, "reason": "remote_playback"},
+        )
+        assert seed_limit.status_code == 503
+        assert item.exists()
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -175,3 +224,54 @@ def test_readiness_requires_persistent_state_and_valid_capacity() -> None:
         assert response.status_code == 503
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def test_capacity_provider_reads_snapshot_and_rejects_stale_data(tmp_path: Path) -> None:
+    from homeserver_control.api.app import _capacity_from_snapshot
+
+    path = tmp_path / "capacity.json"
+    snapshot = {
+        "filesystem_id": "uuid-fixture",
+        "total_bytes": 1000,
+        "free_bytes": 500,
+        "measured_at": datetime.now(UTC).timestamp(),
+    }
+    path.write_text(json.dumps(snapshot), encoding="utf-8")
+    assert _capacity_from_snapshot(path)["filesystem_id"] == "uuid-fixture"
+
+    snapshot["measured_at"] -= 90
+    path.write_text(json.dumps(snapshot), encoding="utf-8")
+    assert _capacity_from_snapshot(path)["filesystem_id"] is None
+
+    snapshot["measured_at"] = datetime.now(UTC).timestamp() + 90
+    path.write_text(json.dumps(snapshot), encoding="utf-8")
+    assert _capacity_from_snapshot(path)["filesystem_id"] is None
+
+
+def test_default_app_readiness_uses_capacity_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media = tmp_path / "media"
+    media.mkdir()
+    snapshot = tmp_path / "capacity.json"
+    snapshot.write_text(
+        json.dumps(
+            {
+                "filesystem_id": "uuid-fixture",
+                "total_bytes": 1000,
+                "free_bytes": 500,
+                "measured_at": datetime.now(UTC).timestamp(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOMESERVER_MEDIA_ROOTS", str(media))
+    monkeypatch.setenv("HOMESERVER_DB_PATH", str(tmp_path / "control.sqlite"))
+    monkeypatch.setenv("HOMESERVER_ADMIN_TOKEN", "admin-token")
+    monkeypatch.setenv("HOMESERVER_COLLECTOR_TOKEN", "collector-token")
+    monkeypatch.setenv("HOMESERVER_CAPACITY_SNAPSHOT", str(snapshot))
+    monkeypatch.setenv("HOMESERVER_RECOVERY_MODE", str(tmp_path / "RECOVERY_MODE"))
+    client = TestClient(create_app())
+    assert client.get("/health/ready").status_code == 200
+    snapshot.unlink()
+    assert client.get("/health/ready").status_code == 503

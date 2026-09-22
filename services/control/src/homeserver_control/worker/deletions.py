@@ -21,18 +21,27 @@ class DeletionExecutor:
         self.tombstone = tombstone
 
     def execute(self, confirmation: DeletionConfirmation) -> DeletionResult:
-        if self.tombstone is not None:
-            self.tombstone(confirmation.media_key, confirmation.operation_id)
+        if len(confirmation.paths) != len(confirmation.identities):
+            raise DeletionPlanError("deletion confirmation is incomplete")
         snapshots: list[tuple[Path, int, int, int, int]] = []
-        for path in confirmation.paths:
+        for path, expected in zip(confirmation.paths, confirmation.identities, strict=True):
             if path.is_symlink() or not path.is_file():
                 raise DeletionPlanError(f"deletion target changed: {path}")
             stat = path.stat()
+            if (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns) != expected:
+                raise DeletionPlanError(f"deletion target changed: {path}")
             snapshots.append((path, stat.st_dev, stat.st_ino, stat.st_size, stat.st_nlink))
 
+        if self.tombstone is not None:
+            self.tombstone(confirmation.media_key, confirmation.operation_id)
         removed: list[Path] = []
-        for path, _device, _inode, _size, _nlink in snapshots:
+        for (path, _device, _inode, _size, _nlink), expected in zip(
+            snapshots, confirmation.identities, strict=True
+        ):
             try:
+                stat = path.lstat()
+                if (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns) != expected:
+                    raise DeletionPlanError(f"deletion target changed: {path}")
                 path.unlink()
             except FileNotFoundError as error:
                 raise DeletionPlanError(f"deletion target changed: {path}") from error

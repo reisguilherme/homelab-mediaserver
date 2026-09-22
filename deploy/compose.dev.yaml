@@ -61,6 +61,7 @@ services:
       HOMESERVER_CSRF_TOKEN: ${HOMESERVER_CSRF_TOKEN:-local-dev-only-csrf}
       HOMESERVER_COLLECTOR_TOKEN: ${HOMESERVER_COLLECTOR_TOKEN:-local-dev-only-collector}
       HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
+      HOMESERVER_CAPACITY_SNAPSHOT: /run/homeserver/capacity.json
       HOMESERVER_RECOVERY_MODE: /var/lib/homeserver/RECOVERY_MODE
     volumes:
       - type: bind
@@ -70,6 +71,11 @@ services:
       - type: bind
         source: ${HOMESERVER_MEDIA_ROOT:-../.runtime/dev/data}
         target: /data
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${HOMESERVER_RUNTIME:-../.runtime/dev}/run
+        target: /run/homeserver
         read_only: true
         bind: {create_host_path: false}
   telemetry:

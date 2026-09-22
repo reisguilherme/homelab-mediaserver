@@ -19,13 +19,16 @@ done
 
 json_output="$test_root/audit.json"
 inventory_output="$test_root/server.local.yaml"
+report_output="$test_root/server-audit.md"
 PATH="$fake_bin:$PATH" \
   AUDIT_INVENTORY_PATH="$inventory_output" \
+  AUDIT_REPORT_PATH="$report_output" \
   bash "$script" --check --json > "$json_output"
 
 grep -q '"status":"verified"' "$json_output"
 grep -q '"command":"os_release"' "$json_output"
 test -s "$inventory_output"
+test -s "$report_output"
 ! grep -Eiq 'authorized_keys|cookie|token|secret' "$json_output"
 ! grep -Eiq 'authorized_keys|cookie|token|secret' "$inventory_output"
 

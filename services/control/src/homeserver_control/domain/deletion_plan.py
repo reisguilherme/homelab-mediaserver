@@ -30,6 +30,7 @@ class DeletionConfirmation:
     media_key: str
     paths: tuple[Path, ...]
     bytes_estimated: int
+    identities: tuple[tuple[int, int, int, int], ...]
 
 
 @dataclass(frozen=True)
@@ -162,6 +163,9 @@ class DeletionPlanner:
             media_key=pending.preview.media_key,
             paths=pending.preview.paths,
             bytes_estimated=pending.preview.bytes_estimated,
+            identities=tuple(
+                (item.device, item.inode, item.size, item.mtime_ns) for item in current
+            ),
         )
         self._confirmed[operation_id] = confirmation
         return confirmation

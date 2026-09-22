@@ -23,3 +23,9 @@ def test_unreadable_marker_path_is_fail_closed(tmp_path: Path) -> None:
     marker = tmp_path / "RECOVERY_MODE"
     marker.mkdir()
     assert recovery_mode_blocks(marker) is True
+
+
+def test_dangling_recovery_marker_symlink_is_fail_closed(tmp_path: Path) -> None:
+    marker = tmp_path / "RECOVERY_MODE"
+    marker.symlink_to(tmp_path / "missing")
+    assert recovery_mode_blocks(marker) is True

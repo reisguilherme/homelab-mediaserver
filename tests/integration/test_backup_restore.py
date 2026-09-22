@@ -1,3 +1,4 @@
+import hashlib
 import os
 import shutil
 import subprocess
@@ -43,7 +44,7 @@ def _bash_path(path: Path) -> str:
 
 def test_capture_and_restore_uses_isolated_target(local_tmp: Path) -> None:
     tmp_path = local_tmp
-    source = tmp_path / "appdata"
+    source = tmp_path / "control"
     source.mkdir()
     (source / "control.sqlite3").write_text("control", encoding="utf-8")
     staging = tmp_path / "staging"
@@ -93,6 +94,9 @@ def test_capture_and_restore_uses_isolated_target(local_tmp: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert (target / source.name / "control.sqlite3").read_text(encoding="utf-8") == "control"
+    assert (target / "control" / "RECOVERY_MODE").read_text(encoding="utf-8").startswith(
+        "admission_enabled=false\n"
+    )
 
 
 def test_sent_snapshot_is_not_copied_again_from_staging(local_tmp: Path) -> None:
@@ -201,3 +205,97 @@ def test_restore_rejects_paths_that_escape_restore_root(local_tmp: Path) -> None
     )
     assert result.returncode != 0
     assert not (tmp_path / "escaped" / "empty").exists()
+
+
+def _restore_fixture(root: Path) -> tuple[Path, Path]:
+    repository = root / "repository"
+    control = repository / "snapshot-1" / "control"
+    control.mkdir(parents=True)
+    payload = b"control"
+    (control / "state.db").write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    (control.parent / "manifest.sha256").write_text(
+        f"{digest}  control/state.db\n", encoding="utf-8"
+    )
+    restore_root = root / "restore-root"
+    restore_root.mkdir()
+    config = root / "backup.env"
+    config.write_text(
+        f"BACKUP_REPOSITORY={_bash_path(repository)}\n"
+        f"BACKUP_RESTORE_ROOT={_bash_path(restore_root)}\n",
+        encoding="utf-8",
+    )
+    return config, restore_root
+
+
+def test_restore_rejects_occupied_target_without_overwriting(local_tmp: Path) -> None:
+    config, restore_root = _restore_fixture(local_tmp)
+    target = restore_root / "trial"
+    target.mkdir()
+    (target / "keep.txt").write_text("existing", encoding="utf-8")
+    result = subprocess.run(
+        [
+            _bash(),
+            _bash_path(Path("scripts/restore.sh")),
+            "--config",
+            _bash_path(config),
+            "--snapshot",
+            "snapshot-1",
+            "--target",
+            _bash_path(target),
+            "--isolated",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode != 0
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "existing"
+    assert not (target / "control").exists()
+
+
+def test_restore_rejects_symlink_alias_inside_restore_root(local_tmp: Path) -> None:
+    config, restore_root = _restore_fixture(local_tmp)
+    real = restore_root / "real"
+    real.mkdir()
+    alias = restore_root / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    target = alias / "trial"
+    result = subprocess.run(
+        [
+            _bash(),
+            _bash_path(Path("scripts/restore.sh")),
+            "--config",
+            _bash_path(config),
+            "--snapshot",
+            "snapshot-1",
+            "--target",
+            target.absolute().as_posix(),
+            "--isolated",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode != 0
+    assert not (real / "trial").exists()
+
+
+def test_restore_rejects_snapshot_path_traversal(local_tmp: Path) -> None:
+    config, restore_root = _restore_fixture(local_tmp)
+    repository = local_tmp / "repository"
+    (local_tmp / "outside").mkdir()
+    shutil.copytree(repository / "snapshot-1", local_tmp / "outside", dirs_exist_ok=True)
+    target = restore_root / "trial"
+    result = subprocess.run(
+        [
+            _bash(),
+            _bash_path(Path("scripts/restore.sh")),
+            "--config", _bash_path(config),
+            "--snapshot", "../outside",
+            "--target", _bash_path(target),
+            "--isolated",
+        ],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode != 0
+    assert not target.exists()

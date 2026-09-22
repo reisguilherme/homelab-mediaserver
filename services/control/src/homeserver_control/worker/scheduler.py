@@ -27,7 +27,7 @@ class FilesystemSnapshot:
             bool(self.filesystem_id)
             and self.free_bytes >= 0
             and self.total_bytes > 0
-            and now - self.measured_at <= self.stale_after_seconds
+            and 0 <= now - self.measured_at <= self.stale_after_seconds
         )
 
 

@@ -6,10 +6,12 @@ After=local-fs.target
 Type=oneshot
 User=root
 Group=root
+EnvironmentFile=-/etc/homeserver/server.env
 ExecStart=/usr/bin/env python3 /opt/homeserver/current/scripts/host-metrics.py --output /run/homeserver/host.json
+ExecStart=/usr/bin/env python3 /opt/homeserver/current/scripts/capacity-snapshot.py --output /run/homeserver/capacity.json --media-uuid ${HOMESERVER_MEDIA_UUID}
 RuntimeDirectory=homeserver
 RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 UMask=0027
 NoNewPrivileges=true
 PrivateTmp=true
-

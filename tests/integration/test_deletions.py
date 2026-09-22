@@ -4,7 +4,7 @@ from uuid import uuid4
 
 import pytest
 
-from homeserver_control.domain.deletion_plan import DeletionPlanner
+from homeserver_control.domain.deletion_plan import DeletionPlanError, DeletionPlanner
 from homeserver_control.worker.deletions import DeletionExecutor
 
 
@@ -31,3 +31,22 @@ def test_selected_hardlinks_are_removed_and_bytes_are_measured(local_root: Path)
     result = DeletionExecutor().execute(confirmation)
     assert set(result.paths_removed) == {original.resolve(), imported.resolve()}
     assert result.bytes_freed == len(b"payload")
+
+
+def test_replaced_file_after_confirmation_is_not_removed(local_root: Path) -> None:
+    root = local_root / "media"
+    root.mkdir()
+    target = root / "movie.mkv"
+    saved = root / "saved.mkv"
+    target.write_bytes(b"approved")
+    planner = DeletionPlanner(roots=(root,))
+    preview = planner.preview("movie:tmdb:1", (target,))
+    confirmation = planner.confirm(preview.token, preview.version, "delete-2")
+    target.rename(saved)
+    target.write_bytes(b"replacement")
+
+    with pytest.raises(DeletionPlanError, match="changed"):
+        DeletionExecutor().execute(confirmation)
+
+    assert target.read_bytes() == b"replacement"
+    assert saved.read_bytes() == b"approved"

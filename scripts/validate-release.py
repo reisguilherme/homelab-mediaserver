@@ -24,6 +24,7 @@ def extract_artifact(artifact_path: Path, destination: Path) -> None:
             path = PurePosixPath(name)
             if (
                 not name
+                or not path.parts
                 or "\\" in name
                 or path.is_absolute()
                 or ":" in path.parts[0]

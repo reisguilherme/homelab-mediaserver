@@ -20,6 +20,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ -n "$config" && -n "$snapshot" && -n "$target" && "$isolated" == true ]] || { usage; exit 2; }
+[[ "$snapshot" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || {
+  echo 'snapshot must be a single safe ID' >&2
+  exit 2
+}
 [[ -f "$config" ]] || { echo "config not found: $config" >&2; exit 1; }
 # shellcheck disable=SC1090
 source "$config"
@@ -31,21 +35,25 @@ source "$config"
   exit 1
 }
 
+for candidate in "$BACKUP_RESTORE_ROOT" "$target"; do
+  case "$candidate" in
+    */../*|*/./*|*/..|*/.) echo "restore path contains a dot component: $candidate" >&2; exit 1 ;;
+  esac
+  cursor=''
+  IFS=/ read -r -a components <<< "$candidate"
+  for part in "${components[@]}"; do
+    [[ -n "$part" ]] || continue
+    cursor="$cursor/$part"
+    [[ ! -L "$cursor" ]] || { echo "restore path contains a symlink: $cursor" >&2; exit 1; }
+  done
+done
+
 restore_root_real=$(realpath -m -- "$BACKUP_RESTORE_ROOT")
 target_real=$(realpath -m -- "$target")
 case "$target_real" in
   "$restore_root_real"/*) ;;
   *) echo "restore target must resolve under BACKUP_RESTORE_ROOT: $BACKUP_RESTORE_ROOT" >&2; exit 1 ;;
 esac
-
-relative_target=${target_real#"$restore_root_real"/}
-cursor=$restore_root_real
-IFS=/ read -r -a target_parts <<< "$relative_target"
-for part in "${target_parts[@]}"; do
-  [[ -n "$part" ]] || continue
-  cursor="$cursor/$part"
-  [[ ! -L "$cursor" ]] || { echo "restore target contains a symlink: $cursor" >&2; exit 1; }
-done
 
 case "$target_real" in
   /|/srv|/srv/data|/srv/appdata|/srv/transcode|/srv/backup-staging)
@@ -54,11 +62,19 @@ case "$target_real" in
     ;;
 esac
 target=$target_real
+if [[ -e "$target" ]]; then
+  [[ -d "$target" ]] || { echo 'restore target is not a directory' >&2; exit 1; }
+  [[ -z "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit)" ]] || {
+    echo 'restore target is not empty' >&2
+    exit 1
+  }
+fi
 
 source_dir="$BACKUP_REPOSITORY/$snapshot"
-[[ -d "$source_dir" && -f "$source_dir/manifest.sha256" ]] || { echo "snapshot not found: $snapshot" >&2; exit 1; }
+[[ ! -L "$source_dir" && -d "$source_dir" && -f "$source_dir/manifest.sha256" ]] || { echo "snapshot not found: $snapshot" >&2; exit 1; }
+[[ ! -L "$source_dir/control" && -d "$source_dir/control" ]] || { echo 'snapshot does not contain control state' >&2; exit 1; }
 (cd "$source_dir" && sha256sum -c manifest.sha256 >/dev/null) || { echo 'snapshot checksum failed' >&2; exit 1; }
 mkdir -p "$target"
 cp -a "$source_dir"/. "$target"/
-printf 'admission_enabled=false\nrecovery_snapshot=%s\n' "$snapshot" > "$target/RECOVERY_MODE"
+printf 'admission_enabled=false\nrecovery_snapshot=%s\n' "$snapshot" > "$target/control/RECOVERY_MODE"
 echo "restored isolated snapshot $snapshot to $target with admission disabled"

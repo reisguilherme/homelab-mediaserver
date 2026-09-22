@@ -42,3 +42,12 @@ def test_extract_artifact_writes_regular_files_and_directories(tmp_path: Path) -
     assert (destination / "deploy" / "compose.yaml").read_text(encoding="utf-8") == (
         "services: {}\n"
     )
+
+
+def test_extract_artifact_rejects_root_member(tmp_path: Path) -> None:
+    artifact = tmp_path / "root.tar"
+    with tarfile.open(artifact, "w") as archive:
+        archive.addfile(tarfile.TarInfo("."))
+
+    with pytest.raises(ValueError, match="unsafe archive path"):
+        _module().extract_artifact(artifact, tmp_path / "out")
