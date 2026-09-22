@@ -1,4 +1,5 @@
 import shutil
+import sqlite3
 from multiprocessing import get_context
 from pathlib import Path
 from uuid import uuid4
@@ -80,3 +81,27 @@ def test_reservation_and_operation_are_idempotent(local_tmp) -> None:
     assert second.reservation_id == first.reservation_id
     assert second.operation_id == first.operation_id
     assert repo.count_reservations() == 1
+
+
+def test_deleted_media_cannot_be_admitted_again(local_tmp) -> None:
+    path = local_tmp / "control.sqlite3"
+    repo = ReservationRepository(path)
+    repo.initialize()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO tombstones(media_key, deleted_at, source_generation) VALUES (?, ?, ?)",
+            ("movie:tmdb:1", "2026-09-22T00:00:00Z", "generation-1"),
+        )
+
+    result = repo.reserve(
+        request_id="request-1",
+        source_id="source-1",
+        media_key="movie:tmdb:1",
+        filesystem_id="fs-test",
+        budget_bytes=10,
+        free_bytes=100_000_000_000,
+        total_bytes=1_000_000_000_000,
+    )
+    assert result.accepted is False
+    assert result.reason == "media_deleted"
+    assert repo.count_reservations() == 0

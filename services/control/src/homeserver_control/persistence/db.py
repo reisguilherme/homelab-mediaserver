@@ -82,6 +82,12 @@ class ReservationRepository:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            deleted = connection.execute(
+                "SELECT 1 FROM tombstones WHERE media_key = ?", (media_key,)
+            ).fetchone()
+            if deleted is not None:
+                connection.commit()
+                return ReservationResult(False, reason="media_deleted")
             connection.execute(
                 """
                 INSERT INTO requests(id, source_id, media_key, state, created_at, updated_at)
