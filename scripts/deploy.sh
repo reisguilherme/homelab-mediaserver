@@ -40,10 +40,29 @@ trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
 release_dir="$HOMESERVER_ROOT/releases/$release"
 temporary="$HOMESERVER_ROOT/releases/.incoming-$release-$$"
 [[ ! -e "$release_dir" ]] || { echo "release already exists: $release" >&2; exit 1; }
-mkdir -p "$temporary"
-cp "$artifact" "$temporary/artifact"
+mkdir -p "$HOMESERVER_ROOT/releases"
+cleanup() {
+  if [[ -n "$temporary" && -d "$temporary" ]]; then
+    rm -rf -- "$temporary"
+  fi
+  rmdir "$lock_dir" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+python3 "$(dirname "${BASH_SOURCE[0]}")/validate-release.py" \
+  --manifest "$manifest" --artifact "$artifact" --release "${release,,}" \
+  --extract-to "$temporary" || exit 1
+[[ -f "$temporary/deploy/compose.yaml" ]] || {
+  echo 'release artifact is missing deploy/compose.yaml' >&2
+  exit 1
+}
+[[ -f "$temporary/scripts/check-mount.sh" && -f "$temporary/scripts/smoke.sh" ]] || {
+  echo 'release artifact is missing required operational scripts' >&2
+  exit 1
+}
 cp "$manifest" "$temporary/release.json"
 printf '%s\n' "$release" > "$temporary/COMMIT"
 mv "$temporary" "$release_dir"
+temporary=''
 ln -sfn "$release_dir" "$HOMESERVER_ROOT/current"
 printf 'deployed release %s\n' "$release"

@@ -7,7 +7,49 @@ import argparse
 import hashlib
 import json
 import re
-from pathlib import Path
+import shutil
+import tarfile
+from pathlib import Path, PurePosixPath
+
+
+def extract_artifact(artifact_path: Path, destination: Path) -> None:
+    """Extract a release tarball without following archive-controlled paths."""
+
+    destination = destination.resolve()
+    destination.mkdir(parents=True, exist_ok=False)
+    with tarfile.open(artifact_path, "r:*") as archive:
+        members = archive.getmembers()
+        for member in members:
+            name = member.name
+            path = PurePosixPath(name)
+            if (
+                not name
+                or "\\" in name
+                or path.is_absolute()
+                or ":" in path.parts[0]
+                or ".." in path.parts
+            ):
+                raise ValueError(f"unsafe archive path: {name}")
+            target = (destination / Path(*path.parts)).resolve()
+            if target != destination and destination not in target.parents:
+                raise ValueError(f"unsafe archive path: {name}")
+            if member.issym() or member.islnk():
+                raise ValueError(f"links are not allowed in release archive: {name}")
+            if not member.isdir() and not member.isfile():
+                raise ValueError(f"special files are not allowed in release archive: {name}")
+
+        for member in members:
+            target = (destination / Path(*PurePosixPath(member.name).parts)).resolve()
+            if member.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source = archive.extractfile(member)
+            if source is None:
+                raise ValueError(f"archive member has no data: {member.name}")
+            with source, target.open("wb") as output:
+                shutil.copyfileobj(source, output)
+            target.chmod(0o755 if member.name.startswith("scripts/") else member.mode & 0o777)
 
 
 def validate(manifest_path: Path, artifact_path: Path, release: str) -> None:
@@ -51,10 +93,13 @@ def main() -> int:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--artifact", type=Path, required=True)
     parser.add_argument("--release", required=True)
+    parser.add_argument("--extract-to", type=Path)
     args = parser.parse_args()
     try:
         validate(args.manifest, args.artifact, args.release)
-    except ValueError as error:
+        if args.extract_to is not None:
+            extract_artifact(args.artifact, args.extract_to)
+    except (OSError, tarfile.TarError, ValueError) as error:
         print(str(error), flush=True)
         return 1
     print("release manifest and artifact validated")

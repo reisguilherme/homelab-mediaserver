@@ -9,3 +9,15 @@ bash scripts/rollback.sh --release PREVIOUS_SHA --config /etc/homeserver/deploy.
 ```
 
 Deploys concorrentes são recusados por lock. Falha de smoke mantém o registro da tentativa; retorno de imagem não desfaz migrações de banco. Quando o schema não é compatível, restaurar primeiro um snapshot consistente em modo isolado.
+## Estado atual do extrator
+
+O artefato recebido por `scripts/deploy.sh` é um tarball da raiz do checkout e
+precisa conter `deploy/compose.yaml`, `scripts/check-mount.sh` e
+`scripts/smoke.sh`. O script valida o SHA, o manifesto e o checksum antes de
+extrair. Caminhos absolutos, `..`, links e arquivos especiais no tarball são
+recusados; o symlink `current` só muda depois que a estrutura extraída passa
+essas verificações.
+
+O primeiro incremento ainda não inicia/paralisa a unidade systemd nem executa
+migrações ou smoke contra um Legion real. Essas etapas permanecem parte do
+fechamento de O02 e exigem ambiente Linux de produção validado.

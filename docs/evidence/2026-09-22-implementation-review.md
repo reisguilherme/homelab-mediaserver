@@ -60,7 +60,7 @@ Ação: usar a tabela persistente de permits, transições atômicas e reconcili
 
 ### R04 — P1: deploy e rollback alteram o marcador sem implantar a aplicação
 
-`scripts/deploy.sh:43` copia o artefato como um arquivo chamado `artifact`, copia manifesto/COMMIT e troca `current`. Não extrai o payload, prepara imagens, valida montagem, captura backup, migra banco, controla systemd ou executa smoke. A unidade `homeserver-stack.service` espera encontrar `current/deploy/compose.yaml` e `current/scripts`, que essa release não contém.
+O incremento atual passou a exigir um tarball de release, validar e extrair seus caminhos sem links/`..`, verificar `deploy/compose.yaml` e scripts operacionais, e só então trocar `current`. Ainda não prepara imagens, valida montagem, captura backup, migra banco, controla systemd ou executa smoke contra um host real; essas etapas continuam abertas. A unidade `homeserver-stack.service` só será utilizável quando o artefato tiver a estrutura esperada.
 
 `rollback.sh:23` apenas troca o symlink; o snapshot informado só é impresso. `validate-release.py` aceita checksums de configuração vazios e não exige o mapa completo dos serviços. `smoke.sh` pode anunciar sucesso em dev sem consultar qualquer serviço quando a URL de saúde não foi configurada.
 
