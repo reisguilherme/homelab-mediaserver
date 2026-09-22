@@ -1,5 +1,8 @@
+import shutil
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from pathlib import Path
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -153,3 +156,33 @@ def test_unknown_upstream_path_is_not_a_proxy() -> None:
     )
     assert response.status_code == 404
     assert upstream.added == []
+
+
+def test_recovery_marker_blocks_gateway_mutation() -> None:
+    root = Path(".runtime") / f"gateway-recovery-{uuid4().hex}"
+    root.mkdir(parents=True)
+    marker = root / "RECOVERY_MODE"
+    marker.write_text("admission_enabled=false\n", encoding="utf-8")
+    permits = PermitRegistry()
+    upstream = RecordingQbitClient()
+    app = create_app(
+        permits=permits,
+        upstream=upstream,
+        arr_token="arr-token",
+        recovery_mode_path=marker,
+    )
+    permit = permits.issue(
+        infohash="a" * 40,
+        destination="/data/torrents",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    try:
+        response = TestClient(app).post(
+            "/api/v2/torrents/add",
+            headers={"X-Arr-Token": "arr-token", "X-Admission-Permit": permit.token},
+            json={"infohash": "a" * 40, "savepath": "/data/torrents"},
+        )
+        assert response.status_code == 503
+        assert upstream.added == []
+    finally:
+        shutil.rmtree(root, ignore_errors=True)

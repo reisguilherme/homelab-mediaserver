@@ -61,6 +61,7 @@ services:
       HOMESERVER_CSRF_TOKEN: ${HOMESERVER_CSRF_TOKEN:-local-dev-only-csrf}
       HOMESERVER_COLLECTOR_TOKEN: ${HOMESERVER_COLLECTOR_TOKEN:-local-dev-only-collector}
       HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
+      HOMESERVER_RECOVERY_MODE: /var/lib/homeserver/RECOVERY_MODE
     volumes:
       - type: bind
         source: ${HOMESERVER_APPDATA_ROOT:-../.runtime/dev/appdata}/control
@@ -79,6 +80,7 @@ services:
       HOMESERVER_SEERR_URL: ${HOMESERVER_SEERR_URL:-}
       HOMESERVER_SEERR_API_KEY: ${HOMESERVER_SEERR_API_KEY:-}
       HOMESERVER_CAPACITY_SNAPSHOT: ${HOMESERVER_CAPACITY_SNAPSHOT:-/run/homeserver/capacity.json}
+      HOMESERVER_RECOVERY_MODE: /var/lib/homeserver/RECOVERY_MODE
     volumes:
       - type: bind
         source: ${HOMESERVER_APPDATA_ROOT:-../.runtime/dev/appdata}/control
@@ -96,6 +98,7 @@ services:
   download-gateway:
     environment:
       HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
+      HOMESERVER_RECOVERY_MODE: /var/lib/homeserver/RECOVERY_MODE
     volumes:
       - type: bind
         source: ${HOMESERVER_APPDATA_ROOT:-../.runtime/dev/appdata}/control

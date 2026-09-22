@@ -12,6 +12,7 @@ from pathlib import Path
 
 from homeserver_control.adapters.seerr import SeerrAdapter
 from homeserver_control.persistence.db import ReservationRepository
+from homeserver_control.recovery import recovery_mode_blocks
 
 from .runtime import WorkerCycle
 from .scheduler import AdmissionScheduler, FilesystemSnapshot
@@ -30,6 +31,11 @@ def _snapshot_from_file(path: Path) -> FilesystemSnapshot:
 
 
 def _build_cycle(database: Path) -> WorkerCycle | None:
+    recovery_mode_path = os.environ.get(
+        "HOMESERVER_RECOVERY_MODE", "/var/lib/homeserver/RECOVERY_MODE"
+    )
+    if recovery_mode_blocks(recovery_mode_path):
+        return None
     seerr_url = os.environ.get("HOMESERVER_SEERR_URL")
     seerr_key = os.environ.get("HOMESERVER_SEERR_API_KEY")
     snapshot_path = os.environ.get("HOMESERVER_CAPACITY_SNAPSHOT")
@@ -48,9 +54,12 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
 
 def main() -> None:
     database = Path(os.environ.get("HOMESERVER_DB_PATH", "/var/lib/homeserver/control.sqlite"))
+    recovery_mode_path = os.environ.get(
+        "HOMESERVER_RECOVERY_MODE", "/var/lib/homeserver/RECOVERY_MODE"
+    )
     cycle = _build_cycle(database)
     if os.environ.get("HOMESERVER_WORKER_ONCE") == "1":
-        if cycle is not None:
+        if cycle is not None and not recovery_mode_blocks(recovery_mode_path):
             asyncio.run(cycle.run_once())
         return
 
@@ -64,7 +73,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, stop)
     interval = max(1.0, float(os.environ.get("HOMESERVER_WORKER_INTERVAL", "5")))
     while running:
-        if cycle is not None:
+        if cycle is not None and not recovery_mode_blocks(recovery_mode_path):
             try:
                 asyncio.run(cycle.run_once())
             except Exception:

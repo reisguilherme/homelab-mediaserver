@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from homeserver_control.domain.deletion_plan import DeletionPlanError, DeletionPlanner
 from homeserver_control.persistence.db import ReservationRepository
+from homeserver_control.recovery import recovery_mode_blocks
 
 CapacityProvider = Callable[[], dict[str, Any]]
 TelemetryProvider = Callable[[], dict[str, Any]]
@@ -42,6 +43,7 @@ class ControlState:
     csrf_token: str = "unconfigured"
     collector_token: str = "unconfigured"
     db_path: str | Path | None = None
+    recovery_mode_path: str | Path | None = None
     capacity_provider: CapacityProvider = _default_capacity
     telemetry_provider: TelemetryProvider | None = None
     media_catalog: dict[str, tuple[str | Path, ...]] = field(default_factory=dict)
@@ -60,6 +62,8 @@ class ControlState:
         if self.db_path is not None:
             self.repository = ReservationRepository(self.db_path)
             self.repository.initialize()
+        if recovery_mode_blocks(self.recovery_mode_path):
+            self.admission_enabled = False
 
 
 class DeletionPreviewRequest(BaseModel):
@@ -97,6 +101,9 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
             csrf_token=os.environ.get("HOMESERVER_CSRF_TOKEN", "unconfigured"),
             collector_token=os.environ.get("HOMESERVER_COLLECTOR_TOKEN", "unconfigured"),
             db_path=os.environ.get("HOMESERVER_DB_PATH"),
+            recovery_mode_path=os.environ.get(
+                "HOMESERVER_RECOVERY_MODE", "/var/lib/homeserver/RECOVERY_MODE"
+            ),
         )
 
     app = FastAPI(title="HomeServer control API", version="1")

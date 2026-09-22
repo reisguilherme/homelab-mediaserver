@@ -19,15 +19,15 @@ Foi criada uma copia temporaria em filesystem Linux do WSL Ubuntu 24.04, com Pyt
 | Verificacao | Resultado observado |
 |---|---|
 | make lint | Ruff em services/tests/scripts, compileall e sintaxe Bash passaram; ShellCheck nao estava instalado e foi pulado pelo Makefile |
-| make test-unit | 32 passaram |
-| make test-contract | 18 passaram |
+| make test-unit | 35 passaram |
+| make test-contract | 20 passaram |
 | make test-integration | 19 passaram |
 | make smoke | 2 testes de politica e quatro scripts Bash passaram |
-| suites Windows (unit/contract/integration + politica) | 66 passaram, 5 skips esperados por filesystem Linux |
+| suites Windows (unit/contract/integration + politica) | 71 passaram, 5 skips esperados por filesystem Linux |
 | Compose dev renderizado no Docker CLI Windows | passou |
 | build de imagens e validacao fisica | ainda nao executados |
 
-Total pytest Linux: **71 passaram**. Os avisos de deprecacao do TestClient nao foram causa de falha.
+Total pytest Linux: **76 passaram**. Os avisos de deprecacao do TestClient nao foram causa de falha.
 
 ## Achados prioritários
 
@@ -73,13 +73,13 @@ Consequência: os testes provam cópia/checksum de fixtures, não recuperação 
 
 Ação: implementar O01 antes de introduzir biblioteca real: captura consistente com recuperação do estado da stack, staging limitado e envio externo criptografado com retenção.
 
-### R06 — P1: restore agora e confinado, mas recovery ainda nao bloqueia a aplicacao
+### R06 — P1: restore e recovery agora bloqueiam a aplicacao propria
 
 restore.sh agora canonicaliza raiz e destino, exige caminho absoluto, recusa .., symlinks ancestrais e destinos fora de BACKUP_RESTORE_ROOT. O teste de regressao cobre o escape allowed/../escaped.
 
-O marcador RECOVERY_MODE ainda nao e consumido pela API, worker ou gateway; ControlState.admission_enabled continua iniciando habilitado. O bloqueio efetivo de recuperacao permanece aberto.
+API, worker e gateway agora leem RECOVERY_MODE no inicio/antes de mutacoes. Um marcador existente sem admission_enabled=true mantem readiness 503 e rejeita mutacoes do gateway; health/live permanece disponivel. A remocao ou liberacao continua exigindo reconciliacao manual.
 
-Acao: ler o marcador em todos os processos, iniciar restauracoes com admissao desabilitada e testar a liberacao somente apos reconciliacao.
+Acao: testar uma instancia restaurada com os tres processos, depois validar UUID, schema, reservas e efeitos externos antes de remover o marcador.
 
 ### R07 — P1: Compose bloqueia saída externa e contém inconsistências de volumes
 

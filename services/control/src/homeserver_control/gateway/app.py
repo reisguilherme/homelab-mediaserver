@@ -7,6 +7,8 @@ from typing import Any, Protocol
 
 from fastapi import FastAPI, Header, HTTPException, Request
 
+from homeserver_control.recovery import recovery_mode_blocks
+
 from .allowlist import GatewayAllowlist
 from .auth import token_matches
 from .permits import Permit, PermitRegistry
@@ -33,6 +35,7 @@ def create_app(
     upstream: QbitClient,
     arr_token: str,
     allowlist: GatewayAllowlist | None = None,
+    recovery_mode_path: str | os.PathLike[str] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="HomeServer download gateway", version="1")
     routes = allowlist or GatewayAllowlist()
@@ -40,6 +43,10 @@ def create_app(
     def require_arr_token(value: str | None) -> None:
         if arr_token == "unconfigured" or not token_matches(value, arr_token):
             raise HTTPException(status_code=401, detail="invalid gateway credential")
+
+    def require_admission() -> None:
+        if recovery_mode_blocks(recovery_mode_path):
+            raise HTTPException(status_code=503, detail="admission blocked by recovery mode")
 
     @app.get("/health/live")
     def health_live() -> dict[str, str]:
@@ -62,6 +69,7 @@ def create_app(
         if not routes.permits("POST", "/api/v2/torrents/add"):
             raise HTTPException(status_code=404, detail="gateway path is not allowed")
         require_arr_token(x_arr_token)
+        require_admission()
         if not x_admission_permit:
             raise HTTPException(status_code=403, detail="admission permit required")
         payload: dict[str, Any]
@@ -133,4 +141,7 @@ app = create_app(
     permits=PermitRegistry(os.environ.get("HOMESERVER_DB_PATH")),
     upstream=UnconfiguredQbitClient(),
     arr_token=os.environ.get("HOMESERVER_ARR_TOKEN", "unconfigured"),
+    recovery_mode_path=os.environ.get(
+        "HOMESERVER_RECOVERY_MODE", "/var/lib/homeserver/RECOVERY_MODE"
+    ),
 )

@@ -124,6 +124,36 @@ def test_recovery_mode_exposes_blocked_admission_at_top_level() -> None:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_recovery_marker_blocks_readiness_on_process_start() -> None:
+    root = Path(".runtime") / f"recovery-marker-{uuid4().hex}"
+    root.mkdir(parents=True)
+    media = root / "media"
+    media.mkdir()
+    marker = root / "RECOVERY_MODE"
+    marker.write_text("admission_enabled=false\nrecovery_snapshot=test\n", encoding="utf-8")
+    state = ControlState(
+        media_roots=(media,),
+        admin_token="admin-token",
+        csrf_token="csrf-token",
+        collector_token="collector-token",
+        db_path=root / "control.sqlite",
+        recovery_mode_path=marker,
+        capacity_provider=lambda: {
+            "filesystem_id": "uuid-fixture",
+            "total_bytes": 100,
+            "free_bytes": 50,
+            "measured_at": "2026-09-22T12:00:00Z",
+        },
+    )
+    try:
+        client = TestClient(create_app(state=state))
+        response = client.get("/health/ready")
+        assert response.status_code == 503
+        assert response.json()["admission_enabled"] is False
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_readiness_requires_persistent_state_and_valid_capacity() -> None:
     root = Path('.runtime') / f'readiness-{uuid4().hex}'
     root.mkdir(parents=True)
