@@ -10,6 +10,10 @@ networks:
   # Docker publishes the admin API only when one attached bridge is not internal.
   edge_control:
     internal: false
+  egress:
+    internal: false
+  egress_transfer:
+    internal: false
 
 volumes:
   jellyfin_appdata:
@@ -31,7 +35,7 @@ services:
   jellyfin:
     image: ${JELLYFIN_IMAGE:-jellyfin/jellyfin:10.10.7}
     restart: "no"
-    networks: [apps, telemetry]
+    networks: [apps, telemetry, egress]
     volumes:
       - jellyfin_appdata:/config
       - media:/data/media:ro
@@ -40,14 +44,14 @@ services:
   seerr:
     image: ${SEERR_IMAGE:-fallenbagel/jellyseerr:2.7.3}
     restart: "no"
-    networks: [apps]
+    networks: [apps, egress]
     volumes:
       - seerr_appdata:/app/config
 
   sonarr:
     image: ${SONARR_IMAGE:-linuxserver/sonarr:4.0.15}
     restart: "no"
-    networks: [apps]
+    networks: [apps, egress]
     volumes:
       - sonarr_appdata:/config
       - media:/data
@@ -55,7 +59,7 @@ services:
   radarr:
     image: ${RADARR_IMAGE:-linuxserver/radarr:5.20.0}
     restart: "no"
-    networks: [apps]
+    networks: [apps, egress]
     volumes:
       - radarr_appdata:/config
       - media:/data
@@ -63,14 +67,14 @@ services:
   prowlarr:
     image: ${PROWLARR_IMAGE:-linuxserver/prowlarr:1.35.1}
     restart: "no"
-    networks: [apps]
+    networks: [apps, egress]
     volumes:
       - prowlarr_appdata:/config
 
   qbittorrent:
     image: ${QBITTORRENT_IMAGE:-linuxserver/qbittorrent:5.1.2}
     restart: "no"
-    networks: [transfer]
+    networks: [transfer, egress_transfer]
     volumes:
       - qbittorrent_appdata:/config
       - media:/data
@@ -78,7 +82,7 @@ services:
   bazarr:
     image: ${BAZARR_IMAGE:-linuxserver/bazarr:1.5.1}
     restart: "no"
-    networks: [apps]
+    networks: [apps, egress]
     volumes:
       - bazarr_appdata:/config
       - media:/data/media
@@ -98,7 +102,7 @@ services:
     image: ${CONTROL_IMAGE:-homeserver-control:dev}
     command: ["python", "-m", "homeserver_control.worker"]
     restart: "no"
-    networks: [apps]
+    networks: [apps, egress]
     volumes:
       - control_state:/var/lib/homeserver
       - media:/data
@@ -118,7 +122,7 @@ services:
     image: ${TELEMETRY_IMAGE:-homeserver-telemetry:dev}
     command: ["uvicorn", "homeserver_telemetry.app:app", "--host", "0.0.0.0", "--port", "8080"]
     restart: "no"
-    networks: [telemetry]
+    networks: [telemetry, egress]
     volumes:
       - telemetry_state:/var/lib/homeserver
       - type: volume
