@@ -1,10 +1,10 @@
 [Unit]
-Description=HomeServer consistent configuration backup
+Description=HomeServer consistent Restic configuration backup
 After=homeserver-stack.service
+RequiresMountsFor=/srv/data
 
 [Service]
 Type=oneshot
-ExecStart=/opt/homeserver/current/scripts/backup.sh --config /etc/homeserver/backup.env --capture-and-send
+ExecStart=/opt/homeserver/current/scripts/backup-restic.sh
 Nice=10
 IOSchedulingClass=best-effort
-
