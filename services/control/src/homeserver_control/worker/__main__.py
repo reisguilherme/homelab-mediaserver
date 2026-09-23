@@ -17,6 +17,7 @@ from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.recovery import recovery_mode_blocks
 
 from .acquisition import MovieAcquirer
+from .cancellation import CancellationReconciler
 from .finalization import MovieFinalizer
 from .runtime import WorkerCycle
 from .scheduler import AdmissionScheduler, FilesystemSnapshot
@@ -78,7 +79,8 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 radarr_api_key=radarr_key,
             )
     return WorkerCycle(
-        source=source, scheduler=scheduler, acquirer=acquirer, finalizer=finalizer
+        source=source, scheduler=scheduler, acquirer=acquirer, finalizer=finalizer,
+        cancellation=CancellationReconciler(source=source, repository=repository),
     )
 
 

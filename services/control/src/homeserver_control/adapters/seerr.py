@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import httpx
 
-from .http import ContractError, endpoint, request_json
+from .http import ContractError, CredentialError, UpstreamError, endpoint, request_json
 
 
 class SeerrAdapter:
@@ -22,6 +22,34 @@ class SeerrAdapter:
         self.headers = {"X-Api-Key": api_key, "Accept": "application/json"}
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(10.0))
         self.page_size = page_size
+
+    async def get_request_status(self, source_id: str) -> int | None:
+        if not source_id.isdecimal():
+            raise ValueError("Seerr request ID is invalid")
+        try:
+            response = await self.client.get(
+                endpoint(self.base_url, f"/api/v1/request/{source_id}"),
+                headers=self.headers,
+            )
+        except httpx.HTTPError as error:
+            raise UpstreamError("Seerr request lookup failed") from error
+        if response.status_code == 404:
+            return None
+        if response.status_code in {401, 403}:
+            raise CredentialError("Seerr credential rejected")
+        if response.status_code >= 400:
+            raise UpstreamError(f"Seerr returned HTTP {response.status_code}")
+        try:
+            payload = response.json()
+        except ValueError as error:
+            raise ContractError("Seerr request response is not JSON") from error
+        if (
+            not isinstance(payload, dict)
+            or payload.get("id") != int(source_id)
+            or not isinstance(payload.get("status"), int)
+        ):
+            raise ContractError("Seerr request response is invalid")
+        return payload["status"]
 
     async def list_approved(self, page: int) -> list[dict[str, str]]:
         if page < 1:

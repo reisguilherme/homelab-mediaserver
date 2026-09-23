@@ -26,6 +26,10 @@ class MovieFinalization(Protocol):
     async def finalize(self, media_key: str, reservation_id: str) -> str: ...
 
 
+class Cancellation(Protocol):
+    async def reconcile(self, approved_source_ids: set[str]) -> int: ...
+
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -36,6 +40,7 @@ class CycleReport:
     deferred: int = 0
     malformed: int = 0
     grabbed: int = 0
+    cancelled: int = 0
 
 
 class WorkerCycle:
@@ -54,6 +59,7 @@ class WorkerCycle:
         scheduler: ReservationScheduler,
         acquirer: MovieAcquisition | None = None,
         finalizer: MovieFinalization | None = None,
+        cancellation: Cancellation | None = None,
         page_size: int = 20,
     ) -> None:
         if not 1 <= page_size <= 100:
@@ -62,6 +68,7 @@ class WorkerCycle:
         self.scheduler = scheduler
         self.acquirer = acquirer
         self.finalizer = finalizer
+        self.cancellation = cancellation
         self.page_size = page_size
 
     @classmethod
@@ -87,6 +94,7 @@ class WorkerCycle:
 
     async def run_once(self) -> CycleReport:
         processed = accepted = deferred = malformed = grabbed = 0
+        approved_source_ids: set[str] = set()
         page = 1
         while True:
             batch = await self.source.list_approved(page)
@@ -99,6 +107,7 @@ class WorkerCycle:
                     malformed += 1
                     continue
                 processed += 1
+                approved_source_ids.add(candidate.source_id)
                 result = self.scheduler.admit(candidate)
                 if result.accepted:
                     accepted += 1
@@ -136,4 +145,8 @@ class WorkerCycle:
             if len(batch) < self.page_size:
                 break
             page += 1
-        return CycleReport(processed, accepted, deferred, malformed, grabbed)
+        cancelled = (
+            await self.cancellation.reconcile(approved_source_ids)
+            if self.cancellation is not None else 0
+        )
+        return CycleReport(processed, accepted, deferred, malformed, grabbed, cancelled)

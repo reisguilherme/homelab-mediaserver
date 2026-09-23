@@ -33,6 +33,21 @@ async def test_seerr_pagination_maps_only_approved_requests() -> None:
 
 
 @pytest.mark.asyncio
+async def test_seerr_request_lookup_distinguishes_removed_from_approved() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/request/7":
+            return httpx.Response(404, json={"message": "Request not found"})
+        if request.url.path == "/api/v1/request/8":
+            return httpx.Response(200, json={"id": 8, "status": 2})
+        raise AssertionError("unexpected request")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = SeerrAdapter(base_url="http://seerr", api_key="secret", client=client)
+        assert await adapter.get_request_status("7") is None
+        assert await adapter.get_request_status("8") == 2
+
+
+@pytest.mark.asyncio
 async def test_arr_credential_error_is_not_retried() -> None:
     calls = 0
 

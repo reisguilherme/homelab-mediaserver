@@ -42,6 +42,15 @@ class FakeFinalizer:
         return "downloading"
 
 
+class FakeCancellation:
+    def __init__(self) -> None:
+        self.approved = None
+
+    async def reconcile(self, approved_source_ids: set[str]) -> int:
+        self.approved = approved_source_ids
+        return 0
+
+
 @pytest.mark.asyncio
 async def test_worker_reserves_approved_requests_without_dispatching_downloads() -> None:
     source = FakeSource(
@@ -117,3 +126,17 @@ async def test_worker_acquires_only_admitted_movies() -> None:
     assert acquirer.calls == [("movie:tmdb:10", "r1")]
     assert finalizer.calls == [("movie:tmdb:10", "r1")]
     assert report.grabbed == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_reconciles_withdrawn_requests_after_pagination() -> None:
+    source = FakeSource(pages=[[
+        {"source_id": "7", "media_key": "movie:tmdb:10", "kind": "movie"},
+    ]])
+    scheduler = FakeScheduler([ReservationResult(False, reason="waiting_space")])
+    cancellation = FakeCancellation()
+    cycle = WorkerCycle(source=source, scheduler=scheduler, cancellation=cancellation)
+
+    await cycle.run_once()
+
+    assert cancellation.approved == {"7"}

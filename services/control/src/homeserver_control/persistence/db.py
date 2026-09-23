@@ -243,6 +243,59 @@ class ReservationRepository:
         finally:
             connection.close()
 
+    def cancel_unstarted(self, reservation_id: str) -> str:
+        """Revoke an unused admission atomically; never release an active download."""
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT request_id, state FROM reservations WHERE id = ?", (reservation_id,)
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                return "not_found"
+            if row["state"] == "cancelled":
+                connection.commit()
+                return "already_cancelled"
+            if row["state"] not in {"reserved", "downloading"}:
+                connection.commit()
+                return "not_cancellable"
+            permit = connection.execute(
+                "SELECT state FROM gateway_permits WHERE reservation_id = ?", (reservation_id,)
+            ).fetchone()
+            if permit is not None and permit["state"] not in {"authorized", "revoked"}:
+                connection.execute(
+                    "UPDATE requests SET state = 'cancel_requested', updated_at = ? WHERE id = ?",
+                    (_now(), row["request_id"]),
+                )
+                connection.commit()
+                return "download_started"
+            connection.execute(
+                "UPDATE gateway_permits SET state = 'revoked' "
+                "WHERE reservation_id = ? AND state = 'authorized'",
+                (reservation_id,),
+            )
+            connection.execute(
+                "UPDATE reservations SET state = 'cancelled' WHERE id = ?", (reservation_id,)
+            )
+            connection.execute(
+                "UPDATE requests SET state = 'cancelled', updated_at = ? WHERE id = ?",
+                (_now(), row["request_id"]),
+            )
+            connection.commit()
+            return "cancelled"
+        finally:
+            connection.close()
+
+    def active_seerr_requests(self) -> list[tuple[str, str]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT r.id AS reservation_id, q.source_id
+                FROM reservations r JOIN requests q ON q.id = r.request_id
+                WHERE q.id LIKE 'seerr:%' AND r.state IN ('reserved', 'downloading')"""
+            ).fetchall()
+        return [(row["reservation_id"], row["source_id"]) for row in rows]
+
     def record_operation(
         self,
         *,
