@@ -34,7 +34,7 @@ def validate_media(
     *,
     maximum_bytes: int,
     minimum_width: int = 1920,
-    minimum_height: int = 1080,
+    minimum_height: int = 800,
     ffprobe_binary: str | list[str] = "ffprobe",
 ) -> ValidationResult:
     candidate = Path(path)
