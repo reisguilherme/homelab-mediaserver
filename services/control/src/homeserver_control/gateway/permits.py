@@ -112,6 +112,33 @@ class PermitRegistry:
             )
 
     @staticmethod
+    def _pending_bytes(connection: sqlite3.Connection, capacity: CapacityEvidence) -> int:
+        rows = connection.execute(
+            """SELECT p.infohash, p.budget_bytes FROM gateway_permits p
+            JOIN reservations r ON r.id = p.reservation_id
+            WHERE r.state IN ('reserved', 'downloading', 'waiting_episodes')
+              AND p.state IN ('authorized', 'dispatching', 'unknown', 'confirmed')
+              AND (p.state != 'authorized' OR p.expires_at > ?)
+              AND p.budget_bytes > 0
+              AND NOT EXISTS (
+                SELECT 1 FROM episode_imports e
+                WHERE e.permit_id = p.permit_id AND e.state = 'complete'
+              )""",
+            (datetime.now(UTC).isoformat(),),
+        ).fetchall()
+        return capacity.other_pending_bytes + sum(
+            min(row["budget_bytes"], capacity.remaining_by_hash.get(
+                row["infohash"], row["budget_bytes"]
+            )) for row in rows
+        )
+
+    def pending_bytes(self, capacity: CapacityEvidence) -> int:
+        if self._db_path is None:
+            raise ValueError("persistent permits required for queue capacity")
+        with self._session() as connection:
+            return self._pending_bytes(connection, capacity)
+
+    @staticmethod
     def _expires(value: str) -> datetime:
         return datetime.fromisoformat(value)
 
@@ -192,24 +219,7 @@ class PermitRegistry:
                         or not reservation["media_key"].startswith("season:tmdb:")
                     ):
                         raise ValueError("invalid episode permit")
-                    rows = connection.execute(
-                        """SELECT p.infohash, p.budget_bytes FROM gateway_permits p
-                        JOIN reservations r ON r.id = p.reservation_id
-                        WHERE r.state IN ('reserved', 'downloading', 'waiting_episodes')
-                          AND p.state IN ('authorized', 'dispatching', 'unknown', 'confirmed')
-                          AND (p.state != 'authorized' OR p.expires_at > ?)
-                          AND p.budget_bytes > 0
-                          AND NOT EXISTS (
-                            SELECT 1 FROM episode_imports e
-                            WHERE e.permit_id = p.permit_id AND e.state = 'complete'
-                          )""",
-                        (datetime.now(UTC).isoformat(),),
-                    ).fetchall()
-                    pending = capacity.other_pending_bytes + sum(
-                        min(row["budget_bytes"], capacity.remaining_by_hash.get(
-                            row["infohash"], row["budget_bytes"]
-                        )) for row in rows
-                    )
+                    pending = self._pending_bytes(connection, capacity)
                     if budget_bytes > max(0, capacity.free_bytes - pending):
                         raise PermissionError("waiting_space")
                     connection.execute(

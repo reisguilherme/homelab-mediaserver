@@ -1,3 +1,4 @@
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -8,8 +9,9 @@ from homeserver_control.domain.media_probe import MediaProbe
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
+from homeserver_control.worker.capacity_evidence import CapacityEvidence
 from homeserver_control.worker.series_finalization import SeriesFinalizer
-from homeserver_control.worker.validation import ValidationResult
+from homeserver_control.worker.validation import ValidationError, ValidationResult
 
 
 @pytest.mark.asyncio
@@ -54,6 +56,13 @@ async def test_completed_episode_is_validated_before_one_sonarr_import(tmp_path,
     imported = False
     hardlinks_enabled = False
     library = tmp_path / "media"
+    copy_bytes = 5 + subtitle.stat().st_size
+
+    async def capacity_provider():
+        return CapacityEvidence(
+            free_bytes=copy_bytes + 2,
+            remaining_by_hash={permit.infohash: 0}, other_pending_bytes=3,
+        )
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v3/config/mediamanagement":
@@ -92,10 +101,17 @@ async def test_completed_episode_is_validated_before_one_sonarr_import(tmp_path,
             arr_token="secret", sonarr_url="http://sonarr:8989",
             sonarr_api_key="secret", client=client,
         )
+        finalizer.capacity_provider = capacity_provider
         assert await finalizer.finalize(
             "season:tmdb:97546:4", reserved.reservation_id
         ) == "import_guard"
         hardlinks_enabled = True
+        library.mkdir()
+        assert await finalizer.finalize(
+            "season:tmdb:97546:4", reserved.reservation_id
+        ) == "waiting_space"
+        finalizer.import_uid = os.getuid()
+        finalizer.import_gid = os.getgid()
         assert await finalizer.finalize(
             "season:tmdb:97546:4", reserved.reservation_id
         ) == "import_requested"
@@ -108,14 +124,59 @@ async def test_completed_episode_is_validated_before_one_sonarr_import(tmp_path,
         imported = True
         assert await finalizer.finalize(
             "season:tmdb:97546:4", reserved.reservation_id
+        ) == "import_uncertain"
+        (destination / "Ted.Lasso.S04E01.mkv").unlink()
+        os.link(folder / "Ted.Lasso.S04E01.mkv", destination / "Ted.Lasso.S04E01.mkv")
+        assert await finalizer.finalize(
+            "season:tmdb:97546:4", reserved.reservation_id
         ) == "complete"
     assert len(posts) == 1
     assert repo.episode_import_state(permit.permit_id) == "complete"
     assert (destination / "Ted.Lasso.S04E01.pt-BR.srt").stat().st_ino == subtitle.stat().st_ino
 
 
+def test_legacy_episode_permit_cannot_import_another_episodes_subtitle(tmp_path):
+    database = tmp_path / "control.sqlite"
+    repo = ReservationRepository(database)
+    repo.initialize()
+    reserved = repo.reserve(
+        request_id="seerr:3:1", source_id="3:1",
+        media_key="season:tmdb:95480:1", filesystem_id="fixture",
+        budget_bytes=100, free_bytes=1000, total_bytes=2000,
+    )
+    assert reserved.reservation_id
+    permits = PermitRegistry(database)
+    permit = permits.issue(
+        infohash="a" * 40, metadata_sha256="b" * 64,
+        destination="/data/torrents", category="sonarr",
+        reservation_id=reserved.reservation_id, scope_key="S01E01",
+        selected_files=("Slow.Horses.S01E01/Slow.Horses.S01E01.mkv",
+                        "Slow.Horses.S01E01/Slow.Horses.S01E02.pt-BR.srt"),
+        budget_bytes=100, expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    source = tmp_path / "torrents" / "Slow.Horses.S01E01"
+    source.mkdir(parents=True)
+    (source / "Slow.Horses.S01E02.pt-BR.srt").write_text(
+        "1\n00:00:01,000 --> 00:00:02,000\nLegenda errada\n", encoding="utf-8"
+    )
+    video = tmp_path / "media" / "Slow Horses" / "Season 01" / "Slow.Horses.S01E01.mkv"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"video")
+    finalizer = SeriesFinalizer(
+        repository=repo, permits=permits, torrent_root=tmp_path / "torrents",
+        media_root=tmp_path / "media", gateway_url="http://gateway",
+        arr_token="secret", sonarr_url="http://sonarr", sonarr_api_key="secret",
+    )
+    with pytest.raises(ValidationError, match="episode"):
+        finalizer._ensure_subtitle(video, permit)
+    assert not list(video.parent.glob("*.srt"))
+
+
 @pytest.mark.asyncio
-async def test_external_subdl_episode_subtitle_is_required_and_installed(tmp_path, monkeypatch):
+@pytest.mark.parametrize("subtitle_case", ["brazilian", "english", "original_ptbr"])
+async def test_episode_subtitle_priority_and_original_audio(
+    tmp_path, monkeypatch, subtitle_case
+):
     database = tmp_path / "control.sqlite"
     repo = ReservationRepository(database)
     repo.initialize()
@@ -142,27 +203,44 @@ async def test_external_subdl_episode_subtitle_is_required_and_installed(tmp_pat
     torrent_folder = tmp_path / "torrents" / "Ted.Lasso.S04E01"
     torrent_folder.mkdir(parents=True)
     (torrent_folder / "Ted.Lasso.S04E01.mkv").write_bytes(b"video")
-    srt = b"1\n00:00:01,000 --> 00:00:02,000\nLegenda brasileira\n"
+    brazilian_srt = b"1\n00:00:01,000 --> 00:00:02,000\nLegenda brasileira\n"
+    english_srt = b"1\n00:00:01,000 --> 00:00:02,000\nEnglish subtitle\n"
+    raw = {"streams": [{
+        "codec_type": "audio", "tags": {"language": "pt-BR", "title": "Original"},
+    }]} if subtitle_case == "original_ptbr" else {}
     monkeypatch.setattr(
         "homeserver_control.worker.series_finalization.validate_media",
         lambda path, **_kwargs: ValidationResult(
-            Path(path), 5, MediaProbe(1920, 1080, ("eng",), (), {}),
+            Path(path), 5, MediaProbe(1920, 1080, ("por",) if raw else ("eng",), (), raw),
+        ),
+    )
+    monkeypatch.setattr(
+        "homeserver_control.worker.finalization.validate_media",
+        lambda path, **_kwargs: ValidationResult(
+            Path(path), 5, MediaProbe(1920, 1080, ("por",) if raw else ("eng",), (), raw),
         ),
     )
     imported = False
     posts = []
 
-    class LaterSubtitles:
-        calls = 0
+    class AvailableSubtitles:
+        def __init__(self):
+            self.calls = []
 
-        async def fetch(self, *, tmdb_id, release_title, season, episode):
+        async def fetch(
+            self, *, tmdb_id, release_title, season, episode, language="BR_PT"
+        ):
             assert (tmdb_id, release_title, season, episode) == (
                 97546, "Ted.Lasso.S04E01.1080p.WEB-DL", 4, 1
             )
-            self.calls += 1
-            return srt if self.calls == 2 else None
+            self.calls.append(language)
+            if language == "BR_PT" and subtitle_case == "brazilian":
+                return brazilian_srt
+            if language == "EN":
+                return english_srt
+            return None
 
-    source = LaterSubtitles()
+    source = AvailableSubtitles()
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v3/config/mediamanagement":
@@ -201,16 +279,30 @@ async def test_external_subdl_episode_subtitle_is_required_and_installed(tmp_pat
             arr_token="secret", sonarr_url="http://sonarr:8989",
             sonarr_api_key="secret", client=client, subtitle_source=source,
         )
-        assert await finalizer.finalize(
-            "season:tmdb:97546:4", reserved.reservation_id
-        ) == "waiting_subtitles"
-        assert not posts
+        async def capacity_provider():
+            return CapacityEvidence(
+                free_bytes=100, remaining_by_hash={permit.infohash: 0}
+            )
+
+        finalizer.capacity_provider = capacity_provider
         assert await finalizer.finalize(
             "season:tmdb:97546:4", reserved.reservation_id
         ) == "import_requested"
+        expected_calls = {
+            "brazilian": ["BR_PT"],
+            "english": ["BR_PT", "EN"],
+            "original_ptbr": [],
+        }[subtitle_case]
+        assert source.calls == expected_calls
+        expected_subtitle = {
+            "brazilian": brazilian_srt,
+            "english": english_srt,
+            "original_ptbr": None,
+        }[subtitle_case]
         assert SubtitleArtifactStore(database).get(
-            reserved.reservation_id, "S04E01", permit.infohash
-        ) == srt
+            reserved.reservation_id, "S04E01", permit.infohash,
+            language="EN" if subtitle_case == "english" else "BR_PT",
+        ) == expected_subtitle
         destination = library / "Ted Lasso" / "Season 04"
         destination.mkdir(parents=True)
         (destination / "Ted.Lasso.S04E01.mkv").write_bytes(b"video")
@@ -219,4 +311,10 @@ async def test_external_subdl_episode_subtitle_is_required_and_installed(tmp_pat
             "season:tmdb:97546:4", reserved.reservation_id
         ) == "complete"
     assert len(posts) == 1
-    assert (destination / "Ted.Lasso.S04E01.pt-BR.srt").read_bytes() == srt
+    if expected_subtitle is None:
+        assert not list(destination.glob("*.srt"))
+    else:
+        suffix = "pt-BR" if subtitle_case == "brazilian" else "en"
+        assert (
+            destination / f"Ted.Lasso.S04E01.{suffix}.srt"
+        ).read_bytes() == expected_subtitle

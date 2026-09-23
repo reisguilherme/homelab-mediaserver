@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -130,3 +131,17 @@ class QBittorrentAdapter:
         if not isinstance(payload, list) or any(not isinstance(item, Mapping) for item in payload):
             raise ContractError("qBittorrent info response is incompatible")
         return [dict(item) for item in payload]
+
+    def set_running(self, infohash: str, *, running: bool) -> None:
+        if not isinstance(infohash, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", infohash):
+            raise ValueError("invalid infohash")
+        if not isinstance(running, bool):
+            raise ValueError("invalid torrent state")
+        self._ensure_login()
+        action = "start" if running else "stop"
+        response = self._request(
+            "POST", f"/api/v2/torrents/{action}",
+            data={"hashes": infohash.lower()},
+        )
+        if response.text.strip().lower() not in {"", "ok", "ok."}:
+            raise ContractError("qBittorrent queue response is incompatible")

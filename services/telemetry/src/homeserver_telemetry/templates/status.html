@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>HomeServer · Status</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background: #080e16; color: #e9f0f6; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(ellipse at 82% -14%, #153a43 0%, transparent 42%), #080e16; }
+    body::before { content: ""; position: fixed; inset: 0; pointer-events: none; opacity: .16; background-image: linear-gradient(#64879816 1px, transparent 1px), linear-gradient(90deg, #64879816 1px, transparent 1px); background-size: 42px 42px; mask-image: linear-gradient(to bottom, #000, transparent 70%); }
+    main { position: relative; width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 42px 0 60px; }
+    header { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin-bottom: 44px; }
+    .eyebrow, .card-label, .meta, .tag { font: 600 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .13em; text-transform: uppercase; }
+    .eyebrow { color: #66d6c7; margin: 0 0 9px; }
+    h1 { margin: 0; font-weight: 620; letter-spacing: -.055em; font-size: clamp(34px, 4.2vw, 56px); line-height: 1; }
+    .subtitle { margin: 11px 0 0; color: #8499a8; font-size: 14px; }
+    .live { display: inline-flex; align-items: center; gap: 10px; border: 1px solid #24414a; border-radius: 999px; padding: 10px 13px; color: #91b6bb; background: #102027b8; white-space: nowrap; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: #5fd6a8; box-shadow: 0 0 12px #5fd6a8a8; }
+    .live[data-state="stale"] .dot, .live[data-state="calculating"] .dot { background: #e3ae5d; box-shadow: 0 0 12px #e3ae5d77; }
+    .live[data-state="unavailable"] .dot { background: #ed777d; box-shadow: 0 0 12px #ed777d77; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+    .card { min-width: 0; border: 1px solid #263744; border-radius: 18px; padding: 22px; background: linear-gradient(155deg, #18252fb8, #111b25c9); box-shadow: 0 18px 45px #00000019; }
+    .card-label { color: #8aa0ad; margin: 0 0 25px; }
+    .value { font-size: clamp(29px, 3vw, 42px); letter-spacing: -.045em; line-height: 1; font-variant-numeric: tabular-nums; font-weight: 590; }
+    .unit { color: #8ca4ac; font-size: 13px; letter-spacing: 0; font-weight: 500; }
+    .card-bottom { display: flex; justify-content: space-between; gap: 10px; align-items: end; margin-top: 24px; color: #8196a3; font-size: 12px; }
+    .meter { width: 100%; height: 5px; border-radius: 9px; overflow: hidden; background: #293741; }
+    .meter > span { display: block; width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #317f9d, #6ce1c1); transition: width .55s ease; }
+    .section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin: 42px 0 15px; }
+    h2 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -.02em; }
+    .meta { color: #748b99; letter-spacing: .08em; }
+    .storage { display: grid; grid-template-columns: 235px 1fr; gap: 32px; align-items: center; padding: 28px; }
+    .ring { --occupied: 0%; width: 190px; height: 190px; margin: auto; border-radius: 50%; display: grid; place-items: center; background: conic-gradient(#68d5bb var(--occupied), #2a3845 0); box-shadow: inset 0 0 1px #a8fbef44, 0 0 45px #62d5bb11; }
+    .ring-inner { width: 148px; height: 148px; display: flex; flex-direction: column; justify-content: center; align-items: center; border-radius: 50%; background: #111c26; }
+    .ring-inner strong { font-size: 30px; letter-spacing: -.05em; font-variant-numeric: tabular-nums; }
+    .ring-inner span { color: #8297a5; font-size: 11px; margin-top: 3px; }
+    .storage-details { min-width: 0; }
+    .capacity-line { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 16px; }
+    .capacity-line strong { font-size: 28px; letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
+    .capacity-line span { color: #93a8b3; font-size: 13px; }
+    .segments { display: flex; height: 9px; border-radius: 20px; overflow: hidden; background: #273844; }
+    .segments span { display: block; width: 0; transition: width .55s ease; }
+    .segments .movies, .swatch.movies { background: #61d7bc; }
+    .segments .series, .swatch.series { background: #5f9bd8; }
+    .segments .torrents, .swatch.torrents { background: #ad95df; }
+    .segments .other, .swatch.other { background: #657b8e; }
+    .legend { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 24px; margin-top: 25px; }
+    .legend-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; min-width: 0; font-size: 13px; }
+    .legend-label { display: flex; align-items: center; gap: 9px; color: #9aadb9; }
+    .swatch { width: 8px; height: 8px; border-radius: 3px; flex: none; }
+    .legend-item strong { font-weight: 550; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .note { margin: 16px 0 0; color: #748b99; font-size: 12px; line-height: 1.5; }
+    .footer { display: flex; flex-wrap: wrap; gap: 12px 28px; margin-top: 22px; color: #738997; font-size: 12px; }
+    .footer strong { color: #b2c5ce; font-weight: 500; }
+    @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 620px) { main { width: min(100% - 26px, 1180px); padding-top: 26px; } header { flex-direction: column; margin-bottom: 28px; gap: 18px; } .grid { gap: 10px; } .card { padding: 17px; } .card-label { margin-bottom: 18px; } .value { font-size: 30px; } .storage { grid-template-columns: 1fr; gap: 26px; padding: 23px; } .legend { gap: 12px; } .section-heading { margin-top: 33px; } }
+    @media (max-width: 370px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <p class="eyebrow">HomeServer / telemetria</p>
+        <h1>Status do servidor</h1>
+        <p class="subtitle">Recursos e armazenamento em tempo quase real.</p>
+      </div>
+      <div class="live" id="live" data-state="calculating" role="status" aria-live="polite">
+        <span class="dot" aria-hidden="true"></span><span class="tag" id="live-text">Conectando</span>
+      </div>
+    </header>
+
+    <section aria-label="Recursos do servidor" class="grid">
+      <article class="card"><p class="card-label">CPU</p><div class="value" id="cpu">—</div><div class="card-bottom"><div class="meter" role="progressbar" aria-label="Uso de CPU" aria-valuemin="0" aria-valuemax="100" id="cpu-meter"><span></span></div></div></article>
+      <article class="card"><p class="card-label">Memória</p><div class="value" id="ram">—</div><div class="card-bottom"><div class="meter" role="progressbar" aria-label="Uso de memória" aria-valuemin="0" aria-valuemax="100" id="ram-meter"><span></span></div></div></article>
+      <article class="card"><p class="card-label">Rede / recebimento</p><div class="value" id="rx">—</div><div class="card-bottom"><span id="interface">Interface indisponível</span><span>↓</span></div></article>
+      <article class="card"><p class="card-label">Rede / envio</p><div class="value" id="tx">—</div><div class="card-bottom"><span>Tráfego da interface da rota padrão</span><span>↑</span></div></article>
+    </section>
+
+    <section aria-labelledby="storage-title">
+      <div class="section-heading"><h2 id="storage-title">Armazenamento</h2><span class="meta" id="storage-state">Aguardando medição</span></div>
+      <div class="card storage">
+        <div class="ring" id="ring" role="img" aria-label="Uso do armazenamento indisponível"><div class="ring-inner"><strong id="used-percent">—</strong><span>ocupado</span></div></div>
+        <div class="storage-details">
+          <div class="capacity-line"><strong id="free">—</strong><span>livres de <span id="total">—</span><br><span id="used">—</span> usados</span></div>
+          <div class="segments" aria-hidden="true"><span class="movies" id="movies-bar"></span><span class="series" id="series-bar"></span><span class="torrents" id="torrents-bar"></span><span class="other" id="other-bar"></span></div>
+          <div class="legend" aria-label="Uso por categoria">
+            <div class="legend-item"><span class="legend-label"><i class="swatch movies"></i>Filmes</span><strong id="movies">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch series"></i>Séries</span><strong id="series">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch torrents"></i>Torrents</span><strong id="torrents">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch other"></i>Outros</span><strong id="other">—</strong></div>
+          </div>
+          <p class="note">Arquivos com hardlink são contados uma vez. “Outros” inclui dados fora das três pastas e uso do sistema de arquivos.</p>
+        </div>
+      </div>
+    </section>
+    <div class="footer"><span>Atualização <strong id="updated">—</strong></span><span>Ligado há <strong id="uptime">—</strong></span><span>Temperatura <strong id="temperature">—</strong></span></div>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const number = new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 1 });
+    const isNumber = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+    const bytes = (value) => {
+      if (!isNumber(value)) return '—';
+      if (value < 1024) return `${number.format(value)} B`;
+      const power = Math.min(Math.floor(Math.log(value) / Math.log(1024)), 4);
+      const labels = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+      return `${number.format(value / (1024 ** power))} ${labels[power]}`;
+    };
+    const speed = (value) => isNumber(value) ? `${bytes(value)}/s` : '—';
+    const percent = (value) => isNumber(value) ? `${number.format(value)}%` : '—';
+    const clamp = (value) => Math.max(0, Math.min(100, value));
+    const setMeter = (id, value) => { const meter = $(id); meter.firstElementChild.style.width = isNumber(value) ? `${clamp(value)}%` : '0%'; if (isNumber(value)) meter.setAttribute('aria-valuenow', String(value)); else meter.removeAttribute('aria-valuenow'); };
+    const setLive = (state) => { $('live').dataset.state = state; $('live-text').textContent = { ok: 'Online', stale: 'Dados antigos', calculating: 'Atualizando', unavailable: 'Sem dados' }[state] || 'Sem dados'; };
+    const uptime = (seconds) => { if (!isNumber(seconds)) return '—'; const days = Math.floor(seconds / 86400); const hours = Math.floor((seconds % 86400) / 3600); return days ? `${days} d ${hours} h` : `${hours} h`; };
+    function render(data) {
+      const host = data.host || {}, net = data.network || {}, cap = data.capacity || {}, storage = data.storage || {};
+      setLive(host.state === 'ok' && cap.state === 'ok' ? 'ok' : host.state === 'stale' || cap.state === 'stale' ? 'stale' : 'unavailable');
+      $('cpu').textContent = percent(host.cpu_percent);
+      $('ram').textContent = percent(host.ram_percent);
+      setMeter('cpu-meter', host.cpu_percent);
+      setMeter('ram-meter', host.ram_percent);
+      $('rx').textContent = speed(net.rx_bps);
+      $('tx').textContent = speed(net.tx_bps);
+      $('interface').textContent = net.interface?.startsWith('enx') ? 'USB Ethernet' : net.interface || 'Interface indisponível';
+      $('interface').title = net.interface || '';
+      $('uptime').textContent = uptime(host.uptime_seconds);
+      $('temperature').textContent = isNumber(host.cpu_celsius) ? `${number.format(host.cpu_celsius)} °C` : '—';
+      $('updated').textContent = host.measured_at ? new Date(host.measured_at).toLocaleTimeString('pt-BR') : '—';
+      $('free').textContent = bytes(cap.free_bytes);
+      $('total').textContent = bytes(cap.total_bytes);
+      $('used').textContent = bytes(cap.used_bytes);
+      const used = isNumber(cap.used_bytes) && cap.total_bytes > 0 ? clamp(100 * cap.used_bytes / cap.total_bytes) : null;
+      $('used-percent').textContent = percent(used);
+      $('ring').style.setProperty('--occupied', `${used ?? 0}%`);
+      $('ring').setAttribute('aria-label', used === null ? 'Uso do armazenamento indisponível' : `${percent(used)} do armazenamento ocupado`);
+      $('storage-state').textContent = { ok: 'Pastas medidas', stale: 'Medição antiga', calculating: 'Calculando pastas', unavailable: 'Pastas indisponíveis' }[storage.state] || 'Pastas indisponíveis';
+      for (const key of ['movies', 'series', 'torrents', 'other']) {
+        const value = storage[`${key}_bytes`];
+        $(key).textContent = bytes(value);
+        $(`${key}-bar`).style.width = isNumber(value) && cap.total_bytes > 0 ? `${clamp(100 * value / cap.total_bytes)}%` : '0%';
+      }
+    }
+    async function refresh() {
+      try {
+        const response = await fetch('/api/v1/status', { cache: 'no-store' });
+        if (!response.ok) throw new Error('status unavailable');
+        render(await response.json());
+      } catch (_) { setLive('unavailable'); }
+    }
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>

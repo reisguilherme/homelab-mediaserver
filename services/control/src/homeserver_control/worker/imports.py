@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 
 class ImportError(RuntimeError):
@@ -14,6 +15,50 @@ class ImportResult:
     source: Path
     destination: Path
     bytes_imported: int
+
+
+def probe_hardlink_as(source: Path, destination_dir: Path, *, uid: int, gid: int) -> bool:
+    """Test a real hardlink with the Arr process identity, leaving no library file."""
+    if not hasattr(os, "fork") or uid < 0 or gid < 0:
+        return False
+    try:
+        source_stat = source.stat()
+        directory_stat = destination_dir.stat()
+    except OSError:
+        return False
+    if not destination_dir.is_dir() or source_stat.st_dev != directory_stat.st_dev:
+        return False
+    target = destination_dir / f".homeserver-link-probe-{uuid4().hex}"
+    pid = os.fork()
+    if pid == 0:
+        linked = False
+        success = False
+        try:
+            if os.geteuid() == 0:
+                os.setgroups([])
+            if os.getegid() != gid:
+                os.setgid(gid)
+            if os.geteuid() != uid:
+                os.setuid(uid)
+            os.link(source, target)
+            linked = True
+            linked_stat = target.stat()
+            success = (
+                linked_stat.st_dev == source_stat.st_dev
+                and linked_stat.st_ino == source_stat.st_ino
+                and linked_stat.st_size == source_stat.st_size
+            )
+        except OSError:
+            pass
+        finally:
+            if linked:
+                try:
+                    target.unlink()
+                except OSError:
+                    success = False
+        os._exit(0 if success else 1)
+    _, status = os.waitpid(pid, 0)
+    return os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
 
 
 def _same_payload(left: Path, right: Path) -> bool:

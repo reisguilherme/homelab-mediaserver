@@ -21,37 +21,52 @@ class SubtitleArtifactStore:
         return connection
 
     def put(
-        self, reservation_id: str, scope_key: str | None, infohash: str, content: bytes
+        self, reservation_id: str, scope_key: str | None, infohash: str, content: bytes,
+        *, language: str = "BR_PT",
     ) -> None:
+        if language not in {"BR_PT", "EN"}:
+            raise ValueError("unsupported subtitle language")
         if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", infohash):
             raise ValueError("invalid subtitle torrent hash")
         if not valid_srt(content):
-            raise ValueError("invalid Brazilian Portuguese SRT")
+            raise ValueError("invalid SRT")
         digest = hashlib.sha256(content).hexdigest()
         with self._connect() as connection:
-            connection.execute(
-                """INSERT OR IGNORE INTO subtitle_artifacts
-                (reservation_id, scope_key, infohash, source, language, sha256, content)
-                VALUES (?, ?, ?, 'subdl', 'BR_PT', ?, ?)""",
-                (reservation_id, scope_key or "", infohash.lower(), digest, content),
-            )
             row = connection.execute(
-                """SELECT sha256 FROM subtitle_artifacts
+                """SELECT language, sha256, content FROM subtitle_artifacts
                 WHERE reservation_id = ? AND scope_key = ? AND infohash = ?""",
                 (reservation_id, scope_key or "", infohash.lower()),
             ).fetchone()
-            if row is None or row[0] != digest:
+            if row is None:
+                connection.execute(
+                    """INSERT INTO subtitle_artifacts
+                    (reservation_id, scope_key, infohash, source, language, sha256, content)
+                    VALUES (?, ?, ?, 'subdl', ?, ?, ?)""",
+                    (reservation_id, scope_key or "", infohash.lower(), language, digest, content),
+                )
+            elif row[0] == "EN" and language == "BR_PT":
+                connection.execute(
+                    """UPDATE subtitle_artifacts SET language = ?, sha256 = ?, content = ?
+                    WHERE reservation_id = ? AND scope_key = ? AND infohash = ?""",
+                    (language, digest, content, reservation_id, scope_key or "", infohash.lower()),
+                )
+            elif row[0] == "BR_PT" and language == "EN":
+                return
+            elif row[0] != language or row[1] != digest or row[2] != content:
                 raise ValueError("subtitle artifact conflicts with an existing permit")
 
     def get(
-        self, reservation_id: str, scope_key: str | None, infohash: str
+        self, reservation_id: str, scope_key: str | None, infohash: str,
+        *, language: str = "BR_PT",
     ) -> bytes | None:
+        if language not in {"BR_PT", "EN"}:
+            raise ValueError("unsupported subtitle language")
         with self._connect() as connection:
             row = connection.execute(
                 """SELECT sha256, content FROM subtitle_artifacts
                 WHERE reservation_id = ? AND scope_key = ? AND infohash = ?
-                AND source = 'subdl' AND language = 'BR_PT'""",
-                (reservation_id, scope_key or "", infohash.lower()),
+                AND source = 'subdl' AND language = ?""",
+                (reservation_id, scope_key or "", infohash.lower(), language),
             ).fetchone()
         if row is None:
             return None

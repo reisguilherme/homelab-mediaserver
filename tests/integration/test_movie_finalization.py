@@ -1,3 +1,4 @@
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from homeserver_control.domain.media_probe import MediaProbe
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
+from homeserver_control.worker.capacity_evidence import CapacityEvidence
 from homeserver_control.worker.finalization import MovieFinalizer
 from homeserver_control.worker.validation import ValidationError, ValidationResult
 
@@ -48,7 +50,16 @@ async def test_completed_movie_is_validated_before_one_radarr_import(tmp_path, m
     posts = []
     imported = False
     hardlinks_enabled = False
+    copy_bytes = 5 + (film / "movie.pt-BR.srt").stat().st_size
+    free_bytes = copy_bytes + 2
     library = tmp_path / "media"
+
+    async def capacity_provider():
+        return CapacityEvidence(
+            free_bytes=free_bytes,
+            remaining_by_hash={permit.infohash: 0},
+            other_pending_bytes=3,
+        )
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v3/config/mediamanagement":
@@ -81,15 +92,22 @@ async def test_completed_movie_is_validated_before_one_radarr_import(tmp_path, m
             gateway_url="http://download-gateway:8081", arr_token="secret",
             radarr_url="http://radarr:7878", radarr_api_key="secret", client=client,
         )
+        finalizer.capacity_provider = capacity_provider
         assert (
             await finalizer.finalize("movie:tmdb:1101383", reserved.reservation_id)
             == "import_guard"
         )
         hardlinks_enabled = True
-        assert (
-            await finalizer.finalize("movie:tmdb:1101383", reserved.reservation_id)
-            == "import_requested"
-        )
+        library.mkdir()
+        assert await finalizer.finalize(
+            "movie:tmdb:1101383", reserved.reservation_id
+        ) == "waiting_space"
+        finalizer.import_uid = os.getuid()
+        finalizer.import_gid = os.getgid()
+        assert await finalizer.finalize(
+            "movie:tmdb:1101383", reserved.reservation_id
+        ) == "import_requested"
+        assert len(posts) == 1
         assert (
             await finalizer.finalize("movie:tmdb:1101383", reserved.reservation_id)
             == "import_pending"
@@ -97,6 +115,18 @@ async def test_completed_movie_is_validated_before_one_radarr_import(tmp_path, m
         (library / "Film").mkdir(parents=True)
         (library / "Film/movie.mkv").write_bytes(b"video")
         imported = True
+        assert (
+            await finalizer.finalize("movie:tmdb:1101383", reserved.reservation_id)
+            == "import_uncertain"
+        )
+        (library / "Film/movie.mkv").unlink()
+        os.link(film / "movie.mkv", library / "Film/movie.mkv")
+        (library / "Film/movie.pt-BR.srt").write_text(
+            "1\n00:00:01,000 --> 00:00:02,000\nLegenda errada\n", encoding="utf-8"
+        )
+        with pytest.raises(ValidationError, match="differs"):
+            await finalizer.finalize("movie:tmdb:1101383", reserved.reservation_id)
+        (library / "Film/movie.pt-BR.srt").unlink()
         assert await finalizer.finalize("movie:tmdb:1101383", reserved.reservation_id) == "complete"
     assert len(posts) == 1
     assert repo.import_state(reserved.reservation_id) == "complete"
@@ -104,6 +134,39 @@ async def test_completed_movie_is_validated_before_one_radarr_import(tmp_path, m
         (library / "Film/movie.pt-BR.srt").stat().st_ino
         == (film / "movie.pt-BR.srt").stat().st_ino
     )
+
+
+def test_copy_import_must_match_source_bytes(tmp_path):
+    repo = ReservationRepository(tmp_path / "control.sqlite")
+    repo.initialize()
+    reserved = repo.reserve(
+        request_id="seerr:2", source_id="2", media_key="movie:tmdb:1101383",
+        filesystem_id="fixture", budget_bytes=100,
+        free_bytes=1000, total_bytes=2000,
+    )
+    assert reserved.reservation_id
+    permits = PermitRegistry(tmp_path / "control.sqlite")
+    permit = permits.issue(
+        infohash="a" * 40, metadata_sha256="b" * 64,
+        destination="/data/torrents", category="radarr",
+        reservation_id=reserved.reservation_id,
+        selected_files=("Film/movie.mkv",), budget_bytes=100,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    source = tmp_path / "torrents" / "Film" / "movie.mkv"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"video")
+    imported = tmp_path / "media" / "Film" / "movie.mkv"
+    imported.parent.mkdir(parents=True)
+    imported.write_bytes(b"other")
+    finalizer = MovieFinalizer(
+        repository=repo, permits=permits, torrent_root=tmp_path / "torrents",
+        media_root=tmp_path / "media", gateway_url="http://gateway",
+        arr_token="secret", radarr_url="http://radarr", radarr_api_key="secret",
+    )
+    assert not finalizer._import_matches_source(imported, permit, copy_allowed=True)
+    imported.write_bytes(b"video")
+    assert finalizer._import_matches_source(imported, permit, copy_allowed=True)
 
 
 @pytest.mark.asyncio
@@ -160,6 +223,10 @@ async def test_finalizer_rejects_legacy_portugal_subtitle_permit(tmp_path, monke
             gateway_url="http://download-gateway:8081", arr_token="secret",
             radarr_url="http://radarr:7878", radarr_api_key="secret", client=client,
         )
+        async def capacity_provider():
+            return CapacityEvidence(free_bytes=100, remaining_by_hash={})
+
+        finalizer.capacity_provider = capacity_provider
         with pytest.raises(ValidationError, match="Brazilian"):
             await finalizer.finalize("movie:tmdb:1101383", reserved.reservation_id)
     assert repo.import_state(reserved.reservation_id) is None
@@ -204,7 +271,10 @@ async def test_incomplete_torrent_cannot_be_imported(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_external_subdl_movie_subtitle_is_required_and_installed(tmp_path, monkeypatch):
+@pytest.mark.parametrize("subtitle_case", ["brazilian", "english", "original_ptbr"])
+async def test_movie_subtitle_priority_and_original_audio(
+    tmp_path, monkeypatch, subtitle_case
+):
     database = tmp_path / "control.sqlite"
     repo = ReservationRepository(database)
     repo.initialize()
@@ -230,25 +300,34 @@ async def test_external_subdl_movie_subtitle_is_required_and_installed(tmp_path,
     torrent_folder = tmp_path / "torrents" / "Film"
     torrent_folder.mkdir(parents=True)
     (torrent_folder / "movie.mkv").write_bytes(b"video")
-    srt = b"1\n00:00:01,000 --> 00:00:02,000\nLegenda brasileira\n"
+    brazilian_srt = b"1\n00:00:01,000 --> 00:00:02,000\nLegenda brasileira\n"
+    english_srt = b"1\n00:00:01,000 --> 00:00:02,000\nEnglish subtitle\n"
+    raw = {"streams": [{
+        "codec_type": "audio", "tags": {"language": "pt-BR", "title": "Original"},
+    }]} if subtitle_case == "original_ptbr" else {}
     monkeypatch.setattr(
         "homeserver_control.worker.finalization.validate_media",
         lambda path, **_kwargs: ValidationResult(
-            Path(path), 5, MediaProbe(1920, 1080, ("eng",), (), {}),
+            Path(path), 5, MediaProbe(1920, 1080, ("por",) if raw else ("eng",), (), raw),
         ),
     )
     imported = False
     posts = []
 
-    class LaterSubtitles:
-        calls = 0
+    class AvailableSubtitles:
+        def __init__(self):
+            self.calls = []
 
-        async def fetch(self, *, tmdb_id, release_title):
+        async def fetch(self, *, tmdb_id, release_title, language="BR_PT"):
             assert (tmdb_id, release_title) == (152532, "Film.1080p.BluRay")
-            self.calls += 1
-            return srt if self.calls == 2 else None
+            self.calls.append(language)
+            if language == "BR_PT" and subtitle_case == "brazilian":
+                return brazilian_srt
+            if language == "EN":
+                return english_srt
+            return None
 
-    source = LaterSubtitles()
+    source = AvailableSubtitles()
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v3/config/mediamanagement":
@@ -279,16 +358,30 @@ async def test_external_subdl_movie_subtitle_is_required_and_installed(tmp_path,
             arr_token="secret", radarr_url="http://radarr:7878",
             radarr_api_key="secret", client=client, subtitle_source=source,
         )
-        assert await finalizer.finalize(
-            "movie:tmdb:152532", reserved.reservation_id
-        ) == "waiting_subtitles"
-        assert not posts
+        async def capacity_provider():
+            return CapacityEvidence(
+                free_bytes=100, remaining_by_hash={permit.infohash: 0}
+            )
+
+        finalizer.capacity_provider = capacity_provider
         assert await finalizer.finalize(
             "movie:tmdb:152532", reserved.reservation_id
         ) == "import_requested"
+        expected_calls = {
+            "brazilian": ["BR_PT"],
+            "english": ["BR_PT", "EN"],
+            "original_ptbr": [],
+        }[subtitle_case]
+        assert source.calls == expected_calls
+        expected_subtitle = {
+            "brazilian": brazilian_srt,
+            "english": english_srt,
+            "original_ptbr": None,
+        }[subtitle_case]
         assert SubtitleArtifactStore(database).get(
-            reserved.reservation_id, None, permit.infohash
-        ) == srt
+            reserved.reservation_id, None, permit.infohash,
+            language="EN" if subtitle_case == "english" else "BR_PT",
+        ) == expected_subtitle
         destination = library / "Film"
         destination.mkdir(parents=True)
         (destination / "movie.mkv").write_bytes(b"video")
@@ -297,4 +390,34 @@ async def test_external_subdl_movie_subtitle_is_required_and_installed(tmp_path,
             "movie:tmdb:152532", reserved.reservation_id
         ) == "complete"
     assert len(posts) == 1
-    assert (destination / "movie.pt-BR.srt").read_bytes() == srt
+    if expected_subtitle is None:
+        assert not list(destination.glob("*.srt"))
+    else:
+        suffix = "pt-BR" if subtitle_case == "brazilian" else "en"
+        assert (destination / f"movie.{suffix}.srt").read_bytes() == expected_subtitle
+
+
+def test_import_claims_wait_for_another_pending_import(tmp_path):
+    repo = ReservationRepository(tmp_path / "control.sqlite")
+    repo.initialize()
+    first = repo.reserve(
+        request_id="seerr:1", source_id="1", media_key="movie:tmdb:1",
+        filesystem_id="fixture", budget_bytes=0,
+        free_bytes=100, total_bytes=200,
+    )
+    second = repo.reserve(
+        request_id="seerr:2", source_id="2", media_key="movie:tmdb:2",
+        filesystem_id="fixture", budget_bytes=0,
+        free_bytes=100, total_bytes=200,
+    )
+    assert first.reservation_id and second.reservation_id
+    assert repo.claim_movie_import(first.reservation_id)
+    assert not repo.claim_episode_import("another-episode-permit")
+    assert not repo.claim_movie_import(second.reservation_id)
+    repo.record_movie_import(first.reservation_id, "command-1")
+    repo.complete_movie_import(first.reservation_id)
+    assert repo.claim_episode_import("another-episode-permit")
+    assert not repo.claim_movie_import(second.reservation_id)
+    repo.record_episode_import("another-episode-permit", "command-2")
+    repo.complete_episode_import("another-episode-permit")
+    assert repo.claim_movie_import(second.reservation_id)

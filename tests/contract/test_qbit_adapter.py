@@ -1,4 +1,5 @@
 import httpx
+import pytest
 
 from homeserver_control.adapters.qbittorrent import QBittorrentAdapter
 
@@ -63,3 +64,28 @@ def test_adapter_forwards_permitted_magnet() -> None:
         "infohash": infohash, "savepath": "/data/torrents",
         "category": "radarr", "magnet_url": magnet,
     })["accepted"] is True
+
+
+def test_adapter_starts_or_stops_only_one_exact_torrent_hash() -> None:
+    infohash = "b" * 40
+    commands = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return httpx.Response(200, text="Ok.", headers={"set-cookie": "SID=session"})
+        commands.append((request.url.path, request.content))
+        return httpx.Response(200, text="")
+
+    adapter = QBittorrentAdapter(
+        base_url="http://qbittorrent:8080", username="admin", password="secret",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    adapter.set_running(infohash, running=False)
+    adapter.set_running(infohash, running=True)
+    assert commands == [
+        ("/api/v2/torrents/stop", f"hashes={infohash}".encode()),
+        ("/api/v2/torrents/start", f"hashes={infohash}".encode()),
+    ]
+    with pytest.raises(ValueError, match="invalid infohash"):
+        adapter.set_running("all", running=False)
+    assert len(commands) == 2

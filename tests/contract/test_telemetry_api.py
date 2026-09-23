@@ -44,3 +44,27 @@ def test_telemetry_endpoint_returns_503_when_provider_fails() -> None:
     client = TestClient(create_app(snapshot_provider=failed_provider))
     response = client.get("/api/v1/telemetry")
     assert response.status_code == 503
+
+
+def test_status_dashboard_serves_read_only_page_and_live_snapshot() -> None:
+    status = {
+        "host": {"state": "ok", "cpu_percent": 42.0, "ram_percent": 68.0},
+        "network": {"interface": "enxusb", "rx_bps": 1200, "tx_bps": 300},
+        "capacity": {"total_bytes": 10000, "used_bytes": 6000, "free_bytes": 4000},
+        "storage": {"movies_bytes": 2000, "series_bytes": 1000, "torrents_bytes": 500},
+    }
+    client = TestClient(
+        create_app(snapshot_provider=lambda: _snapshot(), status_provider=lambda: status)
+    )
+    page = client.get("/ui/status")
+    assert page.status_code == 200
+    assert "text/html" in page.headers["content-type"]
+    assert "/api/v1/status" in page.text
+    assert "Tráfego da interface da rota padrão" in page.text
+    assert "password" not in page.text.lower()
+    assert page.headers["cache-control"] == "no-store"
+
+    response = client.get("/api/v1/status")
+    assert response.status_code == 200
+    assert response.json()["network"]["rx_bps"] == 1200
+    assert response.headers["cache-control"] == "no-store"

@@ -13,6 +13,7 @@ from typing import Any, Protocol
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
 
+from homeserver_control.adapters.http import ContractError, EffectUncertain
 from homeserver_control.adapters.qbittorrent import QBittorrentAdapter
 from homeserver_control.domain.magnet import magnet_infohash
 from homeserver_control.domain.torrent_bytes import TorrentBytesError, inspect_torrent
@@ -29,12 +30,17 @@ class QbitClient(Protocol):
 
     def read(self, path: str, params: dict[str, str] | None = None) -> object: ...
 
+    def set_running(self, infohash: str, *, running: bool) -> None: ...
+
 
 class UnconfiguredQbitClient:
     def add_torrent(self, payload: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("qBittorrent upstream is not configured")
 
     def read(self, path: str, params: dict[str, str] | None = None) -> object:
+        raise RuntimeError("qBittorrent upstream is not configured")
+
+    def set_running(self, infohash: str, *, running: bool) -> None:
         raise RuntimeError("qBittorrent upstream is not configured")
 
 
@@ -73,6 +79,65 @@ def create_app(
     def require_admission() -> None:
         if recovery_mode_blocks(recovery_mode_path):
             raise HTTPException(status_code=503, detail="admission blocked by recovery mode")
+
+    @app.post("/internal/series-queue-state")
+    async def series_queue_state(
+        request: Request, x_arr_token: str | None = Header(default=None)
+    ) -> dict[str, str]:
+        if arr_token == "unconfigured" or not token_matches(x_arr_token, arr_token):
+            raise HTTPException(status_code=403, detail="worker credential required")
+        try:
+            body = await request.json()
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="invalid JSON body") from error
+        if not isinstance(body, dict) or set(body) != {"permit_token", "action"}:
+            raise HTTPException(status_code=422, detail="permit and action required")
+        action = body["action"]
+        if action not in {"start", "stop"}:
+            raise HTTPException(status_code=422, detail="unsupported queue action")
+        token = body["permit_token"]
+        permit = permits.get(token) if isinstance(token, str) else None
+        if (
+            permit is None or permit.state != "confirmed"
+            or permit.category != "sonarr" or permit.reservation_id is None
+            or not isinstance(permit.scope_key, str)
+            or not re.fullmatch(r"S[0-9]{2,}E[0-9]{2,}", permit.scope_key)
+            or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
+            or permit.destination != "/data/torrents"
+        ):
+            raise HTTPException(status_code=403, detail="confirmed episode permit required")
+        if action == "start":
+            require_admission()
+        entries = upstream.read("/api/v2/torrents/info", {"hashes": permit.infohash})
+        if not isinstance(entries, list):
+            raise HTTPException(status_code=502, detail="invalid torrent list")
+        matches = [
+            entry for entry in entries if isinstance(entry, dict)
+            and isinstance(entry.get("hash"), str)
+            and entry["hash"].lower() == permit.infohash
+        ]
+        if len(matches) != 1:
+            raise HTTPException(status_code=409, detail="permitted torrent is unavailable")
+        current = matches[0]
+        if (
+            current.get("category") != "sonarr"
+            or not isinstance(current.get("save_path"), str)
+            or current["save_path"].rstrip("/") != permit.destination
+        ):
+            raise HTTPException(status_code=409, detail="torrent identity changed")
+        progress = current.get("progress")
+        if isinstance(progress, (int, float)) and not isinstance(progress, bool) and progress >= 1:
+            return {"state": "complete"}
+        state = current.get("state")
+        if not isinstance(state, str):
+            raise HTTPException(status_code=502, detail="invalid torrent state")
+        stopped = state in {"stoppedDL", "stoppedUP", "pausedDL", "pausedUP"}
+        if action == "stop" and stopped:
+            return {"state": "already_stopped"}
+        if action == "start" and not stopped:
+            return {"state": "already_started"}
+        upstream.set_running(permit.infohash, running=action == "start")
+        return {"state": "started" if action == "start" else "stopped"}
 
     @app.post("/internal/repair-metadata")
     async def repair_metadata(
@@ -113,10 +178,15 @@ def create_app(
             or current.get("progress") != 0
         ):
             raise HTTPException(status_code=409, detail="torrent is not metadata-stalled")
-        upstream.add_torrent({
-            "infohash": permit.infohash, "savepath": permit.destination,
-            "category": permit.category, "torrent_bytes": metadata,
-        })
+        try:
+            upstream.add_torrent({
+                "infohash": permit.infohash, "savepath": permit.destination,
+                "category": permit.category, "torrent_bytes": metadata,
+            })
+        except (ContractError, EffectUncertain):
+            # qBittorrent can apply metadata to an existing magnet while
+            # answering "Fails." for the duplicate add. Inspect the state.
+            pass
         updated = torrent_info()
         if (
             updated is None or not isinstance(updated.get("total_size"), int)

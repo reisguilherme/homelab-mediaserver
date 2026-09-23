@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 
 import httpx
@@ -10,17 +11,20 @@ import httpx
 from homeserver_control.gateway.permits import Permit, PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 
+from .capacity_evidence import CapacityEvidence
 from .finalization import (
     _SUBTITLE,
     _VIDEO,
     MovieFinalizer,
     _subtitle_has_content,
-    _write_external_subtitle,
 )
-from .imports import import_hardlink
 from .series_acquisition import _episode_tag, _single_episode_name
 from .subdl import SubDLSource
-from .subtitle_language import is_brazilian_portuguese_subtitle
+from .subtitle_language import (
+    audio_is_brazilian_portuguese,
+    is_brazilian_portuguese_subtitle,
+    is_english_subtitle,
+)
 from .validation import ValidationError, validate_media
 
 _SEASON_KEY = re.compile(r"season:tmdb:([1-9][0-9]*):([0-9]+)")
@@ -34,12 +38,17 @@ class SeriesFinalizer(MovieFinalizer):
         media_root: str | Path = "/data/media/tv",
         client: httpx.AsyncClient | None = None,
         subtitle_source: SubDLSource | None = None,
+        capacity_provider: Callable[[], Awaitable[CapacityEvidence]] | None = None,
+        import_uid: int | None = None,
+        import_gid: int | None = None,
     ) -> None:
         super().__init__(
             repository=repository, permits=permits, torrent_root=torrent_root,
             gateway_url=gateway_url, arr_token=arr_token,
             radarr_url=sonarr_url, radarr_api_key=sonarr_api_key,
             media_root=media_root, client=client, subtitle_source=subtitle_source,
+            capacity_provider=capacity_provider,
+            import_uid=import_uid, import_gid=import_gid,
         )
         self.sonarr_url = sonarr_url.rstrip("/")
 
@@ -92,32 +101,28 @@ class SeriesFinalizer(MovieFinalizer):
         return path
 
     def _ensure_subtitle(self, video: Path, permit: Permit) -> None:
-        subtitles = [
-            self._local_path(f"/data/torrents/{name}") for name in permit.selected_files
-            if PurePosixPath(name).suffix.lower() in _SUBTITLE
-            and is_brazilian_portuguese_subtitle(name)
-        ]
-        source = next((path for path in subtitles if _subtitle_has_content(path)), None)
-        if source is None:
-            if subtitles:
-                raise ValidationError("Brazilian Portuguese subtitle vanished after import")
-            content = self.subtitle_store.get(
-                permit.reservation_id, permit.scope_key, permit.infohash
-            )
-            if content is None:
-                raise ValidationError("Brazilian Portuguese subtitle vanished after import")
-            _write_external_subtitle(video, content, self.media_root)
-            return
-        target = video.with_name(f"{video.stem}.pt-BR{source.suffix.lower()}")
-        if target.exists():
-            if target.is_symlink() or not _subtitle_has_content(target):
-                raise ValidationError("existing TV subtitle is invalid")
-            return
-        import_hardlink(source, target)
+        match = re.fullmatch(r"S([0-9]{2,})E([0-9]{2,})", permit.scope_key or "")
+        if match is None:
+            raise ValidationError("episode permit scope is invalid")
+        self._validate_selected_episode_subtitles(
+            permit, season=int(match.group(1)), number=int(match.group(2))
+        )
+        self._ensure_subtitle_for_video(video, permit, permit.scope_key)
+
+    @staticmethod
+    def _validate_selected_episode_subtitles(
+        permit: Permit, *, season: int, number: int
+    ) -> None:
+        if any(
+            PurePosixPath(name).suffix.lower() in _SUBTITLE
+            and not _single_episode_name(PurePosixPath(name).name, season, number)
+            for name in permit.selected_files
+        ):
+            raise ValidationError("selected subtitle belongs to another episode")
 
     async def _validate_download(
         self, permit: Permit, *, season: int, number: int
-    ) -> tuple[str, bool, str | None] | None:
+    ) -> tuple[str, bool, bool, bool, str | None] | None:
         response = await self.client.get(
             f"{self.gateway_url}/api/v2/torrents/info",
             params={"hashes": permit.infohash}, headers=self.gateway_headers,
@@ -153,6 +158,9 @@ class SeriesFinalizer(MovieFinalizer):
             and isinstance(item.get("size"), int)
         }
         selected = []
+        self._validate_selected_episode_subtitles(
+            permit, season=season, number=number
+        )
         for relative in permit.selected_files:
             path = self._local_path(f"/data/torrents/{relative}")
             if relative not in sizes or path.stat().st_size != sizes[relative]:
@@ -161,22 +169,41 @@ class SeriesFinalizer(MovieFinalizer):
                 raise ValidationError("selected file is outside torrent content")
             selected.append(path)
         videos = [path for path in selected if path.suffix.lower() in _VIDEO]
-        subtitles = [path for path in selected if path.suffix.lower() in _SUBTITLE
-                     and is_brazilian_portuguese_subtitle(str(path))]
+        subtitle_files = [path for path in selected if path.suffix.lower() in _SUBTITLE]
+        if any(
+            not (is_brazilian_portuguese_subtitle(str(path))
+                 or is_english_subtitle(str(path)))
+            for path in subtitle_files
+        ):
+            raise ValidationError("selected subtitle is not Brazilian Portuguese or English")
+        brazilian_subtitles = [
+            path for path in subtitle_files
+            if is_brazilian_portuguese_subtitle(str(path))
+        ]
+        english_subtitles = [
+            path for path in subtitle_files if is_english_subtitle(str(path))
+        ]
         if (
-            len(videos) != 1 or not _single_episode_name(str(videos[0]), season, number)
+            len(videos) != 1 or not _single_episode_name(videos[0].name, season, number)
         ):
             raise ValidationError("episode video or Brazilian Portuguese subtitle is missing")
         validated = validate_media(videos[0], maximum_bytes=permit.budget_bytes)
         if not validated.probe.audio_languages:
             raise ValidationError("episode has no audio stream")
-        if subtitles and not any(_subtitle_has_content(path) for path in subtitles):
-            raise ValidationError("Brazilian Portuguese subtitle content is not valid")
-        subtitle_ready = bool(subtitles) or self.subtitle_store.get(
-            permit.reservation_id, permit.scope_key, permit.infohash
+        if subtitle_files and any(not _subtitle_has_content(path) for path in subtitle_files):
+            raise ValidationError("selected subtitle content is not valid")
+        brazilian_ready = bool(brazilian_subtitles) or self.subtitle_store.get(
+            permit.reservation_id, permit.scope_key, permit.infohash, language="BR_PT"
         ) is not None
+        english_ready = bool(english_subtitles) or self.subtitle_store.get(
+            permit.reservation_id, permit.scope_key, permit.infohash, language="EN"
+        ) is not None
+        original_ptbr = audio_is_brazilian_portuguese(validated.probe)
         name = torrent.get("name")
-        return content_path, subtitle_ready, name if isinstance(name, str) else None
+        return (
+            content_path, brazilian_ready, english_ready, original_ptbr,
+            name if isinstance(name, str) else None,
+        )
 
     async def finalize(self, media_key: str, reservation_id: str) -> str:
         reservation = self.repository.active_reservation(reservation_id)
@@ -204,11 +231,15 @@ class SeriesFinalizer(MovieFinalizer):
                 seen_complete = True
                 continue
             if state is not None:
-                if state != "accepted":
+                if state not in {"accepted", "accepted_copy"}:
                     return "import_uncertain"
                 if episode.get("hasFile") is not True:
                     return "import_pending"
                 video = await self._imported_video(episode)
+                if not self._import_matches_source(
+                    video, permit, copy_allowed=state == "accepted_copy"
+                ):
+                    return "import_uncertain"
                 self._ensure_subtitle(video, permit)
                 self.repository.complete_episode_import(permit.permit_id)
                 return "complete"
@@ -219,8 +250,8 @@ class SeriesFinalizer(MovieFinalizer):
             )
             if validated_download is None:
                 return "downloading"
-            content_path, subtitle_ready, title = validated_download
-            if not subtitle_ready:
+            content_path, brazilian_ready, english_ready, original_ptbr, title = validated_download
+            if not original_ptbr and not brazilian_ready:
                 if self.subtitle_source is not None and title:
                     found = await self.subtitle_source.fetch(
                         tmdb_id=int(match.group(1)), release_title=title,
@@ -230,12 +261,38 @@ class SeriesFinalizer(MovieFinalizer):
                         self.subtitle_store.put(
                             reservation_id, permit.scope_key, permit.infohash, found
                         )
-                        subtitle_ready = True
-                if not subtitle_ready:
+                        brazilian_ready = True
+            if not original_ptbr and not brazilian_ready and not english_ready:
+                if self.subtitle_source is not None and title:
+                    found = await self.subtitle_source.fetch(
+                        tmdb_id=int(match.group(1)), release_title=title,
+                        season=season, episode=number, language="EN",
+                    )
+                    if found is not None:
+                        self.subtitle_store.put(
+                            reservation_id, permit.scope_key, permit.infohash, found,
+                            language="EN",
+                        )
+                        english_ready = True
+                if not english_ready:
                     return "waiting_subtitles"
             if not await self._hardlink_import_enabled():
                 return "import_guard"
-            if not self.repository.claim_episode_import(permit.permit_id):
+            selected = [
+                self._local_path(f"/data/torrents/{relative}")
+                for relative in permit.selected_files
+            ]
+            video = next(
+                (path for path in selected if path.suffix.lower() in _VIDEO), None
+            )
+            if video is None:
+                raise ValidationError("permit does not identify one episode video")
+            hardlink_ready = self._can_hardlink_video(video)
+            if not hardlink_ready and not await self._copy_fallback_fits(selected):
+                return "waiting_space"
+            if not self.repository.claim_episode_import(
+                permit.permit_id, copy_allowed=not hardlink_ready
+            ):
                 return "import_pending"
             response = await self.client.post(
                 f"{self.sonarr_url}/api/v3/command",

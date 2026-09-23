@@ -23,7 +23,7 @@ from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStor
 from .capacity_evidence import CapacityEvidence
 from .release_quality import release_rank
 from .subdl import SubDLSource
-from .subtitle_language import is_brazilian_portuguese_subtitle
+from .subtitle_language import is_brazilian_portuguese_subtitle, is_english_subtitle
 
 LOGGER = logging.getLogger(__name__)
 _VIDEO_SUFFIXES = {".mkv", ".mp4", ".m4v", ".avi", ".mov"}
@@ -101,11 +101,17 @@ class MovieAcquirer:
             if PurePosixPath(item.path).suffix.lower() in _VIDEO_SUFFIXES
             and not _is_sample_video(item.path)
         ]
-        subtitles = [
+        brazilian_subtitles = [
             item for item in inspected.files
             if PurePosixPath(item.path).suffix.lower() in _SUBTITLE_SUFFIXES
             and is_brazilian_portuguese_subtitle(item.path)
         ]
+        english_subtitles = [
+            item for item in inspected.files
+            if PurePosixPath(item.path).suffix.lower() in _SUBTITLE_SUFFIXES
+            and is_english_subtitle(item.path)
+        ]
+        subtitles = brazilian_subtitles or english_subtitles
         if (
             len(videos) != 1
             or not subtitles and not allow_external_subtitle
@@ -245,17 +251,23 @@ class MovieAcquirer:
                 not isinstance(claimed_hash, str) or claimed_hash.lower() != infohash
             ):
                 continue
-            if not any(PurePosixPath(name).suffix.lower() in _SUBTITLE_SUFFIXES
-                       for name in selected_files):
-                assert self.subtitle_source is not None and self.subtitle_store is not None
+            has_ptbr_sidecar = any(
+                PurePosixPath(name).suffix.lower() in _SUBTITLE_SUFFIXES
+                and is_brazilian_portuguese_subtitle(name)
+                for name in selected_files
+            )
+            if not has_ptbr_sidecar and self.subtitle_source is not None:
+                assert self.subtitle_store is not None
                 title = release.get("title")
                 if not isinstance(title, str):
-                    continue
-                content = await self.subtitle_source.fetch(
-                    tmdb_id=int(match.group(1)), release_title=title
-                )
-                if content is not None:
-                    self.subtitle_store.put(reservation_id, None, infohash, content)
+                    if len(selected_files) == 1:
+                        continue
+                else:
+                    content = await self.subtitle_source.fetch(
+                        tmdb_id=int(match.group(1)), release_title=title
+                    )
+                    if content is not None:
+                        self.subtitle_store.put(reservation_id, None, infohash, content)
             if existing is not None:
                 if (
                     existing.infohash != infohash

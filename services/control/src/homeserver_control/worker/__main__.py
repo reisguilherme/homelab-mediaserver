@@ -73,6 +73,8 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     sonarr_url = os.environ.get("HOMESERVER_SONARR_URL")
     sonarr_key = os.environ.get("HOMESERVER_SONARR_API_KEY")
     arr_token = os.environ.get("HOMESERVER_ARR_TOKEN")
+    arr_uid = int(os.environ["HOMESERVER_ARR_UID"]) if "HOMESERVER_ARR_UID" in os.environ else None
+    arr_gid = int(os.environ["HOMESERVER_ARR_GID"]) if "HOMESERVER_ARR_GID" in os.environ else None
     permits = (
         PermitRegistry(database)
         if (radarr_url and radarr_key) or (sonarr_url and sonarr_key)
@@ -125,6 +127,8 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                     SubDLSource(api_key=subdl_key, client=finalizer_client)
                     if subdl_key else None
                 ),
+                capacity_provider=capacity_provider,
+                import_uid=arr_uid, import_gid=arr_gid,
             )
     if sonarr_url and sonarr_key:
         assert permits is not None
@@ -140,6 +144,8 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
             subtitle_store=subtitle_store,
             torrent_store=torrent_store,
             capacity_provider=capacity_provider,
+            gateway_url="http://download-gateway:8081" if arr_token else None,
+            arr_token=arr_token,
         )
         if arr_token:
             series_finalizer_client = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
@@ -154,6 +160,8 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                     SubDLSource(api_key=subdl_key, client=series_finalizer_client)
                     if subdl_key else None
                 ),
+                capacity_provider=capacity_provider,
+                import_uid=arr_uid, import_gid=arr_gid,
             )
     return WorkerCycle(
         source=source, scheduler=scheduler, acquirer=acquirer, finalizer=finalizer,

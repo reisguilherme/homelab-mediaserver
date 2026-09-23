@@ -222,3 +222,5 @@ def test_worker_reads_subdl_key_from_private_file(tmp_path, monkeypatch) -> None
     assert cycle is not None
     assert cycle.acquirer.subtitle_source.api_key == "test-subdl-key"
     assert cycle.series_acquirer.subtitle_source.api_key == "test-subdl-key"
+    assert cycle.series_acquirer.gateway_url == "http://download-gateway:8081"
+    assert cycle.series_acquirer.arr_token == "gateway-test"

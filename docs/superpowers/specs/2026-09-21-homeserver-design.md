@@ -92,11 +92,11 @@ O plano começará por inventariar versão do Ubuntu, UUID, tipo de sistema de a
 | D03 | Priorizar 4K em casa e fora; aceitar redução de reprodução para 1080p |
 | D04 | Downloads em 4K preferencialmente, com 1080p como resolução mínima |
 | D05 | Dentro da mesma classe de qualidade, preferir dual áudio original + português brasileiro quando confirmado |
-| D06 | Na ausência de dual áudio, aceitar áudio original somente com legenda em português brasileiro confirmada |
+| D06 | Preferir legenda pt-BR; usar inglês confirmado quando pt-BR não existir; dispensar legenda se a faixa original for explicitamente pt-BR |
 | D07 | Filmes sem teto fixo de tamanho; admitir pelo total inspecionado do torrent e espaço livre real |
 | D08 | Episódios e temporadas sem teto fixo; contabilizar cada torrent conhecido e a fila pendente |
 | D09 | Solicitar todas as temporadas disponíveis de uma série e acompanhar futuros episódios |
-| D10 | Temporadas completas admitem cada episódio conhecido quando couber; não reservar episódios sem torrent |
+| D10 | Entre temporadas solicitadas, concluir as anteriores antes das posteriores; em cada temporada, admitir o episódio mais antigo ainda não importado, sem reservar episódios sem torrent |
 | D11 | Temporadas em lançamento não ocupam espaço antes da inspeção do episódio liberado |
 | D12 | Não substituir automaticamente uma versão válida por outra de qualidade ou áudio melhores |
 | D13 | Biblioteca rotativa com exclusão manual; sem apagar automaticamente conteúdos assistidos |
@@ -249,13 +249,13 @@ Validar importação e exclusão inclusive próximo à margem de capacidade. Fal
 
 ### 8.1 Seleção de versões
 
-1. Filtrar candidatos que violem a resolução mínima ou compatibilidade definida nos testes. A legenda exigida é português brasileiro; códigos genéricos `pt` e `por` não comprovam a variante.
+1. Filtrar candidatos que violem a resolução mínima ou compatibilidade definida nos testes. Na seleção de sidecars, preferir português brasileiro e aceitar inglês se pt-BR não estiver disponível; códigos genéricos `pt` e `por` não comprovam a variante brasileira.
 2. Entre os candidatos elegíveis, priorizar remux Blu-ray, depois encode Blu-ray, depois WEB-DL. Não admitir WEBRip, HDTV ou fontes inferiores como fallback automático.
 3. Dentro de cada classe, preferir 2160p a 1080p e então Dolby Vision e Dolby Atmos quando identificáveis. O tamanho real do torrent precisa caber no espaço disponível após os bytes pendentes da fila.
-4. Preferir dual áudio original + português brasileiro quando for comprovado entre candidatos equivalentes; usar áudio original com legenda pt-BR confirmada caso contrário.
+4. Preferir dual áudio original + português brasileiro quando for comprovado entre candidatos equivalentes. Na finalização, preferir legenda pt-BR; usar inglês como fallback validado. Se a faixa de áudio original estiver explicitamente identificada como pt-BR, a legenda é opcional.
 5. Manter o pedido pendente se nenhuma opção atender ao conjunto de regras.
 
-A ordem acima substitui a antiga precedência de dual áudio sobre classe de qualidade. Na aquisição atual, a fonte é classificada pelos campos de qualidade do Radarr e Dolby Vision/Atmos são preferências derivadas do nome da release, não garantias de codec. O download pode começar após a validação do manifesto e da capacidade mesmo sem legenda pt-BR; nesse caso, o arquivo permanece em `/data/torrents`, fora da biblioteca do Jellyfin, até que uma legenda pt-BR seja obtida e validada. Legendas embutidas ou de proveniência genérica exigem outro fluxo de verificação. A ausência de metadados verificáveis ou de espaço continua deixando o pedido pendente.
+A ordem acima substitui a antiga precedência de dual áudio sobre classe de qualidade. Na aquisição atual, a fonte é classificada pelos campos de qualidade do Radarr e Dolby Vision/Atmos são preferências derivadas do nome da release, não garantias de codec. O download pode começar após a validação do manifesto e da capacidade mesmo sem legenda; nesse caso, o arquivo permanece em `/data/torrents`, fora da biblioteca do Jellyfin, até que haja legenda pt-BR, inglês validado como fallback ou comprovação explícita de faixa original pt-BR. A busca externa exige correspondência exata da release; para séries, aceita subsidiariamente legenda do mesmo título, episódio e família de fonte. Esse fallback pode exigir ajuste manual de sincronização quando os cortes diferirem. Legendas embutidas ou de proveniência genérica exigem outro fluxo de verificação. A ausência de metadados verificáveis ou de espaço continua deixando o pedido pendente.
 
 Não haverá uma espera indefinida por uma versão ideal: selecionar entre os candidatos elegíveis na busca atual. A primeira versão que passar na validação será mantida, com upgrades desativados. Corrigir download corrompido ou versão que não atende aos requisitos não constitui upgrade de um conteúdo válido.
 
@@ -279,7 +279,7 @@ Para pacotes de temporada, inspecionar a lista de arquivos e os tamanhos antes d
 
 Quando o Prowlarr redirecionar para um magnet v1, o controlador pode buscar o `.torrent` em um cache de metadados, limitado em tamanho, desde que o hash do pacote corresponda ao hash do magnet e o manifesto passe nas mesmas regras de tamanho e idioma. O controlador persiste os metadados verificados junto à permissão; ao receber o magnet do Arr, o gateway envia o `.torrent` verificado ao qBittorrent, evitando a espera por metadados vindos de peers. Cache indisponível, hash divergente ou metadados não verificáveis mantêm o candidato pendente. Um torrent legado já autorizado e parado por falta de metadados só pode ser reparado pelo gateway com a mesma permissão e o manifesto validado.
 
-Após o download, validar resolução e faixas com ferramenta de inspeção de mídia. Conteúdo somente com áudio original deve ter legenda em português brasileiro confirmada antes de ser anunciado como atendendo ao pedido. Se a legenda estiver indisponível, apresentar estado específico e continuar a busca, evitando notificações de conclusão incorretas.
+Após o download, validar resolução e faixas com ferramenta de inspeção de mídia. Conteúdo com áudio original não brasileiro deve ter legenda pt-BR confirmada ou, se indisponível, legenda inglesa validada antes de ser anunciado como atendendo ao pedido. A faixa original explicitamente marcada pt-BR dispensa legenda; `por` genérico não basta para essa dispensa. Se nenhuma dessas condições for atendida, apresentar estado específico e continuar a busca, evitando notificações de conclusão incorretas.
 
 ## 9. Solicitações, fila e reservas
 
@@ -310,12 +310,13 @@ O pedido aprovado é registrado com compromisso inicial de zero byte. Quando uma
 
 - Uma solicitação acompanha todas as temporadas, sem ocupar espaço para episódios ainda sem torrent elegível.
 - Cada episódio conhecido recebe sua própria permissão pelo tamanho integral do torrent inspecionado.
-- Episódios são baixados e disponibilizados individualmente conforme couberem; um episódio grande aguardando espaço não impede outro que caiba.
+- Considerar somente temporadas com reserva Seerr ativa para a série. Entre elas, concluir a mais antiga antes de iniciar a próxima; dentro de cada temporada, buscar o episódio lançado mais antigo ainda não importado. Se faltar fonte elegível, espaço ou importação, as unidades posteriores da mesma série aguardam, mas outros pedidos continuam elegíveis.
+- Para torrents de episódios já admitidos antes desta regra, parar os posteriores sem apagar seus dados ou permissões e retomar somente o próximo da sequência após a importação validada do anterior. Antes de cada retomada, conferir o espaço livre e os bytes pendentes da fila; sem evidência recente ou espaço suficiente, manter o torrent pausado.
 - Episódios já validados não são substituídos automaticamente por versões de qualidade diferente.
 
 ### 9.4 Temporadas em lançamento
 
-Episódios futuros não consomem espaço antes de existir uma release verificável. Quando um novo episódio for lançado, o controlador consulta novamente o espaço livre e a fila, e emite uma permissão exata apenas se couber. A temporada pode aguardar espaço sem bloquear os demais pedidos.
+Episódios futuros não consomem espaço antes de existir uma release verificável. Quando um novo episódio for lançado, o controlador consulta novamente o espaço livre e a fila, e emite uma permissão exata apenas se couber. A sequência considera apenas as temporadas solicitadas da série: o próximo episódio e a próxima temporada aguardam a importação dos anteriores, sem bloquear outros pedidos.
 
 ### 9.5 Contabilidade e proteção de espaço
 

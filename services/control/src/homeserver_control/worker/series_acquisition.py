@@ -22,7 +22,7 @@ from .acquisition import _SUBTITLE_SUFFIXES, _VIDEO_SUFFIXES, MovieAcquirer, _is
 from .capacity_evidence import CapacityEvidence
 from .release_quality import release_rank
 from .subdl import SubDLSource
-from .subtitle_language import is_brazilian_portuguese_subtitle
+from .subtitle_language import is_brazilian_portuguese_subtitle, is_english_subtitle
 
 LOGGER = logging.getLogger(__name__)
 _SEASON_KEY = re.compile(r"season:tmdb:([1-9][0-9]*):([0-9]+)")
@@ -69,6 +69,7 @@ class SeriesAcquirer(MovieAcquirer):
         subtitle_store: SubtitleArtifactStore | None = None,
         torrent_store: TorrentArtifactStore | None = None,
         capacity_provider: Callable[[], Awaitable[CapacityEvidence]] | None = None,
+        gateway_url: str | None = None, arr_token: str | None = None,
     ) -> None:
         super().__init__(
             repository=repository, permits=permits, radarr_url=sonarr_url,
@@ -79,6 +80,94 @@ class SeriesAcquirer(MovieAcquirer):
             capacity_provider=capacity_provider,
         )
         self.sonarr_url = sonarr_url.rstrip("/")
+        if bool(gateway_url) != bool(arr_token):
+            raise ValueError("gateway URL and worker token must be configured together")
+        self.gateway_url = gateway_url.rstrip("/") if gateway_url else None
+        self.arr_token = arr_token
+
+    async def _reconcile_existing_queue(
+        self, *, episodes: list[dict[str, object]], season: int,
+        reservation_id: str, active_episode_id: int | None,
+        imported_episode_ids: set[int],
+    ) -> str | None:
+        if self.gateway_url is None or self.arr_token is None:
+            return None
+        changes: list[tuple[str, str]] = []
+        seen_scopes: set[str] = set()
+        for item in episodes:
+            if item["seasonNumber"] != season or item["id"] in imported_episode_ids:
+                continue
+            scope = _episode_tag(season, item["episodeNumber"])
+            if scope in seen_scopes:
+                continue
+            seen_scopes.add(scope)
+            permit = self.permits.get_for_reservation(reservation_id, scope_key=scope)
+            if permit is None or permit.state != "confirmed":
+                continue
+            action = "start" if item["id"] == active_episode_id else "stop"
+            changes.append((action, permit.token))
+        # Stop later torrents before considering a capacity-checked start.
+        for action, token in sorted(changes, key=lambda item: item[0] != "stop"):
+            blocked_status = None
+            if action == "start":
+                if self.capacity_provider is None:
+                    blocked_status = "capacity_unavailable"
+                else:
+                    try:
+                        capacity = await self.capacity_provider()
+                        pending_bytes = self.permits.pending_bytes(capacity)
+                    except Exception as error:
+                        LOGGER.warning(
+                            "series capacity evidence unavailable: %s", type(error).__name__
+                        )
+                        blocked_status = "capacity_unavailable"
+                    else:
+                        if pending_bytes > capacity.free_bytes:
+                            blocked_status = "waiting_space"
+                if blocked_status is not None:
+                    action = "stop"
+            response = await self.client.post(
+                f"{self.gateway_url}/internal/series-queue-state",
+                headers={"X-Arr-Token": self.arr_token},
+                json={"permit_token": token, "action": action},
+            )
+            response.raise_for_status()
+            if blocked_status is not None:
+                return blocked_status
+        return None
+
+    def _requested_seasons(self, tmdb_id: int) -> dict[int, str]:
+        seasons: dict[int, str] = {}
+        for reservation_id, _ in self.repository.active_seerr_requests():
+            reservation = self.repository.active_reservation(reservation_id)
+            if reservation is None:
+                continue
+            media_key = reservation.get("media_key")
+            match = _SEASON_KEY.fullmatch(media_key) if isinstance(media_key, str) else None
+            if match is not None and int(match.group(1)) == tmdb_id:
+                number = int(match.group(2))
+                if number > 0:
+                    seasons[number] = reservation_id
+        return seasons
+
+    def _episode_imported(
+        self, item: dict[str, object], reservations_by_season: dict[int, str]
+    ) -> bool:
+        if item.get("hasFile") is not True:
+            return False
+        season = item["seasonNumber"]
+        episode = item["episodeNumber"]
+        reservation_id = reservations_by_season.get(season)
+        if reservation_id is None:
+            return False
+        permit = self.permits.get_for_reservation(
+            reservation_id, scope_key=_episode_tag(season, episode)
+        )
+        return (
+            permit is None
+            or permit.state != "confirmed"
+            or self.repository.episode_import_state(permit.permit_id) == "complete"
+        )
 
     @staticmethod
     def _eligible_episode_manifest(
@@ -92,12 +181,22 @@ class SeriesAcquirer(MovieAcquirer):
         videos = [item for item in inspected.files
                   if PurePosixPath(item.path).suffix.lower() in _VIDEO_SUFFIXES
                   and not _is_sample_video(item.path)]
-        subtitles = [item for item in inspected.files
-                     if PurePosixPath(item.path).suffix.lower() in _SUBTITLE_SUFFIXES
-                     and is_brazilian_portuguese_subtitle(item.path)]
+        pt_br_subtitles = [item for item in inspected.files
+                           if PurePosixPath(item.path).suffix.lower() in _SUBTITLE_SUFFIXES
+                           and is_brazilian_portuguese_subtitle(item.path)
+                           and _single_episode_name(
+                               PurePosixPath(item.path).name, season, episode
+                           )]
+        english_subtitles = [item for item in inspected.files
+                             if PurePosixPath(item.path).suffix.lower() in _SUBTITLE_SUFFIXES
+                             and is_english_subtitle(item.path)
+                             and _single_episode_name(
+                                 PurePosixPath(item.path).name, season, episode
+                             )]
+        subtitles = pt_br_subtitles or english_subtitles
         if (
             len(videos) != 1 or videos[0].length <= 0
-            or not _single_episode_name(videos[0].path, season, episode)
+            or not _single_episode_name(PurePosixPath(videos[0].path).name, season, episode)
             or not subtitles and not allow_external_subtitle
         ):
             return None
@@ -199,6 +298,30 @@ class SeriesAcquirer(MovieAcquirer):
         episodes_payload = episodes_response.json()
         if not isinstance(episodes_payload, list):
             raise ValueError("Sonarr episode response is invalid")
+        reservations_by_season = self._requested_seasons(tmdb_id)
+        reservations_by_season.setdefault(season, reservation_id)
+        chronological = sorted(
+            (item for item in episodes_payload if isinstance(item, dict)
+             and isinstance(item.get("seasonNumber"), int)
+             and not isinstance(item["seasonNumber"], bool)
+             and item["seasonNumber"] in reservations_by_season
+             and isinstance(item.get("episodeNumber"), int)
+             and not isinstance(item["episodeNumber"], bool)
+             and item["episodeNumber"] > 0
+             and isinstance(item.get("id"), int)),
+            key=lambda item: (item["seasonNumber"], item["episodeNumber"]),
+        )
+        known_seasons = {item["seasonNumber"] for item in chronological}
+        earlier_catalog_complete = all(
+            number in known_seasons for number in reservations_by_season if number < season
+        )
+        imported_episode_ids = {
+            item["id"] for item in chronological
+            if self._episode_imported(item, reservations_by_season)
+        }
+        first_missing = next(
+            (item for item in chronological if item["id"] not in imported_episode_ids), None
+        )
         episode_rows = sorted(
             (item for item in episodes_payload if isinstance(item, dict)
              and item.get("seasonNumber") == season
@@ -207,8 +330,6 @@ class SeriesAcquirer(MovieAcquirer):
              and item.get("monitored") is True),
             key=lambda item: item["episodeNumber"],
         )
-        if not episode_rows:
-            return "season_not_monitored"
         now_utc = datetime.now(UTC)
         pending: list[dict[str, object]] = []
         future = False
@@ -224,17 +345,43 @@ class SeriesAcquirer(MovieAcquirer):
                 continue
             if not aired:
                 future = True
-            elif item.get("hasFile") is not True:
+            elif item["id"] not in imported_episode_ids:
                 pending.append(item)
+        active_episode_id = (
+            first_missing["id"]
+            if earlier_catalog_complete and first_missing is not None
+            and first_missing["seasonNumber"] == season
+            and pending and pending[0]["id"] == first_missing["id"]
+            else None
+        )
+        queue_status = await self._reconcile_existing_queue(
+            episodes=chronological, season=season, reservation_id=reservation_id,
+            active_episode_id=active_episode_id,
+            imported_episode_ids=imported_episode_ids,
+        )
+        if queue_status is not None:
+            return queue_status
+        if (
+            not earlier_catalog_complete
+            or first_missing is not None and first_missing["seasonNumber"] < season
+        ):
+            return "waiting_previous_season"
+        if not episode_rows:
+            return "season_not_monitored"
         if not pending:
             return "waiting_episodes" if future else "already_imported"
+        if active_episode_id is None:
+            return "waiting_episodes"
         waiting_space = False
         no_source = False
-        for item in pending:
+        # A later episode can start only after Sonarr has imported the earliest missing one.
+        for item in pending[:1]:
             number = item["episodeNumber"]
             scope = _episode_tag(season, number)
             self.permits.retire_expired_authorized(reservation_id, scope_key=scope)
             existing = self.permits.get_for_reservation(reservation_id, scope_key=scope)
+            if item.get("hasFile") is True:
+                return "waiting_episodes"
             if existing is not None and existing.state != "authorized":
                 continue
             if (reservation_id, scope) in self._posted:

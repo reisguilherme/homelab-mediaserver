@@ -31,12 +31,15 @@ def _torrent(
     *, subtitle: bool, subtitle_name: bytes = b"movie.pt-BR.srt",
     video_bytes: int = 1_500_000_000,
     extra_video_path: list[bytes] | None = None,
+    extra_subtitle_name: bytes | None = None,
 ) -> bytes:
     files = [{b"length": video_bytes, b"path": [b"movie.mkv"]}]
     if extra_video_path is not None:
         files.append({b"length": 79_000_000, b"path": extra_video_path})
     if subtitle:
         files.append({b"length": 1000, b"path": [subtitle_name]})
+    if extra_subtitle_name is not None:
+        files.append({b"length": 1000, b"path": [extra_subtitle_name]})
     total = sum(item[b"length"] for item in files)
     info = {
         b"files": files,
@@ -111,6 +114,21 @@ def test_manifest_excludes_sample_video_but_rejects_second_feature():
     ) is None
 
 
+def test_manifest_selects_english_sidecar_only_when_brazilian_portuguese_is_absent():
+    english_only = _torrent(subtitle=True, subtitle_name=b"movie.en.srt")
+    manifest = MovieAcquirer._eligible_manifest(english_only)
+    assert manifest is not None
+    assert manifest[2] == ("Film/movie.mkv", "Film/movie.en.srt")
+
+    both = _torrent(
+        subtitle=True, subtitle_name=b"movie.pt-BR.srt",
+        extra_subtitle_name=b"movie.en.srt",
+    )
+    manifest = MovieAcquirer._eligible_manifest(both)
+    assert manifest is not None
+    assert manifest[2] == ("Film/movie.mkv", "Film/movie.pt-BR.srt")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("subtitle_available", [True, False])
 async def test_movie_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path, subtitle_available):
@@ -173,6 +191,62 @@ async def test_movie_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path, s
     assert permit is not None
     assert permit.selected_files == ("Film/movie.mkv",)
     assert torrents.get(permit) == torrent
+
+
+@pytest.mark.asyncio
+async def test_movie_grab_searches_subdl_ptbr_even_when_torrent_has_english_sidecar(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path)
+    store = SubtitleArtifactStore(repo.path)
+    torrent = _torrent(subtitle=True, subtitle_name=b"movie.en.srt")
+    infohash = inspect_torrent(torrent).infohash
+    srt = b"1\n00:00:01,000 --> 00:00:02,000\nLegenda brasileira\n"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/movie":
+            return httpx.Response(200, json=[{"id": 2, "tmdbId": 1101383, "hasFile": False}])
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            return httpx.Response(200, json=[{
+                "guid": "english-sidecar", "indexerId": 2,
+                "title": "Dallas Buyers Club 2013 1080p BluRay x264 SPARKS",
+                "size": inspect_torrent(torrent).total_bytes,
+                "downloadUrl": "http://prowlarr:9696/2/download?id=1",
+                "infoHash": infohash, "rejected": False,
+                "quality": {"quality": {
+                    "source": "bluray", "modifier": "none", "resolution": 1080,
+                }}, "protocol": "torrent",
+            }])
+        if request.url.path == "/2/download":
+            return httpx.Response(200, content=torrent)
+        if request.url.host == "api.subdl.com":
+            assert request.url.params["languages"] == "BR_PT"
+            return httpx.Response(200, json={
+                "status": True, "results": [{"tmdb_id": 1101383, "type": "movie"}],
+                "subtitles": [{"language": "BR_PT", "unpack_files": [{
+                    "language": "BR_PT", "format": "srt", "size": len(srt),
+                    "release_name": "Dallas.Buyers.Club.2013.1080p.BluRay.x264-SPARKS",
+                    "url": "/subtitle/123/abc",
+                }]}],
+            })
+        if request.url.host == "dl.subdl.com":
+            return httpx.Response(200, content=srt)
+        if request.url.path == "/api/v3/release" and request.method == "POST":
+            assert store.get(reservation_id, None, infohash) == srt
+            return httpx.Response(200, json={"guid": "english-sidecar"})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
+            subtitle_source=SubDLSource(api_key="test-key", client=client),
+            subtitle_store=store,
+        )
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "grabbed"
+    assert permits.get_for_reservation(reservation_id).selected_files == (
+        "Film/movie.mkv", "Film/movie.en.srt"
+    )
 
 
 @pytest.mark.asyncio

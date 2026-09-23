@@ -210,7 +210,17 @@ class ReservationRepository:
             ).fetchone()
         return row["state"] if row is not None else None
 
-    def claim_movie_import(self, reservation_id: str) -> bool:
+    @staticmethod
+    def _import_pending(connection: sqlite3.Connection) -> bool:
+        return bool(connection.execute(
+            """SELECT EXISTS(
+                SELECT 1 FROM movie_imports WHERE state != 'complete'
+                UNION ALL
+                SELECT 1 FROM episode_imports WHERE state != 'complete'
+            )"""
+        ).fetchone()[0])
+
+    def claim_movie_import(self, reservation_id: str, *, copy_allowed: bool = False) -> bool:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
@@ -220,10 +230,13 @@ class ReservationRepository:
             if row is None or row["state"] not in {"reserved", "downloading"}:
                 connection.rollback()
                 return False
+            if self._import_pending(connection):
+                connection.rollback()
+                return False
             cursor = connection.execute(
                 """INSERT OR IGNORE INTO movie_imports(reservation_id, state, updated_at)
-                VALUES (?, 'dispatching', ?)""",
-                (reservation_id, _now()),
+                VALUES (?, ?, ?)""",
+                (reservation_id, "dispatching_copy" if copy_allowed else "dispatching", _now()),
             )
             connection.commit()
             return cursor.rowcount == 1
@@ -233,8 +246,10 @@ class ReservationRepository:
     def record_movie_import(self, reservation_id: str, command_id: str) -> None:
         with self._connect() as connection:
             connection.execute(
-                """UPDATE movie_imports SET state = 'accepted', command_id = ?, updated_at = ?
-                WHERE reservation_id = ? AND state = 'dispatching'""",
+                """UPDATE movie_imports SET state = CASE state
+                    WHEN 'dispatching_copy' THEN 'accepted_copy' ELSE 'accepted' END,
+                    command_id = ?, updated_at = ?
+                WHERE reservation_id = ? AND state IN ('dispatching', 'dispatching_copy')""",
                 (command_id, _now(), reservation_id),
             )
 
@@ -266,20 +281,30 @@ class ReservationRepository:
             ).fetchone()
         return row["state"] if row is not None else None
 
-    def claim_episode_import(self, permit_id: str) -> bool:
-        with self._connect() as connection:
+    def claim_episode_import(self, permit_id: str, *, copy_allowed: bool = False) -> bool:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._import_pending(connection):
+                connection.rollback()
+                return False
             cursor = connection.execute(
                 """INSERT OR IGNORE INTO episode_imports(permit_id, state, updated_at)
-                VALUES (?, 'dispatching', ?)""",
-                (permit_id, _now()),
+                VALUES (?, ?, ?)""",
+                (permit_id, "dispatching_copy" if copy_allowed else "dispatching", _now()),
             )
+            connection.commit()
             return cursor.rowcount == 1
+        finally:
+            connection.close()
 
     def record_episode_import(self, permit_id: str, command_id: str) -> None:
         with self._connect() as connection:
             connection.execute(
-                """UPDATE episode_imports SET state = 'accepted', command_id = ?,
-                updated_at = ? WHERE permit_id = ? AND state = 'dispatching'""",
+                """UPDATE episode_imports SET state = CASE state
+                    WHEN 'dispatching_copy' THEN 'accepted_copy' ELSE 'accepted' END,
+                command_id = ?, updated_at = ? WHERE permit_id = ?
+                AND state IN ('dispatching', 'dispatching_copy')""",
                 (command_id, _now(), permit_id),
             )
 
@@ -287,7 +312,7 @@ class ReservationRepository:
         with self._connect() as connection:
             connection.execute(
                 "UPDATE episode_imports SET state = 'complete', updated_at = ? "
-                "WHERE permit_id = ? AND state = 'accepted'",
+                "WHERE permit_id = ? AND state IN ('accepted', 'accepted_copy')",
                 (_now(), permit_id),
             )
 

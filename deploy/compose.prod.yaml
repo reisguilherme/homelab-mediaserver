@@ -12,6 +12,7 @@ services:
   jellyfin:
     ports:
       - "${LAN_BIND_IP:-127.0.0.1}:8096:8096"
+      - "${TAILSCALE_BIND_IP:-127.0.0.1}:8096:8096"
     volumes:
       - type: bind
         source: /srv/appdata/jellyfin
@@ -34,6 +35,9 @@ services:
     environment:
       NODE_OPTIONS: "--no-network-family-autoselection --dns-result-order=ipv4first"
   sonarr:
+    environment:
+      PUID: ${HOMESERVER_ARR_UID:-1000}
+      PGID: ${HOMESERVER_ARR_GID:-1000}
     volumes:
       - type: bind
         source: /srv/appdata/sonarr
@@ -44,6 +48,9 @@ services:
         target: /data
         bind: {create_host_path: false}
   radarr:
+    environment:
+      PUID: ${HOMESERVER_ARR_UID:-1000}
+      PGID: ${HOMESERVER_ARR_GID:-1000}
     volumes:
       - type: bind
         source: /srv/appdata/radarr
@@ -101,6 +108,8 @@ services:
         bind: {create_host_path: false}
   control-worker:
     environment:
+      HOMESERVER_ARR_UID: ${HOMESERVER_ARR_UID:-1000}
+      HOMESERVER_ARR_GID: ${HOMESERVER_ARR_GID:-1000}
       HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
       HOMESERVER_SEERR_URL: ${HOMESERVER_SEERR_URL:-}
       HOMESERVER_SEERR_API_KEY: ${HOMESERVER_SEERR_API_KEY:-}
@@ -153,6 +162,17 @@ services:
     ports: ["${TAILSCALE_BIND_IP:-127.0.0.1}:8081:8080"]
     environment:
       HOMESERVER_TELEMETRY_SNAPSHOT: /run/homeserver/snapshot.json
+    volumes:
+      - type: bind
+        source: /run/homeserver
+        target: /run/homeserver
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/data
+        target: /data
+        read_only: true
+        bind: {create_host_path: false}
   mosquitto:
     ports: ["${LAN_BIND_IP:-127.0.0.1}:8883:8883"]
     volumes:

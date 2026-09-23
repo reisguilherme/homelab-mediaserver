@@ -3,6 +3,7 @@ from hashlib import sha256
 
 from fastapi.testclient import TestClient
 
+from homeserver_control.adapters.http import ContractError
 from homeserver_control.domain.torrent_bytes import inspect_torrent
 from homeserver_control.gateway.app import create_app
 from homeserver_control.gateway.permits import PermitRegistry
@@ -234,6 +235,47 @@ def test_internal_repair_resends_metadata_only_for_stalled_admitted_torrent(tmp_
     ).status_code == 409
 
 
+def test_internal_repair_accepts_metadata_applied_despite_duplicate_response(tmp_path) -> None:
+    inspected = inspect_torrent(TORRENT)
+    permits = PermitRegistry()
+    permit = permits.issue(
+        infohash=inspected.infohash, destination="/data/torrents", category="sonarr",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        metadata_sha256=inspected.metadata_sha256,
+        selected_files=("test.mp4",), budget_bytes=123,
+    )
+    permits.authorize(
+        token=permit.token, infohash=permit.infohash,
+        destination=permit.destination, metadata_sha256=permit.metadata_sha256,
+        effect=lambda _permit: {"accepted": True},
+    )
+    store = TorrentArtifactStore(tmp_path / "artifacts.sqlite")
+    store.put(permit, TORRENT)
+
+    class DuplicateUpstream(Upstream):
+        total_size = -1
+
+        def read(self, path, params=None):
+            if path == "/api/v2/torrents/info":
+                return [{"hash": inspected.infohash, "total_size": self.total_size,
+                         "downloaded": 0, "progress": 0}]
+            return super().read(path, params)
+
+        def add_torrent(self, payload):
+            self.total_size = 123
+            raise ContractError("qBittorrent add response is incompatible")
+
+    client = TestClient(create_app(
+        permits=permits, upstream=DuplicateUpstream(), arr_token="secret", torrent_store=store,
+    ))
+    response = client.post(
+        "/internal/repair-metadata", json={"permit_token": permit.token},
+        headers={"X-Arr-Token": "secret"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"state": "metadata_available"}
+
+
 def test_arr_magnet_rejects_mismatched_hash_and_unverified_permit() -> None:
     client, permits, upstream = _client()
     client.post("/api/v2/auth/login", data={"username": "arr", "password": "secret"})
@@ -254,3 +296,120 @@ def test_arr_magnet_rejects_mismatched_hash_and_unverified_permit() -> None:
         "category": "radarr",
     }).status_code == 422
     assert upstream.added == []
+
+
+def test_internal_series_queue_state_stops_and_starts_only_confirmed_episode() -> None:
+    inspected = inspect_torrent(TORRENT)
+    permits = PermitRegistry()
+    permit = permits.issue(
+        infohash=inspected.infohash, destination="/data/torrents",
+        category="sonarr", reservation_id="season-reservation",
+        scope_key="S01E02", metadata_sha256=inspected.metadata_sha256,
+        selected_files=("test.mp4",), budget_bytes=123,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    permits.authorize(
+        token=permit.token, infohash=permit.infohash,
+        destination=permit.destination, metadata_sha256=permit.metadata_sha256,
+        effect=lambda _: {"accepted": True},
+    )
+
+    class QueueUpstream(Upstream):
+        state = "downloading"
+
+        def __init__(self):
+            super().__init__()
+            self.mutations = []
+
+        def read(self, path, params=None):
+            if path == "/api/v2/torrents/info":
+                return [{"hash": inspected.infohash, "category": "sonarr",
+                         "save_path": "/data/torrents", "progress": 0.5,
+                         "state": self.state}]
+            return super().read(path, params)
+
+        def set_running(self, infohash, *, running):
+            self.mutations.append((infohash, running))
+            self.state = "downloading" if running else "stoppedDL"
+
+    upstream = QueueUpstream()
+    client = TestClient(create_app(permits=permits, upstream=upstream, arr_token="secret"))
+    body = {"permit_token": permit.token, "action": "stop"}
+    assert client.post("/internal/series-queue-state", json=body).status_code == 403
+    client.post("/api/v2/auth/login", data={"username": "arr", "password": "secret"})
+    assert client.post("/internal/series-queue-state", json=body).status_code == 403
+    headers = {"X-Arr-Token": "secret"}
+    assert client.post("/internal/series-queue-state", json=body, headers=headers).json() == {
+        "state": "stopped"
+    }
+    assert client.post("/internal/series-queue-state", json=body, headers=headers).json() == {
+        "state": "already_stopped"
+    }
+    assert client.post("/internal/series-queue-state", json={
+        **body, "action": "start",
+    }, headers=headers).json() == {"state": "started"}
+    assert upstream.mutations == [(inspected.infohash, False), (inspected.infohash, True)]
+
+
+def test_internal_series_queue_state_rejects_other_torrents_and_completed_data() -> None:
+    inspected = inspect_torrent(TORRENT)
+    permits = PermitRegistry()
+    permit = permits.issue(
+        infohash=inspected.infohash, destination="/data/torrents",
+        category="sonarr", reservation_id="season-reservation",
+        scope_key="S01E02", metadata_sha256=inspected.metadata_sha256,
+        selected_files=("test.mp4",), budget_bytes=123,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    bad_permit = permits.issue(
+        infohash="a" * 40, destination="/data/torrents", category="radarr",
+        reservation_id="movie-reservation", metadata_sha256="a" * 64,
+        selected_files=("movie.mp4",), budget_bytes=123,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    for item in (permit, bad_permit):
+        permits.authorize(
+            token=item.token, infohash=item.infohash,
+            destination=item.destination, metadata_sha256=item.metadata_sha256,
+            effect=lambda _: {"accepted": True},
+        )
+
+    class QueueUpstream(Upstream):
+        info = {"hash": inspected.infohash, "category": "radarr",
+                "save_path": "/data/torrents", "progress": 0.5,
+                "state": "downloading"}
+
+        def __init__(self):
+            super().__init__()
+            self.mutations = []
+
+        def read(self, path, params=None):
+            if path == "/api/v2/torrents/info":
+                return [self.info]
+            return super().read(path, params)
+
+        def set_running(self, infohash, *, running):
+            self.mutations.append((infohash, running))
+
+    upstream = QueueUpstream()
+    client = TestClient(create_app(permits=permits, upstream=upstream, arr_token="secret"))
+    headers = {"X-Arr-Token": "secret"}
+    body = {"permit_token": permit.token, "action": "stop"}
+    assert client.post("/internal/series-queue-state", json={
+        **body, "permit_token": bad_permit.token,
+    }, headers=headers).status_code == 403
+    assert client.post("/internal/series-queue-state", json={
+        **body, "action": "delete",
+    }, headers=headers).status_code == 422
+    assert client.post(
+        "/internal/series-queue-state", json=body, headers=headers
+    ).status_code == 409
+    upstream.info = {**upstream.info, "category": "sonarr", "save_path": "/other"}
+    assert client.post(
+        "/internal/series-queue-state", json=body, headers=headers
+    ).status_code == 409
+    upstream.info = {**upstream.info, "save_path": "/data/torrents", "progress": 1.0}
+    assert client.post("/internal/series-queue-state", json=body, headers=headers).json() == {
+        "state": "complete"
+    }
+    assert upstream.mutations == []
