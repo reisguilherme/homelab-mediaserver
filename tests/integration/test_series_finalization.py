@@ -52,9 +52,12 @@ async def test_completed_episode_is_validated_before_one_sonarr_import(tmp_path,
     )
     posts = []
     imported = False
+    hardlinks_enabled = False
     library = tmp_path / "media"
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/config/mediamanagement":
+            return httpx.Response(200, json={"copyUsingHardlinks": hardlinks_enabled})
         if request.url.path == "/api/v3/series":
             return httpx.Response(200, json=[{"id": 1, "tmdbId": 97546}])
         if request.url.path == "/api/v3/episode":
@@ -89,6 +92,10 @@ async def test_completed_episode_is_validated_before_one_sonarr_import(tmp_path,
             arr_token="secret", sonarr_url="http://sonarr:8989",
             sonarr_api_key="secret", client=client,
         )
+        assert await finalizer.finalize(
+            "season:tmdb:97546:4", reserved.reservation_id
+        ) == "import_guard"
+        hardlinks_enabled = True
         assert await finalizer.finalize(
             "season:tmdb:97546:4", reserved.reservation_id
         ) == "import_requested"
@@ -146,6 +153,8 @@ async def test_external_subdl_episode_subtitle_is_required_and_installed(tmp_pat
     posts = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/config/mediamanagement":
+            return httpx.Response(200, json={"copyUsingHardlinks": True})
         if request.url.path == "/api/v3/series":
             return httpx.Response(200, json=[{"id": 1, "tmdbId": 97546}])
         if request.url.path == "/api/v3/episode":

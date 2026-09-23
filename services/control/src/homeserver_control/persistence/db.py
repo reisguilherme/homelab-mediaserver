@@ -178,6 +178,22 @@ class ReservationRepository:
         with self._connect() as connection:
             return int(connection.execute("SELECT COUNT(*) FROM reservations").fetchone()[0])
 
+    def normalize_verified_budgets(self) -> None:
+        """Replace pre-release estimates with the bytes of persisted permits."""
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """UPDATE reservations SET budget_bytes = COALESCE((
+                    SELECT SUM(p.budget_bytes) FROM gateway_permits p
+                    WHERE p.reservation_id = reservations.id AND p.state != 'revoked'
+                ), 0)
+                WHERE state IN ('reserved', 'downloading', 'waiting_episodes')"""
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
     def active_reservation(self, reservation_id: str) -> dict[str, object] | None:
         with self._connect() as connection:
             row = connection.execute(

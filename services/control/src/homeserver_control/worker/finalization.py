@@ -9,7 +9,6 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
-from homeserver_control.domain.policy import MOVIE_LIMIT_BYTES
 from homeserver_control.domain.subtitle_content import valid_srt
 from homeserver_control.gateway.permits import Permit, PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
@@ -96,6 +95,15 @@ class MovieFinalizer:
         self.gateway_headers = {"X-Arr-Token": arr_token}
         self.radarr_headers = {"X-Api-Key": radarr_api_key}
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(15.0))
+
+    async def _hardlink_import_enabled(self) -> bool:
+        response = await self.client.get(
+            f"{self.radarr_url}/api/v3/config/mediamanagement",
+            headers=self.radarr_headers,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return isinstance(payload, dict) and payload.get("copyUsingHardlinks") is True
 
     def _local_path(self, raw: str) -> Path:
         prefix = "/data/torrents"
@@ -250,7 +258,7 @@ class MovieFinalizer:
         ]
         if len(videos) != 1:
             raise ValidationError("movie video or Brazilian Portuguese subtitle is missing")
-        validated = validate_media(videos[0], maximum_bytes=MOVIE_LIMIT_BYTES)
+        validated = validate_media(videos[0], maximum_bytes=permit.budget_bytes)
         if not validated.probe.audio_languages:
             raise ValidationError("movie has no audio stream")
         if subtitles and not any(_subtitle_has_content(path) for path in subtitles):
@@ -259,6 +267,8 @@ class MovieFinalizer:
             reservation_id, None, permit.infohash
         ) is None:
             raise ValidationError("Brazilian Portuguese subtitle content is not valid")
+        if not await self._hardlink_import_enabled():
+            return "import_guard"
         if not self.repository.claim_movie_import(reservation_id):
             return "import_pending"
         response = await self.client.post(

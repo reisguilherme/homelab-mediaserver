@@ -7,7 +7,6 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
-from homeserver_control.domain.policy import EPISODE_LIMIT_BYTES
 from homeserver_control.gateway.permits import Permit, PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 
@@ -166,7 +165,7 @@ class SeriesFinalizer(MovieFinalizer):
             len(videos) != 1 or not _single_episode_name(str(videos[0]), season, number)
         ):
             raise ValidationError("episode video or Brazilian Portuguese subtitle is missing")
-        validated = validate_media(videos[0], maximum_bytes=EPISODE_LIMIT_BYTES)
+        validated = validate_media(videos[0], maximum_bytes=permit.budget_bytes)
         if not validated.probe.audio_languages:
             raise ValidationError("episode has no audio stream")
         if subtitles and not any(_subtitle_has_content(path) for path in subtitles):
@@ -218,6 +217,8 @@ class SeriesFinalizer(MovieFinalizer):
             )
             if content_path is None:
                 return "downloading"
+            if not await self._hardlink_import_enabled():
+                return "import_guard"
             if not self.repository.claim_episode_import(permit.permit_id):
                 return "import_pending"
             response = await self.client.post(

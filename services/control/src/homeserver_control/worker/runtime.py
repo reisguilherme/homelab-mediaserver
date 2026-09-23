@@ -5,7 +5,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
-from homeserver_control.domain.policy import MOVIE_RESERVATION_BYTES
 from homeserver_control.persistence.db import ReservationResult
 
 from .scheduler import AdmissionCandidate
@@ -45,12 +44,12 @@ class CycleReport:
 
 
 class WorkerCycle:
-    """Reserve approved requests before any optional movie acquisition."""
+    """Track approved requests without claiming disk before inspecting a torrent."""
 
     _budgets = {
-        "movie": MOVIE_RESERVATION_BYTES,
-        "episode": 5_000_000_000,
-        "season": 100_000_000_000,
+        "movie": 0,
+        "episode": 0,
+        "season": 0,
     }
 
     def __init__(

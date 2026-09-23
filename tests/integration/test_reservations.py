@@ -83,6 +83,20 @@ def test_reservation_and_operation_are_idempotent(local_tmp) -> None:
     assert repo.count_reservations() == 1
 
 
+def test_requests_without_releases_consume_no_disk_capacity(local_tmp) -> None:
+    repo = ReservationRepository(str(local_tmp / "control.sqlite3"))
+    repo.initialize()
+    for number in range(10):
+        result = repo.reserve(
+            request_id=f"request-{number}", source_id=f"source-{number}",
+            media_key=f"movie:tmdb:{number}", filesystem_id="fs-test",
+            budget_bytes=0, free_bytes=1, total_bytes=100,
+        )
+        assert result.accepted and result.reservation_id
+        assert repo.active_reservation(result.reservation_id)["budget_bytes"] == 0
+    assert repo.count_reservations() == 10
+
+
 def test_deleted_media_cannot_be_admitted_again(local_tmp) -> None:
     path = local_tmp / "control.sqlite3"
     repo = ReservationRepository(path)

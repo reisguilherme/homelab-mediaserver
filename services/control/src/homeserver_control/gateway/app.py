@@ -72,6 +72,26 @@ def create_app(
         if recovery_mode_blocks(recovery_mode_path):
             raise HTTPException(status_code=503, detail="admission blocked by recovery mode")
 
+    @app.get("/internal/queue-capacity")
+    def queue_capacity(x_arr_token: str | None = Header(default=None)) -> list[dict[str, object]]:
+        if arr_token == "unconfigured" or not token_matches(x_arr_token, arr_token):
+            raise HTTPException(status_code=403, detail="worker credential required")
+        result = upstream.read("/api/v2/torrents/info")
+        if not isinstance(result, list):
+            raise HTTPException(status_code=502, detail="invalid torrent list")
+        if any(not isinstance(entry, dict) for entry in result):
+            raise HTTPException(status_code=502, detail="invalid torrent entry")
+        return [
+            {
+                "hash": entry.get("hash"),
+                "total_size": entry.get("total_size"),
+                "amount_left": entry.get("amount_left"),
+                "admitted": permits.is_admitted(entry["hash"])
+                if isinstance(entry.get("hash"), str) else False,
+            }
+            for entry in result
+        ]
+
     @app.get("/health/live")
     def health_live() -> dict[str, str]:
         return {"status": "ok"}

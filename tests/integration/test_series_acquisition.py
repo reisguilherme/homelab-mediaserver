@@ -9,6 +9,7 @@ from homeserver_control.domain.torrent_bytes import inspect_torrent
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
+from homeserver_control.worker.capacity_evidence import CapacityEvidence
 from homeserver_control.worker.series_acquisition import SeriesAcquirer, _series_rank
 from homeserver_control.worker.subdl import SubDLSource
 
@@ -43,27 +44,53 @@ def _torrent(
     return _bencode({b"info": info})
 
 
-def _reserve(tmp_path):
+def _reserve(tmp_path, *, budget=100_000_000_000):
     db = tmp_path / "control.sqlite"
     repo = ReservationRepository(db)
     repo.initialize()
     result = repo.reserve(
         request_id="seerr:3:4", source_id="3:4",
         media_key="season:tmdb:97546:4", filesystem_id="fixture-fs",
-        budget_bytes=100_000_000_000,
+        budget_bytes=budget,
         free_bytes=500_000_000_000, total_bytes=600_000_000_000,
     )
     assert result.accepted and result.reservation_id
     return repo, PermitRegistry(db), result.reservation_id
 
 
-def test_series_manifest_requires_one_episode_under_five_gb_and_pt_br():
+def _transport(handler):
+    def route(request):
+        if request.url.path == "/api/v3/config/mediamanagement":
+            return httpx.Response(200, json={"copyUsingHardlinks": True})
+        return handler(request)
+    return httpx.MockTransport(route)
+
+
+@pytest.mark.asyncio
+async def test_series_requires_hardlink_import_before_grab(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path)
+    def handler(request):
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/config/mediamanagement":
+            return httpx.Response(200, json={"copyUsingHardlinks": False})
+        raise AssertionError("release search must not start without hardlinks")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        acquirer = SeriesAcquirer(
+            repository=repo, permits=permits,
+            sonarr_url="http://sonarr:8989", sonarr_api_key="secret",
+            prowlarr_url="http://prowlarr:9696", client=client,
+        )
+        assert await acquirer.acquire("season:tmdb:97546:4", reservation_id) == "import_guard"
+
+
+def test_series_manifest_requires_one_episode_and_pt_br():
     assert SeriesAcquirer._eligible_episode_manifest(
         _torrent(), season=4, episode=1
     ) is not None
     assert SeriesAcquirer._eligible_episode_manifest(
         _torrent(video_bytes=5_000_000_001), season=4, episode=1
-    ) is None
+    ) is not None
 
 
 def test_series_manifest_excludes_sample_video_but_rejects_second_episode():
@@ -152,7 +179,7 @@ async def test_series_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path):
             return httpx.Response(200, json=release)
         raise AssertionError(f"unexpected request {request.method} {request.url}")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
         acquirer = SeriesAcquirer(
             repository=repo, permits=permits,
             sonarr_url="http://sonarr:8989", sonarr_api_key="secret",
@@ -175,7 +202,7 @@ async def test_series_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path):
 
 @pytest.mark.asyncio
 async def test_series_acquirer_grabs_only_due_episode_with_season_permit(tmp_path):
-    repo, permits, reservation_id = _reserve(tmp_path)
+    repo, permits, reservation_id = _reserve(tmp_path, budget=0)
     torrent = _torrent()
     inspected = inspect_torrent(torrent)
     posts = []
@@ -188,6 +215,16 @@ async def test_series_acquirer_grabs_only_due_episode_with_season_permit(tmp_pat
         "quality": {"quality": {
             "source": "web", "name": "WEBDL-1080p", "resolution": 1080,
         }}, "protocol": "torrent", "episodeIds": [44],
+    }
+    large_torrent = _torrent(video_bytes=6_000_000_000)
+    large_release = {
+        **release, "guid": "episode-remux", "title": "Ted Lasso S04E01 2160p BluRay REMUX",
+        "size": inspect_torrent(large_torrent).total_bytes,
+        "downloadUrl": "http://prowlarr:9696/2/download?id=2",
+        "infoHash": inspect_torrent(large_torrent).infohash,
+        "quality": {"quality": {
+            "source": "bluray", "name": "Remux-2160p", "resolution": 2160,
+        }},
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -208,23 +245,29 @@ async def test_series_acquirer_grabs_only_due_episode_with_season_permit(tmp_pat
             ])
         if request.url.path == "/api/v3/release" and request.method == "GET":
             assert request.url.params["episodeId"] == "44"
-            return httpx.Response(200, json=[release])
+            return httpx.Response(200, json=[large_release, release])
         if request.url.path == "/2/download":
-            return httpx.Response(200, content=torrent)
+            return httpx.Response(
+                200, content=large_torrent if request.url.params["id"] == "2" else torrent
+            )
         if request.url.path == "/api/v3/release" and request.method == "POST":
             posts.append(request)
             return httpx.Response(200, json=release)
         raise AssertionError(f"unexpected request: {request.method} {request.url}")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        async def capacity():
+            return CapacityEvidence(free_bytes=4_000_000_000, remaining_by_hash={})
         acquirer = SeriesAcquirer(
             repository=repo, permits=permits,
             sonarr_url="http://sonarr:8989", sonarr_api_key="secret",
             prowlarr_url="http://prowlarr:9696", client=client,
+            capacity_provider=capacity,
         )
         assert await acquirer.acquire("season:tmdb:97546:4", reservation_id) == "grabbed"
         assert await acquirer.acquire("season:tmdb:97546:4", reservation_id) != "grabbed"
     assert len(posts) == 1
+    assert b'"guid":"episode-one"' in posts[0].read()
     permit = permits.get_for_reservation(reservation_id, scope_key="S04E01")
     assert permit is not None
     assert permit.infohash == inspected.infohash

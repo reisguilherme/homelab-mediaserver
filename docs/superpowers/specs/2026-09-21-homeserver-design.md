@@ -93,11 +93,11 @@ O plano começará por inventariar versão do Ubuntu, UUID, tipo de sistema de a
 | D04 | Downloads em 4K preferencialmente, com 1080p como resolução mínima |
 | D05 | Dentro da mesma classe de qualidade, preferir dual áudio original + português brasileiro quando confirmado |
 | D06 | Na ausência de dual áudio, aceitar áudio original somente com legenda em português brasileiro confirmada |
-| D07 | Filmes com até 80 GB por arquivo |
-| D08 | Séries com até 5 GB por episódio e 100 GB por temporada |
+| D07 | Filmes sem teto fixo de tamanho; admitir pelo total inspecionado do torrent e espaço livre real |
+| D08 | Episódios e temporadas sem teto fixo; contabilizar cada torrent conhecido e a fila pendente |
 | D09 | Solicitar todas as temporadas disponíveis de uma série e acompanhar futuros episódios |
-| D10 | Temporadas completas só começam a baixar quando houver espaço para a temporada inteira |
-| D11 | Temporadas em lançamento recebem reserva de espaço e episódios conforme forem lançados |
+| D10 | Temporadas completas admitem cada episódio conhecido quando couber; não reservar episódios sem torrent |
+| D11 | Temporadas em lançamento não ocupam espaço antes da inspeção do episódio liberado |
 | D12 | Não substituir automaticamente uma versão válida por outra de qualidade ou áudio melhores |
 | D13 | Biblioteca rotativa com exclusão manual; sem apagar automaticamente conteúdos assistidos |
 | D14 | Exclusão deve remover biblioteca, torrent e dados correspondentes e impedir redownload automático |
@@ -123,7 +123,7 @@ O plano começará por inventariar versão do Ubuntu, UUID, tipo de sistema de a
 - Busca de legendas em português como parte do fluxo, com Bazarr proposto.
 - Acesso remoto privado com Tailscale nos dispositivos compatíveis.
 - Automação complementar de fila, limites, reservas de espaço e exclusão coordenada.
-- Perfil de qualidade que prefira 4K e respeite os limites absolutos acordados.
+- Perfil de qualidade que prefira 4K e admita cada torrent pelo tamanho real disponível.
 - Monitoramento do servidor, dos serviços, dos downloads e das reproduções.
 - Firmware e configuração do painel CYD.
 - Notificações móveis, backups e procedimento de restauração.
@@ -249,9 +249,9 @@ Validar importação e exclusão inclusive próximo à margem de capacidade. Fal
 
 ### 8.1 Seleção de versões
 
-1. Filtrar candidatos que violem limites de tamanho, resolução mínima ou compatibilidade definida nos testes. A legenda exigida é português brasileiro; códigos genéricos `pt` e `por` não comprovam a variante.
+1. Filtrar candidatos que violem a resolução mínima ou compatibilidade definida nos testes. A legenda exigida é português brasileiro; códigos genéricos `pt` e `por` não comprovam a variante.
 2. Entre os candidatos elegíveis, priorizar remux Blu-ray, depois encode Blu-ray, depois WEB-DL. Não admitir WEBRip, HDTV ou fontes inferiores como fallback automático.
-3. Dentro de cada classe, preferir 2160p a 1080p e então Dolby Vision e Dolby Atmos quando identificáveis. Tamanho maior só desempata candidatos equivalentes e continua sujeito ao teto e à reserva.
+3. Dentro de cada classe, preferir 2160p a 1080p e então Dolby Vision e Dolby Atmos quando identificáveis. O tamanho real do torrent precisa caber no espaço disponível após os bytes pendentes da fila.
 4. Preferir dual áudio original + português brasileiro quando for comprovado entre candidatos equivalentes; usar áudio original com legenda pt-BR confirmada caso contrário.
 5. Manter o pedido pendente se nenhuma opção atender ao conjunto de regras.
 
@@ -259,23 +259,21 @@ A ordem acima substitui a antiga precedência de dual áudio sobre classe de qua
 
 Não haverá uma espera indefinida por uma versão ideal: selecionar entre os candidatos elegíveis na busca atual. A primeira versão que passar na validação será mantida, com upgrades desativados. Corrigir download corrompido ou versão que não atende aos requisitos não constitui upgrade de um conteúdo válido.
 
-### 8.2 Limites absolutos
+### 8.2 Tamanho e elegibilidade
 
 | Objeto | Regra |
 |---|---|
-| Filme | Arquivo principal de vídeo com no máximo 80 GB |
-| Episódio | Arquivo com no máximo 5 GB |
-| Temporada | Soma dos arquivos de episódios com no máximo 100 GB |
+| Filme | Sem teto fixo; verificar os bytes de todos os arquivos do torrent |
+| Episódio | Sem teto fixo; verificar os bytes de todos os arquivos do torrent |
+| Temporada | Sem cota antecipada; admitir os episódios conforme seus torrents forem inspecionados |
 | Resolução | 2160p preferencial; 1080p mínimo |
 | Duplicação de versões | Uma versão válida por filme/episódio |
 
-Os limites são tetos, não metas de tamanho. Legendas, metadados, arquivos auxiliares e sobrecarga do sistema de arquivos também consomem espaço e entram na reserva física. Como simplificação proposta para a primeira versão, filmes divididos em múltiplos arquivos e arquivos que combinem vários episódios ficam pendentes para avaliação manual.
-
-Uma temporada de 24 episódios pode caber em 100 GB se a média for suficientemente baixa; o máximo individual de 5 GB não autoriza 120 GB para essa temporada. A seleção precisa satisfazer simultaneamente os dois limites.
+O qBittorrent baixa todos os arquivos do torrent atual. Portanto, a admissão usa a soma integral do manifesto, inclusive legendas e extras. Filmes divididos em múltiplos arquivos e arquivos que combinem vários episódios continuam pendentes para avaliação manual por causa da identificação e importação, não por tamanho.
 
 ### 8.3 Limitações dos metadados e validação
 
-Nome de release e tamanho informado pelo indexador não comprovam áudio, legenda nem distribuição de tamanhos de um pacote. Limites por duração nos perfis Arr não equivalem, por si sós, aos tetos absolutos deste documento.
+Nome de release e tamanho informado pelo indexador não comprovam áudio, legenda nem distribuição de tamanhos de um pacote. A admissão depende do manifesto verificado do torrent.
 
 Para pacotes de temporada, inspecionar a lista de arquivos e os tamanhos antes de liberar o conteúdo principal. Se os metadados necessários não puderem ser obtidos, deixar o candidato pendente em vez de presumir conformidade. Releases compactados que impeçam a inspeção prévia ficam fora da seleção automática inicial.
 
@@ -295,7 +293,7 @@ Após o download, validar resolução e faixas com ferramenta de inspeção de m
 | Aguardando espaço | Candidato ou orçamento identificado, sem capacidade livre suficiente |
 | Espaço reservado | Capacidade comprometida para esse pedido |
 | Baixando | Transferência autorizada em andamento |
-| Aguardando próximos episódios | Temporada em lançamento com reserva para episódios futuros |
+| Aguardando próximos episódios | Temporada em lançamento sem compromisso de bytes para episódios futuros |
 | Validando/importando | Arquivos completos sob inspeção e organização |
 | Aguardando legenda | Requisito de legenda ainda não atendido |
 | Disponível | Conteúdo validado e acessível no Jellyfin |
@@ -306,42 +304,36 @@ Seerr poderá ter menos estados nativos. O controlador e a área de status compl
 
 ### 9.2 Filmes
 
-Reservar o tamanho do candidato mais margem antes de iniciar. Usar 81 GB como reserva conservadora quando o tamanho ainda não estiver confirmado: até 80 GB para o vídeo e 1 GB para legendas, metadados e outros arquivos do pacote. Não admitir automaticamente um arquivo cujo limite não possa ser verificado. Após conhecer o tamanho, ajustar a reserva sem exceder o orçamento.
+O pedido aprovado é registrado com compromisso inicial de zero byte. Quando uma release elegível tiver um `.torrent` v1 verificável, somar todos os arquivos do manifesto e admitir esse tamanho exato somente se couber na montagem de mídia após contabilizar a fila. O gateway exige hash, metadado e permissão persistida antes do download.
 
 ### 9.3 Temporadas completas
 
-- Uma solicitação de série acompanha todas as temporadas, mas a unidade de admissão é a temporada.
-- Não é necessário reservar todas as temporadas da série simultaneamente.
-- Proposta de ordenação: temporadas antigas primeiro, preservando a sequência para assistir.
-- Antes de iniciar uma temporada, reservar todos os episódios selecionados e a margem de trabalho.
-- Se faltar parte do catálogo elegível ou o conjunto ultrapassar 100 GB, a temporada permanece pendente e a busca pode tentar versões menores, inclusive 1080p.
-- Uma vez admitida, os episódios podem ser baixados sequencialmente e disponibilizados individualmente. A decisão de aguardar espaço para a temporada inteira não exige ocultar episódios já concluídos.
+- Uma solicitação acompanha todas as temporadas, sem ocupar espaço para episódios ainda sem torrent elegível.
+- Cada episódio conhecido recebe sua própria permissão pelo tamanho integral do torrent inspecionado.
+- Episódios são baixados e disponibilizados individualmente conforme couberem; um episódio grande aguardando espaço não impede outro que caiba.
+- Episódios já validados não são substituídos automaticamente por versões de qualidade diferente.
 
 ### 9.4 Temporadas em lançamento
 
-- Reservar orçamento para a temporada antes do primeiro download.
-- Proposta conservadora: comprometer até 100 GB mais margem, permitindo receber episódios futuros sem disputar o mesmo espaço com novos pedidos.
-- Se o total previsto de episódios exigir arquivos menores que 5 GB para caber no orçamento, selecionar dentro desse orçamento desde o início.
-- Reavaliar quantidade de episódios e orçamento quando os metadados mudarem. Se a temporada crescer além do orçamento, pausar novas admissões e avisar; não ultrapassar o teto nem substituir episódios válidos automaticamente.
-- Liberar a reserva não utilizada quando a temporada estiver confirmada como concluída e todos os episódios previstos forem reconciliados, ou quando o usuário cancelar/excluir o pedido.
+Episódios futuros não consomem espaço antes de existir uma release verificável. Quando um novo episódio for lançado, o controlador consulta novamente o espaço livre e a fila, e emite uma permissão exata apenas se couber. A temporada pode aguardar espaço sem bloquear os demais pedidos.
 
 ### 9.5 Contabilidade e proteção de espaço
 
-Proposta de regra por partição:
+`capacidade_admissível = espaço_físico_livre_atual − bytes_ainda_pendentes_dos_torrents_autorizados − bytes_pendentes_de_outros_torrents_na_fila`
 
-`capacidade_admissível = espaço_físico_livre − margem_de_segurança − compromissos_futuros_ainda_não_alocados`
+O espaço livre real já reflete arquivos baixados e blocos pré-alocados; esses bytes não são subtraídos novamente. Torrents autorizados ainda sem metadados de progresso confiáveis no qBittorrent contam pelo tamanho completo inspecionado. Um torrent externo à automação sem tamanho conhecido impede novas admissões até que seu tamanho seja conhecido. Não há margem fixa de 20 GB, 5% ou cota por operação.
 
-Proposta inicial de margem: maior valor entre 20 GB e 5% da capacidade da partição de mídia, além da margem de cada operação. O espaço do sistema e o cache têm proteção independente.
+Como a admissão não separa espaço para uma segunda cópia na importação, Radarr e Sonarr precisam manter a importação por hardlink habilitada antes de cada grab. Downloads e biblioteca compartilham `/srv/data`; o modo sem hardlink bloqueia novas aquisições.
 
-Compromissos precisam ser reconciliados com bytes já escritos e espaço efetivamente pré-alocado pelo qBittorrent. Um arquivo pré-alocado não pode ser descontado duas vezes, e um arquivo esparso não pode ser contado como totalmente ocupado sem examinar os blocos reais. Hardlinks válidos representam uma única alocação física.
+A permissão e seu compromisso exato são inseridos numa transação SQLite de escrita. Outra admissão concorrente vê a permissão recém-criada mesmo que seu retrato da fila ainda esteja desatualizado. Permissões autorizadas que expiraram sem despacho podem ser retiradas; efeitos iniciados ou incertos não são liberados automaticamente.
 
 Requisitos adicionais:
 
-- Reservas persistentes, atômicas e protegidas contra dois pedidos concorrentes consumirem a mesma capacidade.
+- Permissões persistentes, atômicas e protegidas contra dois pedidos concorrentes consumirem a mesma capacidade.
 - Reavaliação após exclusão, conclusão, falha, reinicialização e em intervalo proposto de 60 segundos.
 - Pedido sem espaço continua registrado; nenhuma mídia é apagada automaticamente.
 - Ordem proposta: FIFO entre unidades elegíveis; um pedido grande sem espaço não bloqueia indefinidamente outros que caibam. Mostrar quando um pedido for ultrapassado.
-- Se houver consumo externo inesperado de disco, interromper novas admissões e suspender transferências de forma controlada antes de esgotar a margem.
+- Se houver consumo externo inesperado de disco, interromper novas admissões e avisar o operador.
 - Falha ou ausência de uma montagem deve impedir escrita no diretório vazio do disco de sistema.
 
 ## 10. Automação complementar obrigatória
@@ -352,7 +344,7 @@ O conjunto confirmado não será entregue apenas por um arquivo Compose. Há um 
 
 - Ler pedidos aprovados e manter identificadores estáveis de filme, série, temporada e episódio.
 - Coordenar busca/seleção com Sonarr/Radarr e indexadores.
-- Validar limites absolutos, inclusive conteúdo de pacotes.
+- Validar o tamanho de todos os arquivos do torrent antes de admitir o pacote.
 - Reservar espaço na montagem de mídia validada e confirmar sua identidade antes de admitir downloads.
 - Liberar downloads somente depois da admissão.
 - Reconciliar estados e impedir duplicações após reinicializações.
@@ -407,7 +399,7 @@ O projeto terá uma biblioteca única. Reduzir a reprodução para 1080p signifi
 
 ### 12.2 Orçamento de banda
 
-O tamanho máximo de 80 GB não garante bitrate baixo. Um arquivo de 80 GB e duas horas tem bitrate médio aproximado de **88,9 Mbps**, sem considerar picos e sobrecarga. Duas transmissões desse exemplo superariam os 100 Mbps de upload medidos.
+Um arquivo de 80 GB e duas horas tem bitrate médio aproximado de **88,9 Mbps**, sem considerar picos e sobrecarga. Duas transmissões desse exemplo superariam os 100 Mbps de upload medidos.
 
 Proposta inicial: trabalhar com orçamento de até 70–80 Mbps para a soma dos streams remotos em condições favoráveis, preservando espaço para seeding e outros usos. A capacidade real será medida via Tailscale e conexões móveis. A resolução 1080p também precisa de limite de bitrate compatível; reduzir apenas o número de pixels não é uma política suficiente.
 
@@ -548,14 +540,14 @@ Os testes usarão arquivos de teste adequados e conteúdo disponível para valid
 | A07 | Filme | Pedido chega a disponível sem intervenção quando há fonte elegível e capacidade |
 | A08 | Idioma | Preferência dual áudio aplicada entre candidatos equivalentes; alternativa somente com legenda pt-BR confirmada |
 | A09 | Sem upgrades | Nova versão melhor não substitui uma versão válida já importada |
-| A10 | Tetos | Rejeitar filme acima de 80 GB, episódio acima de 5 GB e temporada acima de 100 GB, com testes de fronteira em bytes |
-| A11 | Pacote | Temporada abaixo de 100 GB contendo episódio acima de 5 GB não é admitida automaticamente |
+| A10 | Tamanho real | Filme, episódio e temporada não têm teto fixo; a permissão usa o tamanho integral do torrent inspecionado |
+| A11 | Pacote | Episódio grande pode ser admitido se os bytes do pacote couberem após a fila pendente |
 | A12 | Temporada completa | Não iniciar antes de reservar capacidade para todos os episódios selecionados |
 | A13 | Temporada em lançamento | Baixar novos episódios dentro da reserva; alteração do total não viola orçamento |
 | A14 | Sem espaço | Pedido permanece pendente e retoma após capacidade suficiente, sem apagar mídia automaticamente |
 | A15 | Concorrência | Pedidos simultâneos não reservam os mesmos bytes; reserva persiste após reinício |
 | A16 | Todas as rotas | Busca inicial, RSS, futuros episódios e retomadas não contornam o controle de capacidade |
-| A17 | SSD de mídia | Alocação considera apenas `/srv/data`, preserva margem e recusa escrita quando a montagem esperada está ausente |
+| A17 | SSD de mídia | Alocação considera apenas `/srv/data`, subtrai bytes pendentes e recusa escrita quando a montagem esperada está ausente |
 | A18 | Hardlinks | Importação pelos containers no SSD de mídia não duplica os dados de vídeo; seeding continua funcional |
 | A19 | Exclusão | Remove os itens selecionados, libera bytes e não baixa novamente; pacote não apaga itens fora da seleção |
 | A20 | Upload | Seeding permanece ativo dentro do limite e a reprodução aceita não sofre congestionamento induzido pelo cliente torrent |

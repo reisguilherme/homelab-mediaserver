@@ -6,6 +6,7 @@ import logging
 import re
 import sqlite3
 import time
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from urllib.parse import urlsplit
@@ -13,12 +14,12 @@ from urllib.parse import urlsplit
 import httpx
 
 from homeserver_control.domain.magnet import magnet_infohash
-from homeserver_control.domain.policy import MOVIE_LIMIT_BYTES
 from homeserver_control.domain.torrent_bytes import TorrentBytesError, inspect_torrent
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
 
+from .capacity_evidence import CapacityEvidence
 from .release_quality import release_rank
 from .subdl import SubDLSource
 from .subtitle_language import is_brazilian_portuguese_subtitle
@@ -51,6 +52,7 @@ class MovieAcquirer:
         retry_seconds: int = 900,
         subtitle_source: SubDLSource | None = None,
         subtitle_store: SubtitleArtifactStore | None = None,
+        capacity_provider: Callable[[], Awaitable[CapacityEvidence]] | None = None,
     ) -> None:
         if not radarr_api_key:
             raise ValueError("Radarr API key is required")
@@ -65,6 +67,7 @@ class MovieAcquirer:
         self.retry_seconds = retry_seconds
         self.subtitle_source = subtitle_source
         self.subtitle_store = subtitle_store
+        self.capacity_provider = capacity_provider
         self._next_search: dict[str, float] = {}
         self._posted: set[str] = set()
 
@@ -84,13 +87,11 @@ class MovieAcquirer:
 
     @staticmethod
     def _eligible_manifest(
-        torrent: bytes, budget: int, *, allow_external_subtitle: bool = False
+        torrent: bytes, budget: int | None = None, *, allow_external_subtitle: bool = False
     ) -> tuple[str, str, tuple[str, ...]] | None:
         try:
             inspected = inspect_torrent(torrent)
         except TorrentBytesError:
-            return None
-        if inspected.total_bytes > budget:
             return None
         videos = [
             item for item in inspected.files
@@ -103,7 +104,7 @@ class MovieAcquirer:
             and is_brazilian_portuguese_subtitle(item.path)
         ]
         if (
-            len(videos) != 1 or videos[0].length > MOVIE_LIMIT_BYTES
+            len(videos) != 1
             or not subtitles and not allow_external_subtitle
         ):
             return None
@@ -148,10 +149,19 @@ class MovieAcquirer:
         except (httpx.HTTPError, ValueError):
             return None
 
+    async def _hardlink_import_enabled(self) -> bool:
+        response = await self.client.get(
+            f"{self.radarr_url}/api/v3/config/mediamanagement", headers=self.headers
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return isinstance(payload, dict) and payload.get("copyUsingHardlinks") is True
+
     async def acquire(self, media_key: str, reservation_id: str) -> str:
         reservation = self.repository.active_reservation(reservation_id)
         if reservation is None or reservation["media_key"] != media_key:
             return "reservation_inactive"
+        self.permits.retire_expired_authorized(reservation_id)
         existing = self.permits.get_for_reservation(reservation_id)
         if existing is not None:
             if existing.state != "authorized" or reservation_id in self._posted:
@@ -174,6 +184,8 @@ class MovieAcquirer:
             not isinstance(settings_payload, dict)
             or settings_payload.get("enableCompletedDownloadHandling") is not False
         ):
+            return "import_guard"
+        if not await self._hardlink_import_enabled():
             return "import_guard"
         movies = (await self.client.get(
             f"{self.radarr_url}/api/v3/movie", params={"tmdbId": match.group(1)},
@@ -200,18 +212,17 @@ class MovieAcquirer:
         items = releases.json()
         if not isinstance(items, list):
             raise ValueError("Radarr release response is invalid")
-        budget = reservation["budget_bytes"]
-        assert isinstance(budget, int)
         ordered = sorted(
             (item for item in items if isinstance(item, dict)),
             key=lambda item: release_rank(item) or (0, 0, 0, 0, 0),
             reverse=True,
         )
+        waiting_space = False
         for release in ordered:
             if release.get("rejected") is not False or release_rank(release) is None:
                 continue
             reported = release.get("size")
-            if not isinstance(reported, int) or not 0 < reported <= budget:
+            if isinstance(reported, bool) or not isinstance(reported, int) or reported <= 0:
                 continue
             url = release.get("downloadUrl")
             if not self._trusted_download_url(url):
@@ -220,11 +231,12 @@ class MovieAcquirer:
             if torrent is None:
                 continue
             manifest = self._eligible_manifest(
-                torrent, budget, allow_external_subtitle=self.subtitle_source is not None
+                torrent, allow_external_subtitle=self.subtitle_source is not None
             )
             if manifest is None:
                 continue
             infohash, metadata_sha256, selected_files = manifest
+            exact_bytes = inspect_torrent(torrent).total_bytes
             claimed_hash = release.get("infoHash")
             if claimed_hash and (
                 not isinstance(claimed_hash, str) or claimed_hash.lower() != infohash
@@ -248,18 +260,26 @@ class MovieAcquirer:
                     or existing.metadata_sha256 != metadata_sha256
                     or existing.category != "radarr"
                     or existing.destination != "/data/torrents"
-                    or existing.budget_bytes != budget
+                    or existing.budget_bytes is None
+                    or existing.budget_bytes < exact_bytes
                     or existing.selected_files != selected_files
                 ):
                     continue
             else:
                 try:
+                    capacity = await self.capacity_provider() if self.capacity_provider else None
                     self.permits.issue(
                         infohash=infohash, metadata_sha256=metadata_sha256,
                         destination="/data/torrents", category="radarr",
                         reservation_id=reservation_id, selected_files=selected_files,
-                        budget_bytes=budget, expires_at=datetime.now(UTC) + timedelta(minutes=30),
+                        budget_bytes=exact_bytes, capacity=capacity,
+                        expires_at=datetime.now(UTC) + timedelta(minutes=30),
                     )
+                except PermissionError as error:
+                    if str(error) == "waiting_space":
+                        waiting_space = True
+                        continue
+                    return str(error)
                 except sqlite3.IntegrityError:
                     return "already_permitted"
             response = await self.client.post(
@@ -271,4 +291,4 @@ class MovieAcquirer:
             self._posted.add(reservation_id)
             LOGGER.info("Radarr grab requested for %s, reservation %s", media_key, reservation_id)
             return "grabbed"
-        return "no_eligible_release"
+        return "waiting_space" if waiting_space else "no_eligible_release"

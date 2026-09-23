@@ -1,14 +1,13 @@
 from itertools import product
 
 from .models import EpisodeFile, ReleaseRef, SelectionPlan
-from .policy import EPISODE_LIMIT_BYTES
 
 
 def select_season(
     releases: list[ReleaseRef],
     *,
     episode_keys: set[str],
-    max_work: int = 100_000_000_000,
+    max_work: int | None = None,
     existing_valid: set[str] | None = None,
     existing_sizes: dict[str, int] | None = None,
 ) -> SelectionPlan:
@@ -22,7 +21,7 @@ def select_season(
             file
             for release in releases
             for file in release.files
-            if file.episode_key == key and 0 < file.size_bytes <= EPISODE_LIMIT_BYTES
+            if file.episode_key == key and file.size_bytes > 0
         ]
         if not options:
             return SelectionPlan(files=(), total_bytes=0, reason=f"waiting_source:{key}")
@@ -43,6 +42,6 @@ def select_season(
         return SelectionPlan(files=(), total_bytes=0, reason="ambiguous_mapping")
     total = sum(file.size_bytes for file in best)
     already_present = sum((existing_sizes or {}).get(key, 0) for key in existing)
-    if total + already_present > max_work:
+    if max_work is not None and total + already_present > max_work:
         return SelectionPlan(files=(), total_bytes=total + already_present, reason="over_budget")
     return SelectionPlan(files=best, total_bytes=total)

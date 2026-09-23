@@ -12,6 +12,8 @@ from threading import Lock, RLock
 from typing import Any
 from uuid import uuid4
 
+from homeserver_control.worker.capacity_evidence import CapacityEvidence
+
 
 @dataclass
 class Permit:
@@ -152,6 +154,7 @@ class PermitRegistry:
         metadata_sha256: str | None = None,
         selected_files: tuple[str, ...] = (),
         budget_bytes: int | None = None,
+        capacity: CapacityEvidence | None = None,
     ) -> Permit:
         permit = Permit(
             permit_id=str(uuid4()),
@@ -166,15 +169,60 @@ class PermitRegistry:
             selected_files=selected_files,
             budget_bytes=budget_bytes,
         )
+        if capacity is not None and (self._db_path is None or reservation_id is None or
+                                     isinstance(budget_bytes, bool) or
+                                     not isinstance(budget_bytes, int) or budget_bytes <= 0):
+            raise ValueError("exact-byte permit requires a persistent reservation and size")
         if self._db_path is None:
             with self._lock:
                 self._permits[permit.token] = permit
         else:
             with self._session() as connection:
-                if scope_key is not None:
+                if capacity is not None:
+                    connection.execute("BEGIN IMMEDIATE")
+                    reservation = connection.execute(
+                        "SELECT media_key FROM reservations WHERE id = ? "
+                        "AND state IN ('reserved', 'downloading', 'waiting_episodes')",
+                        (reservation_id,),
+                    ).fetchone()
+                    if reservation is None:
+                        raise PermissionError("reservation_required")
+                    if scope_key is not None and (
+                        not scope_key or category != "sonarr"
+                        or not reservation["media_key"].startswith("season:tmdb:")
+                    ):
+                        raise ValueError("invalid episode permit")
+                    rows = connection.execute(
+                        """SELECT p.infohash, p.budget_bytes FROM gateway_permits p
+                        JOIN reservations r ON r.id = p.reservation_id
+                        WHERE r.state IN ('reserved', 'downloading', 'waiting_episodes')
+                          AND p.state IN ('authorized', 'dispatching', 'unknown', 'confirmed')
+                          AND (p.state != 'authorized' OR p.expires_at > ?)
+                          AND p.budget_bytes > 0
+                          AND NOT EXISTS (
+                            SELECT 1 FROM episode_imports e
+                            WHERE e.permit_id = p.permit_id AND e.state = 'complete'
+                          )""",
+                        (datetime.now(UTC).isoformat(),),
+                    ).fetchall()
+                    pending = capacity.other_pending_bytes + sum(
+                        min(row["budget_bytes"], capacity.remaining_by_hash.get(
+                            row["infohash"], row["budget_bytes"]
+                        )) for row in rows
+                    )
+                    if budget_bytes > max(0, capacity.free_bytes - pending):
+                        raise PermissionError("waiting_space")
+                    connection.execute(
+                        """UPDATE reservations SET budget_bytes = ? + COALESCE((
+                            SELECT SUM(p.budget_bytes) FROM gateway_permits p
+                            WHERE p.reservation_id = ? AND p.state != 'revoked'
+                        ), 0) WHERE id = ?""",
+                        (budget_bytes, reservation_id, reservation_id),
+                    )
+                elif scope_key is not None:
                     if (
                         not scope_key or category != "sonarr" or reservation_id is None
-                        or budget_bytes is None or not 0 < budget_bytes <= 5_000_000_000
+                        or budget_bytes is None or budget_bytes <= 0
                     ):
                         raise ValueError("invalid episode permit")
                     connection.execute("BEGIN IMMEDIATE")
@@ -194,6 +242,12 @@ class PermitRegistry:
                     ).fetchone()[0]
                     if committed + budget_bytes > reservation["budget_bytes"]:
                         raise PermissionError("season_budget_exceeded")
+                elif reservation_id is not None:
+                    reservation = connection.execute(
+                        "SELECT budget_bytes FROM reservations WHERE id = ?", (reservation_id,)
+                    ).fetchone()
+                    if reservation is not None and reservation["budget_bytes"] == 0:
+                        raise PermissionError("capacity_evidence_required")
                 connection.execute(
                     """
                     INSERT INTO gateway_permits(
@@ -218,7 +272,7 @@ class PermitRegistry:
                         permit.state,
                     ),
                 )
-                if scope_key is not None:
+                if scope_key is not None or capacity is not None:
                     connection.commit()
         return permit
 
@@ -343,6 +397,38 @@ class PermitRegistry:
                 "AND scope_key IS ?", (reservation_id, scope_key),
             ).fetchone()
         return self._permit_from_row(row) if row is not None else None
+
+    def retire_expired_authorized(
+        self, reservation_id: str, *, scope_key: str | None = None
+    ) -> int:
+        """Release an unused permit after its gateway authorization has expired."""
+        if self._db_path is None:
+            with self._lock:
+                expired = [key for key, item in self._permits.items()
+                           if item.reservation_id == reservation_id
+                           and item.scope_key == scope_key
+                           and item.state == "authorized"
+                           and item.expires_at <= datetime.now(UTC)]
+                for key in expired:
+                    del self._permits[key]
+                return len(expired)
+        with self._session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "DELETE FROM gateway_permits WHERE reservation_id = ? AND scope_key IS ? "
+                "AND state = 'authorized' AND expires_at <= ?",
+                (reservation_id, scope_key, datetime.now(UTC).isoformat()),
+            )
+            if cursor.rowcount:
+                connection.execute(
+                    """UPDATE reservations SET budget_bytes = COALESCE((
+                        SELECT SUM(p.budget_bytes) FROM gateway_permits p
+                        WHERE p.reservation_id = ? AND p.state != 'revoked'
+                    ), 0) WHERE id = ?""",
+                    (reservation_id, reservation_id),
+                )
+            connection.commit()
+            return cursor.rowcount
 
     def authorize(
         self,

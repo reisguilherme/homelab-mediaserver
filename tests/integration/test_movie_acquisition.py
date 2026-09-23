@@ -10,6 +10,7 @@ from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
 from homeserver_control.worker.acquisition import MovieAcquirer
+from homeserver_control.worker.capacity_evidence import CapacityEvidence
 from homeserver_control.worker.subdl import SubDLSource
 
 
@@ -45,24 +46,49 @@ def _torrent(
     return _bencode({b"info": info})
 
 
-def _reserve(tmp_path):
+def _reserve(tmp_path, *, budget=81_000_000_000):
     db = tmp_path / "control.sqlite"
     repo = ReservationRepository(db)
     repo.initialize()
     result = repo.reserve(
         request_id="seerr:2", source_id="2", media_key="movie:tmdb:1101383",
-        filesystem_id="fixture-fs", budget_bytes=81_000_000_000,
+        filesystem_id="fixture-fs", budget_bytes=budget,
         free_bytes=500_000_000_000, total_bytes=600_000_000_000,
     )
     assert result.accepted and result.reservation_id
     return repo, PermitRegistry(db), result.reservation_id
 
 
+def _transport(handler):
+    def route(request):
+        if request.url.path == "/api/v3/config/mediamanagement":
+            return httpx.Response(200, json={"copyUsingHardlinks": True})
+        return handler(request)
+    return httpx.MockTransport(route)
+
+
+@pytest.mark.asyncio
+async def test_movie_requires_hardlink_import_before_grab(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path)
+    def handler(request):
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/config/mediamanagement":
+            return httpx.Response(200, json={"copyUsingHardlinks": False})
+        raise AssertionError("release search must not start without hardlinks")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
+        )
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "import_guard"
+
+
 def test_manifest_allows_video_up_to_80_gb_within_reservation():
     maximum = _torrent(subtitle=True, video_bytes=80_000_000_000)
     oversized = _torrent(subtitle=True, video_bytes=80_000_000_001)
     assert MovieAcquirer._eligible_manifest(maximum, 81_000_000_000) is not None
-    assert MovieAcquirer._eligible_manifest(oversized, 81_000_000_000) is None
+    assert MovieAcquirer._eligible_manifest(oversized, 81_000_000_000) is not None
 
 
 def test_manifest_excludes_sample_video_but_rejects_second_feature():
@@ -129,7 +155,7 @@ async def test_movie_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path):
             return httpx.Response(200, json=release)
         raise AssertionError(f"unexpected request: {request.method} {request.url}")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
         acquirer = MovieAcquirer(
             repository=repo, permits=permits, radarr_url="http://radarr:7878",
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
@@ -145,7 +171,7 @@ async def test_movie_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path):
 
 @pytest.mark.asyncio
 async def test_acquirer_verifies_metadata_and_grabs_once(tmp_path):
-    repo, permits, reservation_id = _reserve(tmp_path)
+    repo, permits, reservation_id = _reserve(tmp_path, budget=0)
     torrent = _torrent(subtitle=True)
     inspected = inspect_torrent(torrent)
     posts = []
@@ -177,10 +203,13 @@ async def test_acquirer_verifies_metadata_and_grabs_once(tmp_path):
             return httpx.Response(200, json={"guid": "release-one"})
         raise AssertionError(f"unexpected request: {request.method} {request.url}")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        async def capacity():
+            return CapacityEvidence(free_bytes=2_000_000_000, remaining_by_hash={})
         acquirer = MovieAcquirer(
             repository=repo, permits=permits, radarr_url="http://radarr:7878",
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
+            capacity_provider=capacity,
         )
         assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "grabbed"
         assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "already_permitted"
@@ -191,7 +220,58 @@ async def test_acquirer_verifies_metadata_and_grabs_once(tmp_path):
     assert permit.metadata_sha256 == inspected.metadata_sha256
     assert permit.destination == "/data/torrents"
     assert permit.category == "radarr"
-    assert permit.budget_bytes == 81_000_000_000
+    assert permit.budget_bytes == inspected.total_bytes
+
+
+@pytest.mark.asyncio
+async def test_movie_tries_next_eligible_release_when_best_does_not_fit(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path, budget=0)
+    large = _torrent(subtitle=True, video_bytes=4_000_000_000)
+    small = _torrent(subtitle=True, video_bytes=2_000_000_000)
+    grabbed = []
+
+    def release(guid, torrent, modifier):
+        return {
+            "guid": guid, "indexerId": 2, "title": f"Film 2160p BluRay {modifier}",
+            "size": inspect_torrent(torrent).total_bytes,
+            "downloadUrl": f"http://prowlarr:9696/2/download?id={guid}",
+            "infoHash": inspect_torrent(torrent).infohash, "rejected": False,
+            "quality": {"quality": {
+                "source": "bluray", "modifier": modifier, "resolution": 2160,
+            }},
+        }
+
+    def handler(request):
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/movie":
+            return httpx.Response(200, json=[{"id": 2, "tmdbId": 1101383, "hasFile": False}])
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            return httpx.Response(200, json=[release("large", large, "remux"),
+                                              release("small", small, "none")])
+        if request.url.path == "/2/download":
+            content = large if request.url.params["id"] == "large" else small
+            return httpx.Response(200, content=content)
+        if request.url.path == "/api/v3/release" and request.method == "POST":
+            grabbed.append(request.read().decode())
+            return httpx.Response(200, json={"ok": True})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    async def capacity():
+        return CapacityEvidence(free_bytes=3_000_000_000, remaining_by_hash={})
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
+            capacity_provider=capacity,
+        )
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "grabbed"
+    assert len(grabbed) == 1 and '"guid":"small"' in grabbed[0]
+    assert (
+        permits.get_for_reservation(reservation_id).budget_bytes
+        == inspect_torrent(small).total_bytes
+    )
 
 
 @pytest.mark.asyncio
@@ -219,7 +299,7 @@ async def test_acquirer_rejects_ineligible_release(tmp_path, subtitle):
             return httpx.Response(200, content=torrent)
         raise AssertionError("grab must not occur")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
         acquirer = MovieAcquirer(
             repository=repo, permits=permits, radarr_url="http://radarr:7878",
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
@@ -236,7 +316,7 @@ async def test_acquirer_blocks_automatic_radarr_import(tmp_path):
         assert request.url.path == "/api/v3/config/downloadclient"
         return httpx.Response(200, json={"enableCompletedDownloadHandling": True})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
         acquirer = MovieAcquirer(
             repository=repo, permits=permits, radarr_url="http://radarr:7878",
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
@@ -279,7 +359,7 @@ async def test_acquirer_retries_authorized_permit_after_restart(tmp_path):
             return httpx.Response(200, json={"guid": "release-one"})
         raise AssertionError(f"unexpected request {request.method} {request.url}")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
         acquirer = MovieAcquirer(
             repository=repo, permits=permits, radarr_url="http://radarr:7878",
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
@@ -347,7 +427,7 @@ async def test_acquirer_grabs_best_admissible_quality(tmp_path, releases, chosen
             return httpx.Response(200, json={"ok": True})
         raise AssertionError(f"unexpected request {request.method} {request.url}")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
         acquirer = MovieAcquirer(
             repository=repo, permits=permits, radarr_url="http://radarr:7878",
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
@@ -380,7 +460,7 @@ async def test_acquirer_rejects_ambiguous_or_portugal_subtitle(tmp_path, subtitl
             return httpx.Response(200, content=torrent)
         raise AssertionError("grab must not occur")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
         acquirer = MovieAcquirer(
             repository=repo, permits=permits, radarr_url="http://radarr:7878",
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
@@ -424,7 +504,7 @@ async def test_acquirer_resolves_magnet_to_verified_cached_torrent(tmp_path):
             return httpx.Response(200, json={"ok": True})
         raise AssertionError(f"unexpected request {request.method} {request.url}")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
         acquirer = MovieAcquirer(
             repository=repo, permits=permits, radarr_url="http://radarr:7878",
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
@@ -462,7 +542,7 @@ async def test_acquirer_rejects_magnet_cache_with_different_infohash(tmp_path):
             return httpx.Response(200, content=torrent)
         raise AssertionError("grab must not occur")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
         acquirer = MovieAcquirer(
             repository=repo, permits=permits, radarr_url="http://radarr:7878",
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
@@ -496,7 +576,7 @@ async def test_acquirer_rejects_redirecting_torrent_cache(tmp_path):
             })
         raise AssertionError("grab must not occur")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
         acquirer = MovieAcquirer(
             repository=repo, permits=permits, radarr_url="http://radarr:7878",
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,

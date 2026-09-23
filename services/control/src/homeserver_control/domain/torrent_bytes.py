@@ -154,7 +154,7 @@ def inspect_torrent(data: bytes) -> InspectedTorrent:
     if len(paths) != len(set(paths)):
         raise TorrentBytesError("duplicate torrent file path")
     total = sum(entry.length for entry in files)
-    if total > 100_000_000_000 or len(pieces) != ((total + piece_length - 1) // piece_length) * 20:
+    if len(pieces) != ((total + piece_length - 1) // piece_length) * 20:
         raise TorrentBytesError("invalid torrent size or piece hashes")
     return InspectedTorrent(
         infohash=sha1(data[info_start:info_end]).hexdigest(),

@@ -21,6 +21,7 @@ from homeserver_control.recovery import recovery_mode_blocks
 
 from .acquisition import MovieAcquirer
 from .cancellation import CancellationReconciler
+from .capacity_evidence import read_capacity_evidence
 from .finalization import MovieFinalizer
 from .runtime import WorkerCycle
 from .scheduler import AdmissionScheduler, FilesystemSnapshot
@@ -67,13 +68,31 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     )
     radarr_url = os.environ.get("HOMESERVER_RADARR_URL")
     radarr_key = os.environ.get("HOMESERVER_RADARR_API_KEY")
+    sonarr_url = os.environ.get("HOMESERVER_SONARR_URL")
+    sonarr_key = os.environ.get("HOMESERVER_SONARR_API_KEY")
     arr_token = os.environ.get("HOMESERVER_ARR_TOKEN")
+    permits = (
+        PermitRegistry(database)
+        if (radarr_url and radarr_key) or (sonarr_url and sonarr_key)
+        else None
+    )
+    if permits is not None:
+        repository.normalize_verified_budgets()
+    async def capacity_provider():
+        if not arr_token:
+            raise ValueError("gateway token is required for capacity evidence")
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as capacity_client:
+            return await read_capacity_evidence(
+                snapshot_path=Path(snapshot_path), data_root=Path("/data"),
+                gateway_url="http://download-gateway:8081",
+                arr_token=arr_token, client=capacity_client,
+            )
     acquirer = None
     finalizer = None
     series_acquirer = None
     series_finalizer = None
     if radarr_url and radarr_key:
-        permits = PermitRegistry(database)
+        assert permits is not None
         movie_client = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
         acquirer = MovieAcquirer(
             repository=repository,
@@ -86,6 +105,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 SubDLSource(api_key=subdl_key, client=movie_client) if subdl_key else None
             ),
             subtitle_store=subtitle_store,
+            capacity_provider=capacity_provider,
         )
         if arr_token:
             finalizer = MovieFinalizer(
@@ -97,10 +117,8 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 radarr_url=radarr_url,
                 radarr_api_key=radarr_key,
             )
-    sonarr_url = os.environ.get("HOMESERVER_SONARR_URL")
-    sonarr_key = os.environ.get("HOMESERVER_SONARR_API_KEY")
     if sonarr_url and sonarr_key:
-        permits = PermitRegistry(database)
+        assert permits is not None
         series_client = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
         series_acquirer = SeriesAcquirer(
             repository=repository, permits=permits,
@@ -111,6 +129,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 SubDLSource(api_key=subdl_key, client=series_client) if subdl_key else None
             ),
             subtitle_store=subtitle_store,
+            capacity_provider=capacity_provider,
         )
         if arr_token:
             series_finalizer = SeriesFinalizer(

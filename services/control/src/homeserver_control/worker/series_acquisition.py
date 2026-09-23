@@ -6,18 +6,19 @@ import logging
 import re
 import sqlite3
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 
 import httpx
 
-from homeserver_control.domain.policy import EPISODE_LIMIT_BYTES
 from homeserver_control.domain.torrent_bytes import TorrentBytesError, inspect_torrent
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
 
 from .acquisition import _SUBTITLE_SUFFIXES, _VIDEO_SUFFIXES, MovieAcquirer, _is_sample_video
+from .capacity_evidence import CapacityEvidence
 from .release_quality import release_rank
 from .subdl import SubDLSource
 from .subtitle_language import is_brazilian_portuguese_subtitle
@@ -65,12 +66,14 @@ class SeriesAcquirer(MovieAcquirer):
         client: httpx.AsyncClient | None = None, retry_seconds: int = 900,
         subtitle_source: SubDLSource | None = None,
         subtitle_store: SubtitleArtifactStore | None = None,
+        capacity_provider: Callable[[], Awaitable[CapacityEvidence]] | None = None,
     ) -> None:
         super().__init__(
             repository=repository, permits=permits, radarr_url=sonarr_url,
             radarr_api_key=sonarr_api_key, prowlarr_url=prowlarr_url,
             client=client, retry_seconds=retry_seconds,
             subtitle_source=subtitle_source, subtitle_store=subtitle_store,
+            capacity_provider=capacity_provider,
         )
         self.sonarr_url = sonarr_url.rstrip("/")
 
@@ -83,8 +86,6 @@ class SeriesAcquirer(MovieAcquirer):
             inspected = inspect_torrent(torrent)
         except TorrentBytesError:
             return None
-        if inspected.total_bytes > EPISODE_LIMIT_BYTES:
-            return None
         videos = [item for item in inspected.files
                   if PurePosixPath(item.path).suffix.lower() in _VIDEO_SUFFIXES
                   and not _is_sample_video(item.path)]
@@ -92,7 +93,7 @@ class SeriesAcquirer(MovieAcquirer):
                      if PurePosixPath(item.path).suffix.lower() in _SUBTITLE_SUFFIXES
                      and is_brazilian_portuguese_subtitle(item.path)]
         if (
-            len(videos) != 1 or not 0 < videos[0].length <= EPISODE_LIMIT_BYTES
+            len(videos) != 1 or videos[0].length <= 0
             or not _single_episode_name(videos[0].path, season, episode)
             or not subtitles and not allow_external_subtitle
         ):
@@ -103,10 +104,12 @@ class SeriesAcquirer(MovieAcquirer):
             inspected.total_bytes,
         )
 
-    async def _eligible_release(
+    async def _eligible_releases(
         self, *, series_id: int, episode_id: int, season: int, episode: int,
         tmdb_id: int,
-    ) -> tuple[dict[str, object], tuple[str, str, tuple[str, ...], int], bytes | None] | None:
+    ) -> AsyncIterator[
+        tuple[dict[str, object], tuple[str, str, tuple[str, ...], int], bytes | None]
+    ]:
         response = await self.client.get(
             f"{self.sonarr_url}/api/v3/release",
             params={"seriesId": series_id, "episodeId": episode_id},
@@ -128,7 +131,7 @@ class SeriesAcquirer(MovieAcquirer):
                 or not isinstance(release.get("title"), str)
                 or not _single_episode_name(release["title"], season, episode)
                 or not isinstance(release.get("size"), int)
-                or not 0 < release["size"] <= EPISODE_LIMIT_BYTES
+                or release["size"] <= 0
                 or not self._trusted_download_url(release.get("downloadUrl"))
             ):
                 continue
@@ -154,8 +157,7 @@ class SeriesAcquirer(MovieAcquirer):
                 )
                 if external is None:
                     continue
-            return release, manifest, external
-        return None
+            yield release, manifest, external
 
     async def acquire(self, media_key: str, reservation_id: str) -> str:
         reservation = self.repository.active_reservation(reservation_id)
@@ -170,6 +172,8 @@ class SeriesAcquirer(MovieAcquirer):
         )
         settings.raise_for_status()
         if settings.json().get("enableCompletedDownloadHandling") is not False:
+            return "import_guard"
+        if not await self._hardlink_import_enabled():
             return "import_guard"
         series_response = await self.client.get(
             f"{self.sonarr_url}/api/v3/series", headers=self.headers
@@ -223,9 +227,12 @@ class SeriesAcquirer(MovieAcquirer):
                 pending.append(item)
         if not pending:
             return "waiting_episodes" if future else "already_imported"
+        waiting_space = False
+        no_source = False
         for item in pending:
             number = item["episodeNumber"]
             scope = _episode_tag(season, number)
+            self.permits.retire_expired_authorized(reservation_id, scope_key=scope)
             existing = self.permits.get_for_reservation(reservation_id, scope_key=scope)
             if existing is not None and existing.state != "authorized":
                 continue
@@ -234,41 +241,54 @@ class SeriesAcquirer(MovieAcquirer):
             if time.monotonic() < self._next_search.get(f"{reservation_id}:{scope}", 0):
                 continue
             self._next_search[f"{reservation_id}:{scope}"] = time.monotonic() + self.retry_seconds
-            candidate = await self._eligible_release(
+            found_candidate = False
+            async for candidate in self._eligible_releases(
                 series_id=series["id"], episode_id=item["id"],
                 season=season, episode=number, tmdb_id=tmdb_id,
-            )
-            if candidate is None:
-                return "no_eligible_release"
-            release, (infohash, digest, files, bytes_total), external = candidate
-            if external is not None:
-                assert self.subtitle_store is not None
-                self.subtitle_store.put(reservation_id, scope, infohash, external)
-            if existing is not None:
-                if (
-                    existing.infohash != infohash
-                    or existing.metadata_sha256 != digest
-                    or existing.selected_files != files
-                    or existing.budget_bytes != bytes_total
-                ):
-                    return "permit_conflict"
-            else:
-                try:
-                    self.permits.issue(
-                        infohash=infohash, metadata_sha256=digest,
-                        destination="/data/torrents", category="sonarr",
-                        reservation_id=reservation_id, scope_key=scope,
-                        selected_files=files, budget_bytes=bytes_total,
-                        expires_at=datetime.now(UTC) + timedelta(minutes=30),
-                    )
-                except sqlite3.IntegrityError:
-                    return "already_permitted"
-            response = await self.client.post(
-                f"{self.sonarr_url}/api/v3/release", headers=self.headers,
-                json={**release, "downloadClientId": 1},
-            )
-            response.raise_for_status()
-            self._posted.add((reservation_id, scope))
-            LOGGER.info("Sonarr grab requested for %s %s", media_key, scope)
-            return "grabbed"
-        return "waiting_episodes"
+            ):
+                found_candidate = True
+                release, (infohash, digest, files, bytes_total), external = candidate
+                if external is not None:
+                    assert self.subtitle_store is not None
+                    self.subtitle_store.put(reservation_id, scope, infohash, external)
+                if existing is not None:
+                    if (
+                        existing.infohash != infohash
+                        or existing.metadata_sha256 != digest
+                        or existing.selected_files != files
+                        or existing.budget_bytes != bytes_total
+                    ):
+                        continue
+                else:
+                    try:
+                        capacity = (
+                            await self.capacity_provider() if self.capacity_provider else None
+                        )
+                        self.permits.issue(
+                            infohash=infohash, metadata_sha256=digest,
+                            destination="/data/torrents", category="sonarr",
+                            reservation_id=reservation_id, scope_key=scope,
+                            selected_files=files, budget_bytes=bytes_total,
+                            capacity=capacity,
+                            expires_at=datetime.now(UTC) + timedelta(minutes=30),
+                        )
+                    except PermissionError as error:
+                        if str(error) == "waiting_space":
+                            waiting_space = True
+                            continue
+                        return str(error)
+                    except sqlite3.IntegrityError:
+                        return "already_permitted"
+                response = await self.client.post(
+                    f"{self.sonarr_url}/api/v3/release", headers=self.headers,
+                    json={**release, "downloadClientId": 1},
+                )
+                response.raise_for_status()
+                self._posted.add((reservation_id, scope))
+                LOGGER.info("Sonarr grab requested for %s %s", media_key, scope)
+                return "grabbed"
+            if not found_candidate:
+                no_source = True
+        if waiting_space:
+            return "waiting_space"
+        return "no_eligible_release" if no_source else "waiting_episodes"

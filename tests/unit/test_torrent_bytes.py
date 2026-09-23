@@ -17,6 +17,16 @@ def test_inspect_single_file_v1_torrent() -> None:
     assert inspected.total_bytes == 123
 
 
+def test_large_v1_torrent_is_allowed_when_piece_hashes_match() -> None:
+    size = 120_000_000_000
+    piece_length = 1_073_741_824
+    hashes = b"a" * (20 * ((size + piece_length - 1) // piece_length))
+    info = (b"d6:lengthi" + str(size).encode() + b"e4:name8:test.mp4"
+            + b"12:piece lengthi" + str(piece_length).encode() + b"e6:pieces"
+            + str(len(hashes)).encode() + b":" + hashes + b"e")
+    assert inspect_torrent(_torrent(info)).total_bytes == size
+
+
 @pytest.mark.parametrize(
     "info",
     [

@@ -47,9 +47,12 @@ async def test_completed_movie_is_validated_before_one_radarr_import(tmp_path, m
     )
     posts = []
     imported = False
+    hardlinks_enabled = False
     library = tmp_path / "media"
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/config/mediamanagement":
+            return httpx.Response(200, json={"copyUsingHardlinks": hardlinks_enabled})
         if request.url.path == "/api/v2/torrents/info":
             return httpx.Response(200, json=[{
                 "hash": permit.infohash, "progress": 1, "amount_left": 0,
@@ -78,6 +81,11 @@ async def test_completed_movie_is_validated_before_one_radarr_import(tmp_path, m
             gateway_url="http://download-gateway:8081", arr_token="secret",
             radarr_url="http://radarr:7878", radarr_api_key="secret", client=client,
         )
+        assert (
+            await finalizer.finalize("movie:tmdb:1101383", reserved.reservation_id)
+            == "import_guard"
+        )
+        hardlinks_enabled = True
         assert (
             await finalizer.finalize("movie:tmdb:1101383", reserved.reservation_id)
             == "import_requested"
@@ -233,6 +241,8 @@ async def test_external_subdl_movie_subtitle_is_required_and_installed(tmp_path,
     posts = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/config/mediamanagement":
+            return httpx.Response(200, json={"copyUsingHardlinks": True})
         if request.url.path == "/api/v2/torrents/info":
             return httpx.Response(200, json=[{
                 "hash": permit.infohash, "progress": 1, "amount_left": 0,
