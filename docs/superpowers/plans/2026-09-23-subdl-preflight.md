@@ -33,8 +33,8 @@
 
 **Interfaces:** `SubDLSource.fetch(tmdb_id: int, release_title: str, season: int | None = None, episode: int | None = None) -> bytes | None`; `SubtitleArtifactStore.put/get(reservation_id, scope_key, infohash, data)`.
 
-- [ ] Add tests for exact match, wrong language/episode, malformed response, unsafe URL, download size/format, persistence and corrupt digest; run them and observe the expected failures.
-- [ ] Implement bounded HTTP search/download and SQLite migration/store; run the focused tests to green.
+- [x] Add tests for exact match, wrong language/episode, malformed response, unsafe URL, download size/format, persistence and corrupt digest; run them and observe the expected failures.
+- [x] Implement bounded HTTP search/download and SQLite migration/store; run the focused tests to green.
 
 ### Task 2: Acquisition guarded by persisted subtitle
 
@@ -42,8 +42,8 @@
 
 **Interfaces:** Acquirers receive optional `SubDLSource` and `SubtitleArtifactStore`. Existing manifests with pt-BR sidecars need neither.
 
-- [ ] Add tests for video-only exact-match grab, absent subtitle no grab, subtitle persisted before POST, and Sonarr `WEB`/WEBDL classification; watch them fail.
-- [ ] Implement the smallest acquirer/runtime changes; run the focused tests to green.
+- [x] Add tests for video-only exact-match grab, absent subtitle no grab, subtitle persisted before POST, and Sonarr `WEB`/WEBDL classification; watch them fail.
+- [x] Implement the smallest acquirer/runtime changes; run the focused tests to green.
 
 ### Task 3: Finalization using the same verified SRT
 
@@ -51,13 +51,15 @@
 
 **Interfaces:** Finalizers look up the artifact by reservation, scope and infohash, verify its digest and SRT structure, then create the library `.pt-BR.srt` atomically.
 
-- [ ] Add tests for import with external SRT, missing/corrupt artifact rejection and restart idempotence; watch them fail.
-- [ ] Implement validation and atomic sidecar creation; run focused tests to green.
+- [x] Add tests for import with external SRT, missing/corrupt artifact rejection and restart idempotence; watch them fail.
+- [x] Implement validation and atomic sidecar creation; run focused tests to green.
 
 ### Task 4: Deploy and evidence
 
 **Files:** Update `docs/runbooks/service-setup.md` and add deployment evidence under `docs/evidence/`.
 
-- [ ] Run `make lint test-unit test-contract test-integration compose-check smoke` in WSL2.
-- [ ] Put the SubDL key in a root-only server file, build the reviewed release, run the existing guarded deployment and production smoke.
-- [ ] Verify provider status, Seerr requests, reservations, permits, Arr queue and gateway state without printing credentials; record which requests remain limited by source or capacity.
+- [ ] Run `make lint test-unit test-contract test-integration compose-check smoke` in WSL2. Docker Compose is unavailable in WSL2; the production Compose configuration passed on the server instead.
+- [x] Put the SubDL key in a root-only server file, build the reviewed release, run the existing guarded deployment and production smoke.
+- [x] Verify provider status, Seerr requests, reservations, permits, Arr queue and gateway state without printing credentials; record which requests remain limited by source or capacity.
+
+Live results: `docs/evidence/2026-09-23-subdl-live.md`.

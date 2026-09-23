@@ -31,3 +31,14 @@ coincidir. Falha de API, legenda inválida ou ausência de correspondência mant
 o pedido aguardando fonte. A legenda é persistida no SQLite antes do permit e
 instalada na biblioteca somente após a importação validada. A inspeção manual de
 sincronismo e da tradução continua necessária no Jellyfin.
+
+Legendas SRT em Windows-1252 são convertidas para UTF-8 após a validação da
+estrutura; arquivos sem tempos SRT válidos continuam inelegíveis. Clipes em
+`Sample/` ou com nome terminado em `sample` não contam como segundo vídeo do
+torrent e não são selecionados para download. Um segundo vídeo principal ainda
+bloqueia o candidato.
+
+Se o Seerr mostrar `Requested`, conferir a reserva no controlador, o permit do
+gateway e as filas Sonarr/Radarr e qBittorrent. O estado do Seerr só avança após
+a importação. Pedidos `waiting_space` aguardam capacidade real no disco, sem
+liberação manual do gateway.
