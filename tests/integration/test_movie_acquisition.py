@@ -28,8 +28,11 @@ def _bencode(value):
 def _torrent(
     *, subtitle: bool, subtitle_name: bytes = b"movie.pt-BR.srt",
     video_bytes: int = 1_500_000_000,
+    extra_video_path: list[bytes] | None = None,
 ) -> bytes:
     files = [{b"length": video_bytes, b"path": [b"movie.mkv"]}]
+    if extra_video_path is not None:
+        files.append({b"length": 79_000_000, b"path": extra_video_path})
     if subtitle:
         files.append({b"length": 1000, b"path": [subtitle_name]})
     total = sum(item[b"length"] for item in files)
@@ -60,6 +63,25 @@ def test_manifest_allows_video_up_to_80_gb_within_reservation():
     oversized = _torrent(subtitle=True, video_bytes=80_000_000_001)
     assert MovieAcquirer._eligible_manifest(maximum, 81_000_000_000) is not None
     assert MovieAcquirer._eligible_manifest(oversized, 81_000_000_000) is None
+
+
+def test_manifest_excludes_sample_video_but_rejects_second_feature():
+    with_sample = _torrent(
+        subtitle=False, extra_video_path=[b"Sample", b"movie.sample.mkv"]
+    )
+    manifest = MovieAcquirer._eligible_manifest(
+        with_sample, 81_000_000_000, allow_external_subtitle=True
+    )
+    assert manifest is not None
+    assert len(manifest[2]) == 1
+    assert manifest[2][0].endswith("/movie.mkv")
+
+    with_second_feature = _torrent(
+        subtitle=False, extra_video_path=[b"Extras", b"featurette.mkv"]
+    )
+    assert MovieAcquirer._eligible_manifest(
+        with_second_feature, 81_000_000_000, allow_external_subtitle=True
+    ) is None
 
 
 @pytest.mark.asyncio

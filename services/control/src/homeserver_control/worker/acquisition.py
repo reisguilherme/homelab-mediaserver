@@ -30,6 +30,14 @@ _MAX_METADATA = 16 * 1024 * 1024
 _TORRENT_CACHE = "https://itorrents.net/torrent"
 
 
+def _is_sample_video(path: str) -> bool:
+    parsed = PurePosixPath(path)
+    return (
+        any(part.lower() == "sample" for part in parsed.parts[:-1])
+        or bool(re.search(r"(?:^|[._ -])sample$", parsed.stem.lower()))
+    )
+
+
 class MovieAcquirer:
     def __init__(
         self,
@@ -87,6 +95,7 @@ class MovieAcquirer:
         videos = [
             item for item in inspected.files
             if PurePosixPath(item.path).suffix.lower() in _VIDEO_SUFFIXES
+            and not _is_sample_video(item.path)
         ]
         subtitles = [
             item for item in inspected.files

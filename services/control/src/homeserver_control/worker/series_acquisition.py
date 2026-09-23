@@ -17,7 +17,7 @@ from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
 
-from .acquisition import _SUBTITLE_SUFFIXES, _VIDEO_SUFFIXES, MovieAcquirer
+from .acquisition import _SUBTITLE_SUFFIXES, _VIDEO_SUFFIXES, MovieAcquirer, _is_sample_video
 from .release_quality import release_rank
 from .subdl import SubDLSource
 from .subtitle_language import is_brazilian_portuguese_subtitle
@@ -86,7 +86,8 @@ class SeriesAcquirer(MovieAcquirer):
         if inspected.total_bytes > EPISODE_LIMIT_BYTES:
             return None
         videos = [item for item in inspected.files
-                  if PurePosixPath(item.path).suffix.lower() in _VIDEO_SUFFIXES]
+                  if PurePosixPath(item.path).suffix.lower() in _VIDEO_SUFFIXES
+                  and not _is_sample_video(item.path)]
         subtitles = [item for item in inspected.files
                      if PurePosixPath(item.path).suffix.lower() in _SUBTITLE_SUFFIXES
                      and is_brazilian_portuguese_subtitle(item.path)]

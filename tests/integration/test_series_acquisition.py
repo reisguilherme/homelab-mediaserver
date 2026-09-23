@@ -25,8 +25,13 @@ def _bencode(value):
     ) + b"e"
 
 
-def _torrent(*, video_bytes=3_000_000_000, subtitle=b"Ted.Lasso.S04E01.pt-BR.srt"):
+def _torrent(
+    *, video_bytes=3_000_000_000, subtitle=b"Ted.Lasso.S04E01.pt-BR.srt",
+    extra_video_path: list[bytes] | None = None,
+):
     files = [{b"length": video_bytes, b"path": [b"Ted.Lasso.S04E01.mkv"]}]
+    if extra_video_path is not None:
+        files.append({b"length": 79_000_000, b"path": extra_video_path})
     if subtitle is not None:
         files.append({b"length": 1000, b"path": [subtitle]})
     total = sum(item[b"length"] for item in files)
@@ -58,6 +63,25 @@ def test_series_manifest_requires_one_episode_under_five_gb_and_pt_br():
     ) is not None
     assert SeriesAcquirer._eligible_episode_manifest(
         _torrent(video_bytes=5_000_000_001), season=4, episode=1
+    ) is None
+
+
+def test_series_manifest_excludes_sample_video_but_rejects_second_episode():
+    with_sample = _torrent(
+        subtitle=None, extra_video_path=[b"Sample", b"Ted.Lasso.S04E01.sample.mkv"]
+    )
+    manifest = SeriesAcquirer._eligible_episode_manifest(
+        with_sample, season=4, episode=1, allow_external_subtitle=True
+    )
+    assert manifest is not None
+    assert len(manifest[2]) == 1
+    assert manifest[2][0].endswith("/Ted.Lasso.S04E01.mkv")
+
+    with_second_episode = _torrent(
+        subtitle=None, extra_video_path=[b"Ted.Lasso.S04E02.mkv"]
+    )
+    assert SeriesAcquirer._eligible_episode_manifest(
+        with_second_episode, season=4, episode=1, allow_external_subtitle=True
     ) is None
 
 
