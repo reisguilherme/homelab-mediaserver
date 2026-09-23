@@ -318,3 +318,165 @@ async def test_episode_subtitle_priority_and_original_audio(
         assert (
             destination / f"Ted.Lasso.S04E01.{suffix}.srt"
         ).read_bytes() == expected_subtitle
+
+
+def _reserved_season(repo, season, *, tmdb_id=99999):
+    reserved = repo.reserve(
+        request_id=f"seerr:chronology:{season}", source_id=f"chronology:{season}",
+        media_key=f"season:tmdb:{tmdb_id}:{season}", filesystem_id="fixture",
+        budget_bytes=100, free_bytes=1000, total_bytes=2000,
+    )
+    assert reserved.reservation_id
+    return reserved.reservation_id
+
+
+def _confirmed_episode(permits, reservation_id, season, number):
+    permit = permits.issue(
+        infohash=f"{season:02x}{number:02x}" * 10,
+        metadata_sha256="b" * 64, destination="/data/torrents",
+        category="sonarr", reservation_id=reservation_id,
+        scope_key=f"S{season:02d}E{number:02d}",
+        selected_files=(f"Show.S{season:02d}E{number:02d}.mkv",),
+        budget_bytes=100, expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    permits.authorize(
+        token=permit.token, infohash=permit.infohash,
+        destination=permit.destination, metadata_sha256=permit.metadata_sha256,
+        effect=lambda _: {"accepted": True},
+    )
+    return permit
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("earlier_state, expected", [
+    ("missing", "waiting_previous_season"),
+    ("accepted", "waiting_previous_season"),
+    ("complete", "downloading"),
+    ("preexisting", "downloading"),
+    ("catalog_missing", "waiting_previous_season"),
+])
+async def test_later_season_waits_for_requested_prior_season_import(
+    tmp_path, earlier_state, expected,
+):
+    database = tmp_path / "control.sqlite"
+    repo = ReservationRepository(database)
+    repo.initialize()
+    first_reservation = _reserved_season(repo, 1)
+    third_reservation = _reserved_season(repo, 3)
+    permits = PermitRegistry(database)
+    first_permit = (
+        _confirmed_episode(permits, first_reservation, 1, 1)
+        if earlier_state not in {"preexisting", "catalog_missing"} else None
+    )
+    _confirmed_episode(permits, third_reservation, 3, 1)
+    if earlier_state in {"accepted", "complete"}:
+        assert first_permit is not None
+        assert repo.claim_episode_import(first_permit.permit_id)
+        repo.record_episode_import(first_permit.permit_id, "sonarr-import-1")
+        if earlier_state == "complete":
+            repo.complete_episode_import(first_permit.permit_id)
+    gateway_calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/series":
+            return httpx.Response(200, json=[{"id": 1, "tmdbId": 99999}])
+        if request.url.path == "/api/v3/episode":
+            episodes = [
+                {"id": 31, "seasonNumber": 3, "episodeNumber": 1, "hasFile": False}
+            ]
+            if earlier_state != "catalog_missing":
+                episodes.insert(0, {
+                    "id": 11, "seasonNumber": 1, "episodeNumber": 1,
+                    "hasFile": earlier_state != "missing",
+                })
+            return httpx.Response(200, json=episodes)
+        if request.url.path == "/api/v2/torrents/info":
+            gateway_calls.append(request)
+            return httpx.Response(200, json=[])
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        finalizer = SeriesFinalizer(
+            repository=repo, permits=permits, torrent_root=tmp_path / "torrents",
+            gateway_url="http://download-gateway:8081", arr_token="secret",
+            sonarr_url="http://sonarr:8989", sonarr_api_key="secret", client=client,
+        )
+        assert await finalizer.finalize(
+            "season:tmdb:99999:3", third_reservation
+        ) == expected
+    assert len(gateway_calls) == (
+        1 if earlier_state in {"complete", "preexisting"} else 0
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("earlier_imported, expected", [
+    (False, "waiting_previous_episode"),
+    (True, "downloading"),
+])
+async def test_episode_waits_for_missing_earlier_episode_without_permit(
+    tmp_path, earlier_imported, expected,
+):
+    database = tmp_path / "control.sqlite"
+    repo = ReservationRepository(database)
+    repo.initialize()
+    reservation_id = _reserved_season(repo, 1)
+    permits = PermitRegistry(database)
+    _confirmed_episode(permits, reservation_id, 1, 2)
+    gateway_calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/series":
+            return httpx.Response(200, json=[{"id": 1, "tmdbId": 99999}])
+        if request.url.path == "/api/v3/episode":
+            return httpx.Response(200, json=[
+                {"id": 11, "seasonNumber": 1, "episodeNumber": 1,
+                 "hasFile": earlier_imported},
+                {"id": 12, "seasonNumber": 1, "episodeNumber": 2, "hasFile": False},
+            ])
+        if request.url.path == "/api/v2/torrents/info":
+            gateway_calls.append(request)
+            return httpx.Response(200, json=[])
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        finalizer = SeriesFinalizer(
+            repository=repo, permits=permits, torrent_root=tmp_path / "torrents",
+            gateway_url="http://download-gateway:8081", arr_token="secret",
+            sonarr_url="http://sonarr:8989", sonarr_api_key="secret", client=client,
+        )
+        assert await finalizer.finalize("season:tmdb:99999:1", reservation_id) == expected
+    assert len(gateway_calls) == (1 if earlier_imported else 0)
+
+
+@pytest.mark.asyncio
+async def test_unrequested_prior_seasons_do_not_block_current_season(tmp_path):
+    database = tmp_path / "control.sqlite"
+    repo = ReservationRepository(database)
+    repo.initialize()
+    reservation_id = _reserved_season(repo, 4)
+    permits = PermitRegistry(database)
+    _confirmed_episode(permits, reservation_id, 4, 1)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/series":
+            return httpx.Response(200, json=[{"id": 1, "tmdbId": 99999}])
+        if request.url.path == "/api/v3/episode":
+            return httpx.Response(200, json=[
+                {"id": season * 10 + 1, "seasonNumber": season,
+                 "episodeNumber": 1, "hasFile": False}
+                for season in (1, 2, 3, 4)
+            ])
+        if request.url.path == "/api/v2/torrents/info":
+            return httpx.Response(200, json=[])
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        finalizer = SeriesFinalizer(
+            repository=repo, permits=permits, torrent_root=tmp_path / "torrents",
+            gateway_url="http://download-gateway:8081", arr_token="secret",
+            sonarr_url="http://sonarr:8989", sonarr_api_key="secret", client=client,
+        )
+        assert await finalizer.finalize("season:tmdb:99999:4", reservation_id) == (
+            "downloading"
+        )

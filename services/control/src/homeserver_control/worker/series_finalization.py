@@ -77,6 +77,38 @@ class SeriesFinalizer(MovieFinalizer):
             raise ValidationError("Sonarr episode lookup is invalid")
         return [item for item in episodes if isinstance(item, dict)]
 
+    def _requested_seasons(self, tmdb_id: int) -> dict[int, str]:
+        seasons: dict[int, str] = {}
+        for reservation_id, _ in self.repository.active_seerr_requests():
+            reservation = self.repository.active_reservation(reservation_id)
+            if reservation is None:
+                continue
+            media_key = reservation.get("media_key")
+            match = _SEASON_KEY.fullmatch(media_key) if isinstance(media_key, str) else None
+            if match is not None and int(match.group(1)) == tmdb_id:
+                number = int(match.group(2))
+                if number > 0:
+                    seasons[number] = reservation_id
+        return seasons
+
+    def _episode_imported(
+        self, episode: dict[str, object], reservations_by_season: dict[int, str]
+    ) -> bool:
+        if episode.get("hasFile") is not True:
+            return False
+        season = episode["seasonNumber"]
+        number = episode["episodeNumber"]
+        reservation_id = reservations_by_season.get(season)
+        if reservation_id is None:
+            return False
+        permit = self.permits.get_for_reservation(
+            reservation_id, scope_key=_episode_tag(season, number)
+        )
+        return (
+            permit is None or permit.state != "confirmed"
+            or self.repository.episode_import_state(permit.permit_id) == "complete"
+        )
+
     async def _imported_video(self, episode: dict[str, object]) -> Path:
         file_id = episode.get("episodeFileId")
         if not isinstance(file_id, int) or file_id <= 0:
@@ -212,8 +244,29 @@ class SeriesFinalizer(MovieFinalizer):
         match = _SEASON_KEY.fullmatch(media_key)
         if match is None:
             return "unsupported_media"
-        season = int(match.group(2))
-        episodes = await self._episodes(int(match.group(1)))
+        tmdb_id, season = int(match.group(1)), int(match.group(2))
+        episodes = await self._episodes(tmdb_id)
+        reservations_by_season = self._requested_seasons(tmdb_id)
+        reservations_by_season.setdefault(season, reservation_id)
+        chronological = sorted(
+            (item for item in episodes
+             if isinstance(item.get("seasonNumber"), int)
+             and not isinstance(item["seasonNumber"], bool)
+             and item["seasonNumber"] in reservations_by_season
+             and isinstance(item.get("episodeNumber"), int)
+             and not isinstance(item["episodeNumber"], bool)
+             and item["episodeNumber"] > 0),
+            key=lambda item: (item["seasonNumber"], item["episodeNumber"]),
+        )
+        known_seasons = {item["seasonNumber"] for item in chronological}
+        prior_season_missing = any(
+            number < season and number not in known_seasons
+            for number in reservations_by_season
+        )
+        first_missing = next(
+            (item for item in chronological
+             if not self._episode_imported(item, reservations_by_season)), None
+        )
         seen_complete = False
         for episode in sorted(
             (item for item in episodes if item.get("seasonNumber") == season
@@ -226,6 +279,16 @@ class SeriesFinalizer(MovieFinalizer):
             )
             if permit is None or permit.state != "confirmed":
                 continue
+            if prior_season_missing:
+                return "waiting_previous_season"
+            if first_missing is not None and (
+                first_missing["seasonNumber"], first_missing["episodeNumber"]
+            ) < (season, number):
+                return (
+                    "waiting_previous_season"
+                    if first_missing["seasonNumber"] < season
+                    else "waiting_previous_episode"
+                )
             state = self.repository.episode_import_state(permit.permit_id)
             if state == "complete":
                 seen_complete = True
