@@ -1,7 +1,6 @@
 FROM python:3.12.11-slim
 WORKDIR /app
 COPY pyproject.toml uv.lock /app/
-COPY services/control/src /app/services/control/src
 ENV PYTHONPATH=/app/services/control/src
 ENV PATH=/app/.venv/bin:$PATH
 RUN apt-get update \
@@ -10,3 +9,4 @@ RUN apt-get update \
     && pip install --no-cache-dir uv==0.8.0 \
     && uv sync --frozen --no-dev --no-install-project \
     && rm -rf /root/.cache
+COPY services/control/src /app/services/control/src

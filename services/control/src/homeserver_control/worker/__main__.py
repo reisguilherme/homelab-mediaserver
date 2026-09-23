@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from homeserver_control.adapters.seerr import SeerrAdapter
@@ -52,6 +53,28 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     return WorkerCycle(source=source, scheduler=scheduler)
 
 
+async def _run_forever(
+    cycle: WorkerCycle | None,
+    *,
+    should_run: Callable[[], bool],
+    interval: float,
+    recovery_mode_path: str | Path | None = None,
+) -> None:
+    """Keep one event loop alive for the lifetime of the Seerr HTTP client."""
+    try:
+        while should_run():
+            if cycle is not None and not recovery_mode_blocks(recovery_mode_path):
+                try:
+                    await cycle.run_once()
+                except Exception:
+                    LOGGER.exception("worker cycle failed; admission remains fail-closed")
+            if should_run():
+                await asyncio.sleep(interval)
+    finally:
+        if cycle is not None and isinstance(cycle.source, SeerrAdapter):
+            await cycle.source.client.aclose()
+
+
 def main() -> None:
     database = Path(os.environ.get("HOMESERVER_DB_PATH", "/var/lib/homeserver/control.sqlite"))
     recovery_mode_path = os.environ.get(
@@ -72,13 +95,14 @@ def main() -> None:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     interval = max(1.0, float(os.environ.get("HOMESERVER_WORKER_INTERVAL", "5")))
-    while running:
-        if cycle is not None and not recovery_mode_blocks(recovery_mode_path):
-            try:
-                asyncio.run(cycle.run_once())
-            except Exception:
-                LOGGER.exception("worker cycle failed; admission remains fail-closed")
-        time.sleep(interval)
+    asyncio.run(
+        _run_forever(
+            cycle,
+            should_run=lambda: running,
+            interval=interval,
+            recovery_mode_path=recovery_mode_path,
+        )
+    )
 
 
 if __name__ == "__main__":
