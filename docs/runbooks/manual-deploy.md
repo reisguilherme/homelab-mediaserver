@@ -13,7 +13,11 @@ produção, use a configuração que contém o UUID da mídia e esse endereço:
 
 O `control-api` também usa uma bridge exclusiva não interna para que Docker
 publique essa porta no endereço Tailscale; `apps` e `telemetry` continuam
-internas, e o gateway de download não entra nessa bridge.
+internas, e o gateway de download não entra nessa bridge. Serviços que
+consultam fontes externas usam `egress`; o qBittorrent usa
+`egress_transfer`. Conferir que o `control-worker` permanece em `egress`
+após recriações, pois ele consulta o cache de metadados e o SubDL antes de
+autorizar torrents.
 
 ```bash
 sudo bash -c 'source /etc/homeserver/server.env; export HOMESERVER_HEALTH_URL="http://${TAILSCALE_BIND_IP}:8080"; bash /opt/homeserver/current/scripts/smoke.sh --config /etc/homeserver/server.env --environment prod'
