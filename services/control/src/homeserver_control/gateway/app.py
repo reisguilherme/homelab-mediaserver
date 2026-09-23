@@ -16,6 +16,7 @@ from fastapi.responses import PlainTextResponse
 from homeserver_control.adapters.qbittorrent import QBittorrentAdapter
 from homeserver_control.domain.magnet import magnet_infohash
 from homeserver_control.domain.torrent_bytes import TorrentBytesError, inspect_torrent
+from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 from homeserver_control.recovery import recovery_mode_blocks
 
 from .allowlist import GatewayAllowlist
@@ -49,6 +50,7 @@ def create_app(
     upstream: QbitClient,
     arr_token: str,
     allowlist: GatewayAllowlist | None = None,
+    torrent_store: TorrentArtifactStore | None = None,
     recovery_mode_path: str | os.PathLike[str] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="HomeServer download gateway", version="1")
@@ -71,6 +73,57 @@ def create_app(
     def require_admission() -> None:
         if recovery_mode_blocks(recovery_mode_path):
             raise HTTPException(status_code=503, detail="admission blocked by recovery mode")
+
+    @app.post("/internal/repair-metadata")
+    async def repair_metadata(
+        request: Request, x_arr_token: str | None = Header(default=None)
+    ) -> dict[str, str]:
+        if not token_matches(x_arr_token, arr_token) or arr_token == "unconfigured":
+            raise HTTPException(status_code=403, detail="worker credential required")
+        require_admission()
+        if torrent_store is None:
+            raise HTTPException(status_code=503, detail="torrent metadata store unavailable")
+        try:
+            body = await request.json()
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="invalid JSON body") from error
+        token = body.get("permit_token") if isinstance(body, dict) else None
+        permit = permits.get(token) if isinstance(token, str) else None
+        if permit is None or permit.state != "confirmed":
+            raise HTTPException(status_code=403, detail="confirmed permit required")
+        metadata = torrent_store.get(permit)
+        if metadata is None:
+            raise HTTPException(status_code=409, detail="verified metadata unavailable")
+
+        def torrent_info() -> dict[str, Any] | None:
+            entries = upstream.read(
+                "/api/v2/torrents/info", {"hashes": permit.infohash}
+            )
+            if not isinstance(entries, list):
+                raise HTTPException(status_code=502, detail="invalid torrent list")
+            return next(
+                (entry for entry in entries if isinstance(entry, dict)
+                 and entry.get("hash", "").lower() == permit.infohash), None
+            )
+
+        current = torrent_info()
+        if (
+            current is None or not isinstance(current.get("total_size"), int)
+            or current["total_size"] > 0 or current.get("downloaded") != 0
+            or current.get("progress") != 0
+        ):
+            raise HTTPException(status_code=409, detail="torrent is not metadata-stalled")
+        upstream.add_torrent({
+            "infohash": permit.infohash, "savepath": permit.destination,
+            "category": permit.category, "torrent_bytes": metadata,
+        })
+        updated = torrent_info()
+        if (
+            updated is None or not isinstance(updated.get("total_size"), int)
+            or updated["total_size"] <= 0
+        ):
+            raise HTTPException(status_code=409, detail="metadata remains unavailable")
+        return {"state": "metadata_available"}
 
     @app.get("/internal/queue-capacity")
     def queue_capacity(x_arr_token: str | None = Header(default=None)) -> list[dict[str, object]]:
@@ -235,10 +288,19 @@ def create_app(
                     raise HTTPException(status_code=403, detail=str(error)) from error
                 permit_token = matched.token
                 metadata_sha256 = matched.metadata_sha256
+                verified = torrent_store.get(matched) if torrent_store is not None else None
+                if verified is None and torrent_store is not None and matched.state == "authorized":
+                    raise HTTPException(
+                        status_code=403, detail="verified torrent metadata required"
+                    )
                 payload = {
                     "infohash": infohash, "savepath": destination,
-                    "magnet_url": magnet, "category": category,
+                    "category": category,
+                    **({"torrent_bytes": verified} if verified is not None
+                       else {"magnet_url": magnet}),
                 }
+                if verified is not None:
+                    total_bytes = inspect_torrent(verified).total_bytes
             else:
                 if not content_type.startswith("multipart/form-data"):
                     raise HTTPException(status_code=403, detail="verified torrent required")
@@ -343,9 +405,11 @@ def _configured_upstream() -> QbitClient:
     )
 
 
+_database_path = os.environ.get("HOMESERVER_DB_PATH")
 app = create_app(
     permits=PermitRegistry(os.environ.get("HOMESERVER_DB_PATH")),
     upstream=_configured_upstream(),
+    torrent_store=TorrentArtifactStore(_database_path) if _database_path else None,
     arr_token=os.environ.get("HOMESERVER_ARR_TOKEN", "unconfigured"),
     recovery_mode_path=os.environ.get(
         "HOMESERVER_RECOVERY_MODE", "/var/lib/homeserver/RECOVERY_MODE"

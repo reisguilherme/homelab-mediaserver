@@ -16,6 +16,7 @@ from homeserver_control.domain.torrent_bytes import TorrentBytesError, inspect_t
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
+from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 
 from .acquisition import _SUBTITLE_SUFFIXES, _VIDEO_SUFFIXES, MovieAcquirer, _is_sample_video
 from .capacity_evidence import CapacityEvidence
@@ -66,6 +67,7 @@ class SeriesAcquirer(MovieAcquirer):
         client: httpx.AsyncClient | None = None, retry_seconds: int = 900,
         subtitle_source: SubDLSource | None = None,
         subtitle_store: SubtitleArtifactStore | None = None,
+        torrent_store: TorrentArtifactStore | None = None,
         capacity_provider: Callable[[], Awaitable[CapacityEvidence]] | None = None,
     ) -> None:
         super().__init__(
@@ -73,6 +75,7 @@ class SeriesAcquirer(MovieAcquirer):
             radarr_api_key=sonarr_api_key, prowlarr_url=prowlarr_url,
             client=client, retry_seconds=retry_seconds,
             subtitle_source=subtitle_source, subtitle_store=subtitle_store,
+            torrent_store=torrent_store,
             capacity_provider=capacity_provider,
         )
         self.sonarr_url = sonarr_url.rstrip("/")
@@ -108,7 +111,7 @@ class SeriesAcquirer(MovieAcquirer):
         self, *, series_id: int, episode_id: int, season: int, episode: int,
         tmdb_id: int,
     ) -> AsyncIterator[
-        tuple[dict[str, object], tuple[str, str, tuple[str, ...], int], bytes | None]
+        tuple[dict[str, object], tuple[str, str, tuple[str, ...], int], bytes | None, bytes]
     ]:
         response = await self.client.get(
             f"{self.sonarr_url}/api/v3/release",
@@ -155,7 +158,7 @@ class SeriesAcquirer(MovieAcquirer):
                     tmdb_id=tmdb_id, release_title=release["title"],
                     season=season, episode=episode,
                 )
-            yield release, manifest, external
+            yield release, manifest, external, torrent
 
     async def acquire(self, media_key: str, reservation_id: str) -> str:
         reservation = self.repository.active_reservation(reservation_id)
@@ -245,7 +248,7 @@ class SeriesAcquirer(MovieAcquirer):
                 season=season, episode=number, tmdb_id=tmdb_id,
             ):
                 found_candidate = True
-                release, (infohash, digest, files, bytes_total), external = candidate
+                release, (infohash, digest, files, bytes_total), external, torrent = candidate
                 if external is not None:
                     assert self.subtitle_store is not None
                     self.subtitle_store.put(reservation_id, scope, infohash, external)
@@ -257,12 +260,13 @@ class SeriesAcquirer(MovieAcquirer):
                         or existing.budget_bytes != bytes_total
                     ):
                         continue
+                    chosen_permit = existing
                 else:
                     try:
                         capacity = (
                             await self.capacity_provider() if self.capacity_provider else None
                         )
-                        self.permits.issue(
+                        chosen_permit = self.permits.issue(
                             infohash=infohash, metadata_sha256=digest,
                             destination="/data/torrents", category="sonarr",
                             reservation_id=reservation_id, scope_key=scope,
@@ -277,6 +281,8 @@ class SeriesAcquirer(MovieAcquirer):
                         return str(error)
                     except sqlite3.IntegrityError:
                         return "already_permitted"
+                if self.torrent_store is not None:
+                    self.torrent_store.put(chosen_permit, torrent)
                 response = await self.client.post(
                     f"{self.sonarr_url}/api/v3/release", headers=self.headers,
                     json={**release, "downloadClientId": 1},

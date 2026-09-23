@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from homeserver_control.domain.torrent_bytes import inspect_torrent
 from homeserver_control.gateway.app import create_app
 from homeserver_control.gateway.permits import PermitRegistry
+from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 
 TORRENT = (
     b"d4:info"
@@ -156,6 +157,81 @@ def test_arr_magnet_requires_inspected_metadata_permit() -> None:
     )
     assert repeated.status_code == 200
     assert len(upstream.added) == 1
+
+
+def test_arr_magnet_dispatches_verified_torrent_bytes_when_cached(tmp_path) -> None:
+    permits = PermitRegistry()
+    upstream = Upstream()
+    inspected = inspect_torrent(TORRENT)
+    permit = permits.issue(
+        infohash=inspected.infohash, destination="/data/torrents", category="radarr",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        metadata_sha256=inspected.metadata_sha256,
+        selected_files=("test.mp4",), budget_bytes=123,
+    )
+    store = TorrentArtifactStore(tmp_path / "artifacts.sqlite")
+    store.put(permit, TORRENT)
+    client = TestClient(create_app(
+        permits=permits, upstream=upstream, arr_token="secret", torrent_store=store,
+    ))
+    client.post("/api/v2/auth/login", data={"username": "arr", "password": "secret"})
+    response = client.post("/api/v2/torrents/add", data={
+        "urls": f"magnet:?xt=urn:btih:{inspected.infohash}",
+        "category": "radarr", "savepath": "/data/torrents",
+    })
+    assert response.status_code == 200
+    assert upstream.added == [{
+        "infohash": inspected.infohash, "torrent_bytes": TORRENT,
+        "savepath": "/data/torrents", "category": "radarr",
+    }]
+
+
+def test_internal_repair_resends_metadata_only_for_stalled_admitted_torrent(tmp_path) -> None:
+    permits = PermitRegistry()
+    inspected = inspect_torrent(TORRENT)
+    permit = permits.issue(
+        infohash=inspected.infohash, destination="/data/torrents", category="radarr",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        metadata_sha256=inspected.metadata_sha256,
+        selected_files=("test.mp4",), budget_bytes=123,
+    )
+    permits.authorize(
+        token=permit.token, infohash=permit.infohash,
+        destination=permit.destination, metadata_sha256=permit.metadata_sha256,
+        effect=lambda _permit: {"accepted": True},
+    )
+    store = TorrentArtifactStore(tmp_path / "artifacts.sqlite")
+    store.put(permit, TORRENT)
+
+    class StalledUpstream(Upstream):
+        total_size = -1
+
+        def read(self, path, params=None):
+            if path == "/api/v2/torrents/info":
+                return [{"hash": inspected.infohash, "total_size": self.total_size,
+                         "downloaded": 0, "progress": 0}]
+            return super().read(path, params)
+
+        def add_torrent(self, payload):
+            result = super().add_torrent(payload)
+            self.total_size = 123
+            return result
+
+    upstream = StalledUpstream()
+    client = TestClient(create_app(
+        permits=permits, upstream=upstream, arr_token="secret", torrent_store=store,
+    ))
+    body = {"permit_token": permit.token}
+    assert client.post("/internal/repair-metadata", json=body).status_code == 403
+    response = client.post(
+        "/internal/repair-metadata", json=body, headers={"X-Arr-Token": "secret"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"state": "metadata_available"}
+    assert upstream.added[0]["torrent_bytes"] == TORRENT
+    assert client.post(
+        "/internal/repair-metadata", json=body, headers={"X-Arr-Token": "secret"},
+    ).status_code == 409
 
 
 def test_arr_magnet_rejects_mismatched_hash_and_unverified_permit() -> None:

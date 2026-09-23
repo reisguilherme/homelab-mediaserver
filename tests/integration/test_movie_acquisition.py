@@ -9,6 +9,7 @@ from homeserver_control.domain.torrent_bytes import inspect_torrent
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
+from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 from homeserver_control.worker.acquisition import MovieAcquirer
 from homeserver_control.worker.capacity_evidence import CapacityEvidence
 from homeserver_control.worker.subdl import SubDLSource
@@ -115,6 +116,7 @@ def test_manifest_excludes_sample_video_but_rejects_second_feature():
 async def test_movie_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path, subtitle_available):
     repo, permits, reservation_id = _reserve(tmp_path)
     store = SubtitleArtifactStore(repo.path)
+    torrents = TorrentArtifactStore(repo.path)
     torrent = _torrent(subtitle=False)
     inspected = inspect_torrent(torrent)
     srt = b"1\n00:00:01,000 --> 00:00:02,000\nLegenda brasileira\n"
@@ -163,13 +165,14 @@ async def test_movie_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path, s
             repository=repo, permits=permits, radarr_url="http://radarr:7878",
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
             subtitle_source=SubDLSource(api_key="test-key", client=client),
-            subtitle_store=store,
+            subtitle_store=store, torrent_store=torrents,
         )
         assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "grabbed"
     assert len(posts) == 1
     permit = permits.get_for_reservation(reservation_id)
     assert permit is not None
     assert permit.selected_files == ("Film/movie.mkv",)
+    assert torrents.get(permit) == torrent
 
 
 @pytest.mark.asyncio

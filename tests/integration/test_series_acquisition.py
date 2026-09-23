@@ -9,6 +9,7 @@ from homeserver_control.domain.torrent_bytes import inspect_torrent
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
+from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 from homeserver_control.worker.capacity_evidence import CapacityEvidence
 from homeserver_control.worker.series_acquisition import SeriesAcquirer, _series_rank
 from homeserver_control.worker.subdl import SubDLSource
@@ -129,6 +130,7 @@ def test_sonarr_web_label_is_allowed_only_when_arr_classifies_webdl():
 async def test_series_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path, subtitle_available):
     repo, permits, reservation_id = _reserve(tmp_path)
     store = SubtitleArtifactStore(repo.path)
+    torrents = TorrentArtifactStore(repo.path)
     torrent = _torrent(subtitle=None)
     inspected = inspect_torrent(torrent)
     srt = b"1\n00:00:01,000 --> 00:00:02,000\nLegenda brasileira\n"
@@ -188,13 +190,14 @@ async def test_series_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path, 
             sonarr_url="http://sonarr:8989", sonarr_api_key="secret",
             prowlarr_url="http://prowlarr:9696", client=client,
             subtitle_source=SubDLSource(api_key="test-key", client=client),
-            subtitle_store=store,
+            subtitle_store=store, torrent_store=torrents,
         )
         assert await acquirer.acquire("season:tmdb:97546:4", reservation_id) == "grabbed"
     assert len(posts) == 1
     permit = permits.get_for_reservation(reservation_id, scope_key="S04E01")
     assert permit is not None
     assert permit.selected_files == ("Ted.Lasso.S04E01/Ted.Lasso.S04E01.mkv",)
+    assert torrents.get(permit) == torrent
     assert SeriesAcquirer._eligible_episode_manifest(
         _torrent(subtitle=b"Ted.Lasso.S04E01.pt-PT.srt"), season=4, episode=1
     ) is None

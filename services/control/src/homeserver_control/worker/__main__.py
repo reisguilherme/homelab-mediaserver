@@ -17,6 +17,7 @@ from homeserver_control.adapters.seerr import SeerrAdapter
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
+from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 from homeserver_control.recovery import recovery_mode_blocks
 
 from .acquisition import MovieAcquirer
@@ -60,6 +61,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     if key_file and not subdl_key:
         raise ValueError("SubDL key file is empty")
     subtitle_store = SubtitleArtifactStore(database) if subdl_key else None
+    torrent_store = TorrentArtifactStore(database)
     source = SeerrAdapter(base_url=seerr_url, api_key=seerr_key)
     scheduler = AdmissionScheduler(
         repository=repository,
@@ -105,6 +107,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 SubDLSource(api_key=subdl_key, client=movie_client) if subdl_key else None
             ),
             subtitle_store=subtitle_store,
+            torrent_store=torrent_store,
             capacity_provider=capacity_provider,
         )
         if arr_token:
@@ -135,6 +138,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 SubDLSource(api_key=subdl_key, client=series_client) if subdl_key else None
             ),
             subtitle_store=subtitle_store,
+            torrent_store=torrent_store,
             capacity_provider=capacity_provider,
         )
         if arr_token:

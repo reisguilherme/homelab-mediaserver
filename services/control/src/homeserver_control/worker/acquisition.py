@@ -18,6 +18,7 @@ from homeserver_control.domain.torrent_bytes import TorrentBytesError, inspect_t
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
+from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 
 from .capacity_evidence import CapacityEvidence
 from .release_quality import release_rank
@@ -52,6 +53,7 @@ class MovieAcquirer:
         retry_seconds: int = 900,
         subtitle_source: SubDLSource | None = None,
         subtitle_store: SubtitleArtifactStore | None = None,
+        torrent_store: TorrentArtifactStore | None = None,
         capacity_provider: Callable[[], Awaitable[CapacityEvidence]] | None = None,
     ) -> None:
         if not radarr_api_key:
@@ -67,6 +69,7 @@ class MovieAcquirer:
         self.retry_seconds = retry_seconds
         self.subtitle_source = subtitle_source
         self.subtitle_store = subtitle_store
+        self.torrent_store = torrent_store
         self.capacity_provider = capacity_provider
         self._next_search: dict[str, float] = {}
         self._posted: set[str] = set()
@@ -264,10 +267,11 @@ class MovieAcquirer:
                     or existing.selected_files != selected_files
                 ):
                     continue
+                chosen_permit = existing
             else:
                 try:
                     capacity = await self.capacity_provider() if self.capacity_provider else None
-                    self.permits.issue(
+                    chosen_permit = self.permits.issue(
                         infohash=infohash, metadata_sha256=metadata_sha256,
                         destination="/data/torrents", category="radarr",
                         reservation_id=reservation_id, selected_files=selected_files,
@@ -281,6 +285,8 @@ class MovieAcquirer:
                     return str(error)
                 except sqlite3.IntegrityError:
                     return "already_permitted"
+            if self.torrent_store is not None:
+                self.torrent_store.put(chosen_permit, torrent)
             response = await self.client.post(
                 f"{self.radarr_url}/api/v3/release",
                 headers=self.headers,
