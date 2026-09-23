@@ -31,3 +31,8 @@ encaminhar os mesmos bytes ao qBittorrent. Magnet e URL de torrent são negados
 até que exista obtenção e inspeção prévia segura. A seleção automática de
 releases e a importação validada ainda não estão implementadas; conectar os Arr
 ao gateway não deve ser confundido com liberar a aquisição automática.
+
+Em produção, qBittorrent usa `transfer` + `egress_transfer`; Sonarr/Radarr e
+Prowlarr usam `apps` + `egress`. O gateway é o único serviço ligado a `apps`
+e `transfer`. A porta de administração do qBittorrent fica ligada somente ao
+loopback do host para uso do operador, sem publicação na LAN.

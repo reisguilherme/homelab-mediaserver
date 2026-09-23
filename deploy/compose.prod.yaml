@@ -1,5 +1,6 @@
 networks:
   egress: {}
+  egress_transfer: {}
 
 services:
   byparr:
@@ -51,6 +52,7 @@ services:
         target: /data
         bind: {create_host_path: false}
   qbittorrent:
+    networks: [transfer, egress_transfer]
     volumes:
       - type: bind
         source: /srv/appdata/qbittorrent
