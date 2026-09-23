@@ -20,6 +20,7 @@ class Permit:
     infohash: str
     destination: str
     expires_at: datetime
+    category: str = ""
     result: dict[str, Any] | None = None
     operation_id: str = field(default_factory=lambda: str(uuid4()))
     reservation_id: str | None = None
@@ -76,6 +77,7 @@ class PermitRegistry:
                   infohash TEXT NOT NULL,
                   metadata_sha256 TEXT,
                   destination TEXT NOT NULL,
+                  category TEXT NOT NULL DEFAULT '',
                   selected_files_json TEXT NOT NULL,
                   budget_bytes INTEGER,
                   expires_at TEXT NOT NULL,
@@ -84,6 +86,13 @@ class PermitRegistry:
                 )
                 """
             )
+            columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(gateway_permits)")
+            }
+            if "category" not in columns:
+                connection.execute(
+                    "ALTER TABLE gateway_permits ADD COLUMN category TEXT NOT NULL DEFAULT ''"
+                )
 
     @staticmethod
     def _expires(value: str) -> datetime:
@@ -107,6 +116,7 @@ class PermitRegistry:
             infohash=row["infohash"],
             metadata_sha256=row["metadata_sha256"],
             destination=row["destination"],
+            category=row["category"],
             selected_files=tuple(json.loads(row["selected_files_json"])),
             budget_bytes=row["budget_bytes"],
             expires_at=PermitRegistry._expires(row["expires_at"]),
@@ -120,6 +130,7 @@ class PermitRegistry:
         infohash: str,
         destination: str,
         expires_at: datetime,
+        category: str = "",
         reservation_id: str | None = None,
         metadata_sha256: str | None = None,
         selected_files: tuple[str, ...] = (),
@@ -131,6 +142,7 @@ class PermitRegistry:
             infohash=infohash.lower(),
             destination=destination,
             expires_at=expires_at,
+            category=category,
             reservation_id=reservation_id,
             metadata_sha256=self._validate_metadata_digest(metadata_sha256),
             selected_files=selected_files,
@@ -145,9 +157,9 @@ class PermitRegistry:
                     """
                     INSERT INTO gateway_permits(
                       permit_id, token, operation_id, reservation_id, infohash,
-                      metadata_sha256, destination, selected_files_json,
+                      metadata_sha256, destination, category, selected_files_json,
                       budget_bytes, expires_at, state, result_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                     """,
                     (
                         permit.permit_id,
@@ -157,6 +169,7 @@ class PermitRegistry:
                         permit.infohash,
                         permit.metadata_sha256,
                         permit.destination,
+                        permit.category,
                         json.dumps(permit.selected_files),
                         permit.budget_bytes,
                         permit.expires_at.isoformat(),
@@ -164,6 +177,64 @@ class PermitRegistry:
                     ),
                 )
         return permit
+
+    def find_for_metadata(
+        self, *, infohash: str, metadata_sha256: str, destination: str, category: str
+    ) -> Permit:
+        """Resolve Arr's headerless add to one pre-authorized metadata identity.
+
+        Persistent permits are usable only while the matching reservation still
+        exists. This is deliberately stricter than the legacy token API.
+        """
+        digest = self._validate_metadata_digest(metadata_sha256)
+        if self._db_path is None:
+            with self._lock:
+                matches = [
+                    item
+                    for item in self._permits.values()
+                    if item.infohash == infohash.lower()
+                    and item.metadata_sha256 == digest
+                    and item.destination == destination
+                    and item.category == category
+                    and item.state in {"authorized", "confirmed"}
+                    and datetime.now(UTC) < item.expires_at
+                ]
+        else:
+            with self._session() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT p.* FROM gateway_permits p
+                    JOIN reservations r ON r.id = p.reservation_id
+                    WHERE p.infohash = ? AND p.metadata_sha256 = ?
+                      AND p.destination = ? AND p.category = ?
+                      AND p.state IN ('authorized', 'confirmed')
+                      AND r.state IN ('reserved', 'downloading', 'waiting_episodes')
+                      AND p.budget_bytes IS NOT NULL AND p.budget_bytes <= r.budget_bytes
+                    """,
+                    (infohash.lower(), digest, destination, category),
+                ).fetchall()
+            matches = [
+                self._permit_from_row(row)
+                for row in rows
+                if datetime.now(UTC) < self._expires(row["expires_at"])
+            ]
+        if len(matches) != 1:
+            raise PermissionError("permit_required_or_ambiguous")
+        return matches[0]
+
+    def is_admitted(self, infohash: str) -> bool:
+        if self._db_path is None:
+            with self._lock:
+                return any(
+                    item.infohash == infohash.lower() and item.state == "confirmed"
+                    for item in self._permits.values()
+                )
+        with self._session() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM gateway_permits WHERE infohash = ? AND state = 'confirmed' LIMIT 1",
+                (infohash.lower(),),
+            ).fetchone()
+        return row is not None
 
     def authorize(
         self,

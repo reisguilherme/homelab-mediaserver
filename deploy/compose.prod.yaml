@@ -120,10 +120,18 @@ services:
     environment:
       HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
       HOMESERVER_RECOVERY_MODE: /var/lib/homeserver/RECOVERY_MODE
+      HOMESERVER_ARR_TOKEN: ${HOMESERVER_ARR_TOKEN:?set in /etc/homeserver/server.env}
+      HOMESERVER_QBIT_URL: http://qbittorrent:8080
+      HOMESERVER_QBIT_CREDENTIALS_FILE: /run/secrets/qbittorrent.env
     volumes:
       - type: bind
         source: /srv/appdata/control
         target: /var/lib/homeserver
+        bind: {create_host_path: false}
+      - type: bind
+        source: /etc/homeserver/qbittorrent.env
+        target: /run/secrets/qbittorrent.env
+        read_only: true
         bind: {create_host_path: false}
   telemetry:
     ports: ["${TAILSCALE_BIND_IP:-127.0.0.1}:8081:8080"]

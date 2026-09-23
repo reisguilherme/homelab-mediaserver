@@ -40,6 +40,8 @@ trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
 
 checksum_manifest() {
   local root=$1
+  # The output manifest is explicitly excluded from find's input set.
+  # shellcheck disable=SC2094
   (cd "$root" && find . -type f ! -name manifest.sha256 ! -name .sent -print0 | sort -z | xargs -0 sha256sum > manifest.sha256)
 }
 

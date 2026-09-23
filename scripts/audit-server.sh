@@ -118,12 +118,16 @@ fi
 
 {
   printf '# Server baseline audit\n\n'
+  # Markdown backticks are literal formatting, not shell substitutions.
+  # shellcheck disable=SC2016
   printf -- '- Generated: `%s`\n' "$generated_at"
+  # shellcheck disable=SC2016
   printf -- '- Overall status: `%s`\n' "$overall_status"
   printf -- '- This report is observational; it never changes packages, mounts, power, SSH, Tailscale or Docker configuration.\n\n'
   printf '| Check | Status | Return code | Value |\n|---|---|---:|---|\n'
   for i in "${!check_names[@]}"; do
     value=${check_values[$i]//$'\n'/<br>}
+    # shellcheck disable=SC2016
     printf '| `%s` | `%s` | `%s` | %s |\n' "${check_names[$i]}" "${check_statuses[$i]}" "${check_codes[$i]}" "$value"
   done
 } > "$report_path"

@@ -15,7 +15,14 @@ class GatewayAllowlist:
 
     def __init__(self, rules: tuple[RouteRule, ...] | None = None) -> None:
         self._rules = rules or (
+            RouteRule("POST", "/api/v2/auth/login"),
             RouteRule("GET", "/api/v2/app/version"),
+            RouteRule("GET", "/api/v2/app/webapiVersion"),
+            RouteRule("GET", "/api/v2/app/preferences"),
+            RouteRule("GET", "/api/v2/torrents/categories"),
+            RouteRule("GET", "/api/v2/torrents/info"),
+            RouteRule("GET", "/api/v2/torrents/properties"),
+            RouteRule("GET", "/api/v2/torrents/files"),
             RouteRule("POST", "/api/v2/torrents/add", mutation=True),
         )
 

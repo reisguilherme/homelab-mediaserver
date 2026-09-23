@@ -95,7 +95,7 @@ services:
     image: ${CONTROL_IMAGE:-homeserver-control:dev}
     command: ["python", "-m", "homeserver_control.worker"]
     restart: "no"
-    networks: [apps, transfer]
+    networks: [apps]
     volumes:
       - control_state:/var/lib/homeserver
       - media:/data

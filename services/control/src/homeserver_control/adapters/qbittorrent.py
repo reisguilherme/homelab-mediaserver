@@ -62,21 +62,54 @@ class QBittorrentAdapter:
             raise ContractError("qBittorrent payload identity is incomplete")
         if not destination.startswith("/data/"):
             raise ContractError("qBittorrent destination is outside /data")
-        urls = payload.get("torrent_url") or payload.get("urls")
-        if not isinstance(urls, str) or not urls.startswith(("https://", "http://")):
-            raise ContractError("verified torrent URL is required")
+        torrent_bytes = payload.get("torrent_bytes")
+        if not isinstance(torrent_bytes, bytes) or not torrent_bytes:
+            raise ContractError("verified torrent bytes are required")
+        category = payload.get("category")
+        if not isinstance(category, str) or category not in {"sonarr", "radarr"}:
+            raise ContractError("unsupported torrent category")
         response = self._request(
             "POST",
             "/api/v2/torrents/add",
             data={
-                "urls": urls,
                 "savepath": destination,
-                "category": payload.get("category", "homeserver"),
+                "category": category,
+                "stopped": "false",
             },
+            files={"torrents": ("approved.torrent", torrent_bytes, "application/x-bittorrent")},
         )
-        if response.text.strip().lower() not in {"ok.", "ok", ""}:
-            raise ContractError("qBittorrent add response is incompatible")
+        text = response.text.strip()
+        if text.lower() not in {"ok.", "ok", ""}:
+            try:
+                result = response.json()
+            except ValueError as error:
+                raise ContractError("qBittorrent add response is incompatible") from error
+            if not isinstance(result, dict) or result.get("success_count", 0) < 1:
+                raise ContractError("qBittorrent did not accept the torrent")
+        if not self.find_by_infohash(infohash):
+            raise EffectUncertain("qBittorrent accepted but torrent was not visible")
         return {"accepted": True, "infohash": infohash.lower()}
+
+    def read(self, path: str, params: dict[str, str] | None = None) -> object:
+        allowed = {
+            "/api/v2/app/webapiVersion",
+            "/api/v2/app/version",
+            "/api/v2/app/preferences",
+            "/api/v2/torrents/categories",
+            "/api/v2/torrents/info",
+            "/api/v2/torrents/properties",
+            "/api/v2/torrents/files",
+        }
+        if path not in allowed:
+            raise ContractError("qBittorrent path is not allowlisted")
+        self._ensure_login()
+        response = self._request("GET", path, params=params)
+        if path in {"/api/v2/app/webapiVersion", "/api/v2/app/version"}:
+            return response.text.strip()
+        try:
+            return response.json()
+        except ValueError as error:
+            raise ContractError("qBittorrent JSON response is incompatible") from error
 
     def find_by_infohash(self, infohash: str) -> list[dict[str, Any]]:
         self._ensure_login()

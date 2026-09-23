@@ -1,0 +1,38 @@
+import httpx
+
+from homeserver_control.adapters.qbittorrent import QBittorrentAdapter
+
+
+def test_adapter_forwards_only_verified_torrent_bytes() -> None:
+    paths: list[str] = []
+    infohash = "a" * 40
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/v2/auth/login":
+            return httpx.Response(200, text="Ok.", headers={"set-cookie": "SID=session"})
+        if request.url.path == "/api/v2/torrents/add":
+            assert b'name="torrents"' in request.content
+            assert b"approved.torrent" in request.content
+            assert b'name="urls"' not in request.content
+            assert b"/data/torrents" in request.content
+            return httpx.Response(200, text="Ok.")
+        if request.url.path == "/api/v2/torrents/info":
+            assert request.url.params["hashes"] == infohash
+            return httpx.Response(200, json=[{"hash": infohash}])
+        raise AssertionError(request.url.path)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    adapter = QBittorrentAdapter(
+        base_url="http://qbittorrent:8080", username="admin", password="secret", client=client
+    )
+    result = adapter.add_torrent(
+        {
+            "infohash": infohash,
+            "savepath": "/data/torrents",
+            "category": "sonarr",
+            "torrent_bytes": b"verified metadata",
+        }
+    )
+    assert result["accepted"] is True
+    assert paths == ["/api/v2/auth/login", "/api/v2/torrents/add", "/api/v2/torrents/info"]
