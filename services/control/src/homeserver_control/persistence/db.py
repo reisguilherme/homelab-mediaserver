@@ -293,9 +293,11 @@ class ReservationRepository:
                 connection.commit()
                 return "not_cancellable"
             permit = connection.execute(
-                "SELECT state FROM gateway_permits WHERE reservation_id = ?", (reservation_id,)
+                "SELECT 1 FROM gateway_permits WHERE reservation_id = ? "
+                "AND state NOT IN ('authorized', 'revoked') LIMIT 1",
+                (reservation_id,),
             ).fetchone()
-            if permit is not None and permit["state"] not in {"authorized", "revoked"}:
+            if permit is not None:
                 connection.execute(
                     "UPDATE requests SET state = 'cancel_requested', updated_at = ? WHERE id = ?",
                     (_now(), row["request_id"]),
