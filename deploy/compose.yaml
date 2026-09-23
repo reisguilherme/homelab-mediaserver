@@ -7,6 +7,9 @@ networks:
     internal: true
   telemetry:
     internal: true
+  # Docker publishes the admin API only when one attached bridge is not internal.
+  edge_control:
+    internal: false
 
 volumes:
   jellyfin_appdata:
@@ -87,7 +90,7 @@ services:
     image: ${CONTROL_IMAGE:-homeserver-control:dev}
     command: ["uvicorn", "homeserver_control.api.app:app", "--host", "0.0.0.0", "--port", "8080"]
     restart: "no"
-    networks: [apps, telemetry]
+    networks: [edge_control, apps, telemetry]
     volumes:
       - control_state:/var/lib/homeserver
 
