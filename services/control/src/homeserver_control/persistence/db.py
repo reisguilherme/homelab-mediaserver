@@ -187,6 +187,62 @@ class ReservationRepository:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def import_state(self, reservation_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT state FROM movie_imports WHERE reservation_id = ?", (reservation_id,)
+            ).fetchone()
+        return row["state"] if row is not None else None
+
+    def claim_movie_import(self, reservation_id: str) -> bool:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT state FROM reservations WHERE id = ?", (reservation_id,)
+            ).fetchone()
+            if row is None or row["state"] not in {"reserved", "downloading"}:
+                connection.rollback()
+                return False
+            cursor = connection.execute(
+                """INSERT OR IGNORE INTO movie_imports(reservation_id, state, updated_at)
+                VALUES (?, 'dispatching', ?)""",
+                (reservation_id, _now()),
+            )
+            connection.commit()
+            return cursor.rowcount == 1
+        finally:
+            connection.close()
+
+    def record_movie_import(self, reservation_id: str, command_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE movie_imports SET state = 'accepted', command_id = ?, updated_at = ?
+                WHERE reservation_id = ? AND state = 'dispatching'""",
+                (command_id, _now(), reservation_id),
+            )
+
+    def complete_movie_import(self, reservation_id: str) -> None:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE movie_imports SET state = 'complete', updated_at = ? "
+                "WHERE reservation_id = ?",
+                (_now(), reservation_id),
+            )
+            connection.execute(
+                "UPDATE reservations SET state = 'imported' WHERE id = ?", (reservation_id,)
+            )
+            connection.execute(
+                """UPDATE requests SET state = 'available', updated_at = ?
+                WHERE id = (SELECT request_id FROM reservations WHERE id = ?)""",
+                (_now(), reservation_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
     def record_operation(
         self,
         *,

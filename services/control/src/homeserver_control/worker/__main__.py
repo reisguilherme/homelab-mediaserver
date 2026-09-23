@@ -17,6 +17,7 @@ from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.recovery import recovery_mode_blocks
 
 from .acquisition import MovieAcquirer
+from .finalization import MovieFinalizer
 from .runtime import WorkerCycle
 from .scheduler import AdmissionScheduler, FilesystemSnapshot
 
@@ -54,16 +55,31 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     )
     radarr_url = os.environ.get("HOMESERVER_RADARR_URL")
     radarr_key = os.environ.get("HOMESERVER_RADARR_API_KEY")
+    arr_token = os.environ.get("HOMESERVER_ARR_TOKEN")
     acquirer = None
+    finalizer = None
     if radarr_url and radarr_key:
+        permits = PermitRegistry(database)
         acquirer = MovieAcquirer(
             repository=repository,
-            permits=PermitRegistry(database),
+            permits=permits,
             radarr_url=radarr_url,
             radarr_api_key=radarr_key,
             prowlarr_url=os.environ.get("HOMESERVER_PROWLARR_URL", "http://prowlarr:9696"),
         )
-    return WorkerCycle(source=source, scheduler=scheduler, acquirer=acquirer)
+        if arr_token:
+            finalizer = MovieFinalizer(
+                repository=repository,
+                permits=permits,
+                torrent_root="/data/torrents",
+                gateway_url="http://download-gateway:8081",
+                arr_token=arr_token,
+                radarr_url=radarr_url,
+                radarr_api_key=radarr_key,
+            )
+    return WorkerCycle(
+        source=source, scheduler=scheduler, acquirer=acquirer, finalizer=finalizer
+    )
 
 
 async def _run_forever(
@@ -88,6 +104,8 @@ async def _run_forever(
             await cycle.source.client.aclose()
         if cycle is not None and isinstance(getattr(cycle, "acquirer", None), MovieAcquirer):
             await cycle.acquirer.client.aclose()
+        if cycle is not None and isinstance(getattr(cycle, "finalizer", None), MovieFinalizer):
+            await cycle.finalizer.client.aclose()
 
 
 def main() -> None:

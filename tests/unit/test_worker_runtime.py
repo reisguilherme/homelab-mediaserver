@@ -33,6 +33,15 @@ class FakeAcquirer:
         return "grabbed"
 
 
+class FakeFinalizer:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def finalize(self, media_key: str, reservation_id: str) -> str:
+        self.calls.append((media_key, reservation_id))
+        return "downloading"
+
+
 @pytest.mark.asyncio
 async def test_worker_reserves_approved_requests_without_dispatching_downloads() -> None:
     source = FakeSource(
@@ -98,9 +107,13 @@ async def test_worker_acquires_only_admitted_movies() -> None:
         ReservationResult(True, reservation_id="r3"),
     ])
     acquirer = FakeAcquirer()
-    cycle = WorkerCycle(source=source, scheduler=scheduler, acquirer=acquirer)
+    finalizer = FakeFinalizer()
+    cycle = WorkerCycle(
+        source=source, scheduler=scheduler, acquirer=acquirer, finalizer=finalizer
+    )
 
     report = await cycle.run_once()
 
     assert acquirer.calls == [("movie:tmdb:10", "r1")]
+    assert finalizer.calls == [("movie:tmdb:10", "r1")]
     assert report.grabbed == 1

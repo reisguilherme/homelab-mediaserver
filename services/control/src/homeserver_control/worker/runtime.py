@@ -22,6 +22,10 @@ class MovieAcquisition(Protocol):
     async def acquire(self, media_key: str, reservation_id: str) -> str: ...
 
 
+class MovieFinalization(Protocol):
+    async def finalize(self, media_key: str, reservation_id: str) -> str: ...
+
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -49,6 +53,7 @@ class WorkerCycle:
         source: ApprovedRequestSource,
         scheduler: ReservationScheduler,
         acquirer: MovieAcquisition | None = None,
+        finalizer: MovieFinalization | None = None,
         page_size: int = 20,
     ) -> None:
         if not 1 <= page_size <= 100:
@@ -56,6 +61,7 @@ class WorkerCycle:
         self.source = source
         self.scheduler = scheduler
         self.acquirer = acquirer
+        self.finalizer = finalizer
         self.page_size = page_size
 
     @classmethod
@@ -97,18 +103,34 @@ class WorkerCycle:
                 if result.accepted:
                     accepted += 1
                     if (
-                        self.acquirer is not None
-                        and candidate.media_key.startswith("movie:tmdb:")
+                        candidate.media_key.startswith("movie:tmdb:")
                         and result.reservation_id is not None
                     ):
-                        try:
-                            outcome = await self.acquirer.acquire(
-                                candidate.media_key, result.reservation_id
-                            )
-                            if outcome == "grabbed":
-                                grabbed += 1
-                        except Exception:
-                            LOGGER.exception("movie acquisition failed for %s", candidate.media_key)
+                        if self.acquirer is not None:
+                            try:
+                                outcome = await self.acquirer.acquire(
+                                    candidate.media_key, result.reservation_id
+                                )
+                                if outcome == "grabbed":
+                                    grabbed += 1
+                            except Exception:
+                                LOGGER.exception(
+                                    "movie acquisition failed for %s", candidate.media_key
+                                )
+                        if self.finalizer is not None:
+                            try:
+                                outcome = await self.finalizer.finalize(
+                                    candidate.media_key, result.reservation_id
+                                )
+                                if outcome in {"import_requested", "complete"}:
+                                    LOGGER.info(
+                                        "movie finalization %s for %s", outcome,
+                                        candidate.media_key,
+                                    )
+                            except Exception:
+                                LOGGER.exception(
+                                    "movie finalization failed for %s", candidate.media_key
+                                )
                 else:
                     deferred += 1
             if len(batch) < self.page_size:

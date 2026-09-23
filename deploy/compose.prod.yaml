@@ -105,6 +105,7 @@ services:
       HOMESERVER_RADARR_URL: ${HOMESERVER_RADARR_URL:-}
       HOMESERVER_RADARR_API_KEY: ${HOMESERVER_RADARR_API_KEY:-}
       HOMESERVER_PROWLARR_URL: http://prowlarr:9696
+      HOMESERVER_ARR_TOKEN: ${HOMESERVER_ARR_TOKEN:?set in /etc/homeserver/server.env}
       HOMESERVER_CAPACITY_SNAPSHOT: ${HOMESERVER_CAPACITY_SNAPSHOT:-/run/homeserver/capacity.json}
       HOMESERVER_RECOVERY_MODE: /var/lib/homeserver/RECOVERY_MODE
     volumes:

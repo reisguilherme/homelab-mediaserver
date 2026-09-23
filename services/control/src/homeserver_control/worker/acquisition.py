@@ -144,7 +144,7 @@ class MovieAcquirer:
             return "already_imported"
         releases = await self.client.get(
             f"{self.radarr_url}/api/v3/release", params={"movieId": movie["id"]},
-            headers=self.headers,
+            headers=self.headers, timeout=90.0,
         )
         releases.raise_for_status()
         items = releases.json()
@@ -152,7 +152,19 @@ class MovieAcquirer:
             raise ValueError("Radarr release response is invalid")
         budget = reservation["budget_bytes"]
         assert isinstance(budget, int)
-        for release in items:
+        # Indexers that returned inspectable .torrent files in this deployment
+        # are checked first; a magnet redirect still fails closed below.
+        def priority(item: object) -> tuple[int, int]:
+            if not isinstance(item, dict):
+                return (2, 0)
+            quality = item.get("quality")
+            detail = quality.get("quality") if isinstance(quality, dict) else None
+            resolution = detail.get("resolution") if isinstance(detail, dict) else None
+            rank = -resolution if isinstance(resolution, int) else 0
+            return (0 if "YTS" in str(item.get("indexer", "")) else 1, rank)
+
+        ordered = sorted(items, key=priority)
+        for release in ordered:
             if not isinstance(release, dict) or release.get("rejected") is not False:
                 continue
             quality = release.get("quality")
