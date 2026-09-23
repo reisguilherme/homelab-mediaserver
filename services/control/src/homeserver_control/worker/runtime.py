@@ -60,6 +60,8 @@ class WorkerCycle:
         scheduler: ReservationScheduler,
         acquirer: MovieAcquisition | None = None,
         finalizer: MovieFinalization | None = None,
+        series_acquirer: MovieAcquisition | None = None,
+        series_finalizer: MovieFinalization | None = None,
         cancellation: Cancellation | None = None,
         page_size: int = 20,
     ) -> None:
@@ -69,6 +71,8 @@ class WorkerCycle:
         self.scheduler = scheduler
         self.acquirer = acquirer
         self.finalizer = finalizer
+        self.series_acquirer = series_acquirer
+        self.series_finalizer = series_finalizer
         self.cancellation = cancellation
         self.page_size = page_size
 
@@ -141,10 +145,37 @@ class WorkerCycle:
                                 LOGGER.exception(
                                     "movie finalization failed for %s", candidate.media_key
                                 )
+                    elif (
+                        candidate.media_key.startswith("season:tmdb:")
+                        and result.reservation_id is not None
+                    ):
+                        if self.series_acquirer is not None:
+                            try:
+                                outcome = await self.series_acquirer.acquire(
+                                    candidate.media_key, result.reservation_id
+                                )
+                                if outcome == "grabbed":
+                                    grabbed += 1
+                            except Exception:
+                                LOGGER.exception(
+                                    "series acquisition failed for %s", candidate.media_key
+                                )
+                        if self.series_finalizer is not None:
+                            try:
+                                outcome = await self.series_finalizer.finalize(
+                                    candidate.media_key, result.reservation_id
+                                )
+                                if outcome in {"import_requested", "complete"}:
+                                    LOGGER.info(
+                                        "series finalization %s for %s", outcome,
+                                        candidate.media_key,
+                                    )
+                            except Exception:
+                                LOGGER.exception(
+                                    "series finalization failed for %s", candidate.media_key
+                                )
                 else:
                     deferred += 1
-            if len(batch) < self.page_size:
-                break
             page += 1
         cancelled = (
             await self.cancellation.reconcile(approved_source_ids)

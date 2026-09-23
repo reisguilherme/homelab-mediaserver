@@ -21,6 +21,8 @@ from .cancellation import CancellationReconciler
 from .finalization import MovieFinalizer
 from .runtime import WorkerCycle
 from .scheduler import AdmissionScheduler, FilesystemSnapshot
+from .series_acquisition import SeriesAcquirer
+from .series_finalization import SeriesFinalizer
 
 LOGGER = logging.getLogger(__name__)
 
@@ -59,6 +61,8 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     arr_token = os.environ.get("HOMESERVER_ARR_TOKEN")
     acquirer = None
     finalizer = None
+    series_acquirer = None
+    series_finalizer = None
     if radarr_url and radarr_key:
         permits = PermitRegistry(database)
         acquirer = MovieAcquirer(
@@ -78,8 +82,26 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 radarr_url=radarr_url,
                 radarr_api_key=radarr_key,
             )
+    sonarr_url = os.environ.get("HOMESERVER_SONARR_URL")
+    sonarr_key = os.environ.get("HOMESERVER_SONARR_API_KEY")
+    if sonarr_url and sonarr_key:
+        permits = PermitRegistry(database)
+        series_acquirer = SeriesAcquirer(
+            repository=repository, permits=permits,
+            sonarr_url=sonarr_url, sonarr_api_key=sonarr_key,
+            prowlarr_url=os.environ.get("HOMESERVER_PROWLARR_URL", "http://prowlarr:9696"),
+        )
+        if arr_token:
+            series_finalizer = SeriesFinalizer(
+                repository=repository, permits=permits,
+                torrent_root="/data/torrents",
+                gateway_url="http://download-gateway:8081",
+                arr_token=arr_token, sonarr_url=sonarr_url,
+                sonarr_api_key=sonarr_key,
+            )
     return WorkerCycle(
         source=source, scheduler=scheduler, acquirer=acquirer, finalizer=finalizer,
+        series_acquirer=series_acquirer, series_finalizer=series_finalizer,
         cancellation=CancellationReconciler(source=source, repository=repository),
     )
 
@@ -108,6 +130,14 @@ async def _run_forever(
             await cycle.acquirer.client.aclose()
         if cycle is not None and isinstance(getattr(cycle, "finalizer", None), MovieFinalizer):
             await cycle.finalizer.client.aclose()
+        if cycle is not None and isinstance(
+            getattr(cycle, "series_acquirer", None), SeriesAcquirer
+        ):
+            await cycle.series_acquirer.client.aclose()
+        if cycle is not None and isinstance(
+            getattr(cycle, "series_finalizer", None), SeriesFinalizer
+        ):
+            await cycle.series_finalizer.client.aclose()
 
 
 def main() -> None:

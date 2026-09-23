@@ -243,6 +243,38 @@ class ReservationRepository:
         finally:
             connection.close()
 
+    def episode_import_state(self, permit_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT state FROM episode_imports WHERE permit_id = ?", (permit_id,)
+            ).fetchone()
+        return row["state"] if row is not None else None
+
+    def claim_episode_import(self, permit_id: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """INSERT OR IGNORE INTO episode_imports(permit_id, state, updated_at)
+                VALUES (?, 'dispatching', ?)""",
+                (permit_id, _now()),
+            )
+            return cursor.rowcount == 1
+
+    def record_episode_import(self, permit_id: str, command_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE episode_imports SET state = 'accepted', command_id = ?,
+                updated_at = ? WHERE permit_id = ? AND state = 'dispatching'""",
+                (command_id, _now(), permit_id),
+            )
+
+    def complete_episode_import(self, permit_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE episode_imports SET state = 'complete', updated_at = ? "
+                "WHERE permit_id = ? AND state = 'accepted'",
+                (_now(), permit_id),
+            )
+
     def cancel_unstarted(self, reservation_id: str) -> str:
         """Revoke an unused admission atomically; never release an active download."""
         connection = self._connect()

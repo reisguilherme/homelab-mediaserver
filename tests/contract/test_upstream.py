@@ -3,6 +3,7 @@ import pytest
 
 from homeserver_control.adapters.arr import ArrAdapterClient, CredentialError, EffectUncertain
 from homeserver_control.adapters.contracts import MediaRef
+from homeserver_control.adapters.http import ContractError
 from homeserver_control.adapters.seerr import SeerrAdapter
 
 
@@ -33,6 +34,27 @@ async def test_seerr_pagination_maps_only_approved_requests() -> None:
 
 
 @pytest.mark.asyncio
+async def test_seerr_tv_request_maps_each_approved_season_with_tmdb_identity() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/request"
+        return httpx.Response(200, json={"results": [{
+            "id": 3, "status": 2,
+            "media": {"tmdbId": 97546, "tvdbId": 383203, "mediaType": "tv"},
+            "seasons": [{"seasonNumber": 3, "status": 2},
+                        {"seasonNumber": 4, "status": 2}],
+        }]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        page = await SeerrAdapter(
+            base_url="http://seerr", api_key="secret", client=client
+        ).list_approved(page=1)
+    assert page == [
+        {"source_id": "3:3", "media_key": "season:tmdb:97546:3", "kind": "season"},
+        {"source_id": "3:4", "media_key": "season:tmdb:97546:4", "kind": "season"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_seerr_request_lookup_distinguishes_removed_from_approved() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v1/request/7":
@@ -45,6 +67,34 @@ async def test_seerr_request_lookup_distinguishes_removed_from_approved() -> Non
         adapter = SeerrAdapter(base_url="http://seerr", api_key="secret", client=client)
         assert await adapter.get_request_status("7") is None
         assert await adapter.get_request_status("8") == 2
+
+
+@pytest.mark.asyncio
+async def test_seerr_season_lookup_detects_withdrawn_season() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/request/3"
+        return httpx.Response(200, json={
+            "id": 3, "status": 2,
+            "seasons": [{"seasonNumber": 4, "status": 2}],
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = SeerrAdapter(base_url="http://seerr", api_key="secret", client=client)
+        assert await adapter.get_request_status("3:4") == 2
+        assert await adapter.get_request_status("3:3") is None
+
+
+@pytest.mark.asyncio
+async def test_seerr_season_lookup_does_not_treat_missing_status_as_withdrawal() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "id": 3, "status": 2, "seasons": [{"seasonNumber": 4}],
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = SeerrAdapter(base_url="http://seerr", api_key="secret", client=client)
+        with pytest.raises(ContractError, match="status"):
+            await adapter.get_request_status("3:4")
 
 
 @pytest.mark.asyncio

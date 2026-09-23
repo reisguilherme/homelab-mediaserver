@@ -24,6 +24,7 @@ class Permit:
     result: dict[str, Any] | None = None
     operation_id: str = field(default_factory=lambda: str(uuid4()))
     reservation_id: str | None = None
+    scope_key: str | None = None
     metadata_sha256: str | None = None
     selected_files: tuple[str, ...] = ()
     budget_bytes: int | None = None
@@ -74,6 +75,7 @@ class PermitRegistry:
                   token TEXT NOT NULL UNIQUE,
                   operation_id TEXT NOT NULL UNIQUE,
                   reservation_id TEXT,
+                  scope_key TEXT,
                   infohash TEXT NOT NULL,
                   metadata_sha256 TEXT,
                   destination TEXT NOT NULL,
@@ -93,9 +95,18 @@ class PermitRegistry:
                 connection.execute(
                     "ALTER TABLE gateway_permits ADD COLUMN category TEXT NOT NULL DEFAULT ''"
                 )
+            if "scope_key" not in columns:
+                connection.execute("ALTER TABLE gateway_permits ADD COLUMN scope_key TEXT")
+            connection.execute("DROP INDEX IF EXISTS idx_gateway_permit_reservation")
             connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_permit_reservation "
-                "ON gateway_permits(reservation_id) WHERE reservation_id IS NOT NULL"
+                "ON gateway_permits(reservation_id) "
+                "WHERE reservation_id IS NOT NULL AND scope_key IS NULL"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_permit_scope "
+                "ON gateway_permits(reservation_id, scope_key) "
+                "WHERE reservation_id IS NOT NULL AND scope_key IS NOT NULL"
             )
 
     @staticmethod
@@ -117,6 +128,7 @@ class PermitRegistry:
             token=row["token"],
             operation_id=row["operation_id"],
             reservation_id=row["reservation_id"],
+            scope_key=row["scope_key"],
             infohash=row["infohash"],
             metadata_sha256=row["metadata_sha256"],
             destination=row["destination"],
@@ -136,6 +148,7 @@ class PermitRegistry:
         expires_at: datetime,
         category: str = "",
         reservation_id: str | None = None,
+        scope_key: str | None = None,
         metadata_sha256: str | None = None,
         selected_files: tuple[str, ...] = (),
         budget_bytes: int | None = None,
@@ -148,6 +161,7 @@ class PermitRegistry:
             expires_at=expires_at,
             category=category,
             reservation_id=reservation_id,
+            scope_key=scope_key,
             metadata_sha256=self._validate_metadata_digest(metadata_sha256),
             selected_files=selected_files,
             budget_bytes=budget_bytes,
@@ -157,19 +171,43 @@ class PermitRegistry:
                 self._permits[permit.token] = permit
         else:
             with self._session() as connection:
+                if scope_key is not None:
+                    if (
+                        not scope_key or category != "sonarr" or reservation_id is None
+                        or budget_bytes is None or not 0 < budget_bytes <= 5_000_000_000
+                    ):
+                        raise ValueError("invalid episode permit")
+                    connection.execute("BEGIN IMMEDIATE")
+                    reservation = connection.execute(
+                        "SELECT media_key, budget_bytes FROM reservations "
+                        "WHERE id = ? AND state IN ('reserved', 'downloading', 'waiting_episodes')",
+                        (reservation_id,),
+                    ).fetchone()
+                    if reservation is None or not reservation["media_key"].startswith(
+                        "season:tmdb:"
+                    ):
+                        raise PermissionError("season_reservation_required")
+                    committed = connection.execute(
+                        "SELECT COALESCE(SUM(budget_bytes), 0) FROM gateway_permits "
+                        "WHERE reservation_id = ? AND scope_key IS NOT NULL",
+                        (reservation_id,),
+                    ).fetchone()[0]
+                    if committed + budget_bytes > reservation["budget_bytes"]:
+                        raise PermissionError("season_budget_exceeded")
                 connection.execute(
                     """
                     INSERT INTO gateway_permits(
-                      permit_id, token, operation_id, reservation_id, infohash,
+                      permit_id, token, operation_id, reservation_id, scope_key, infohash,
                       metadata_sha256, destination, category, selected_files_json,
                       budget_bytes, expires_at, state, result_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                     """,
                     (
                         permit.permit_id,
                         permit.token,
                         permit.operation_id,
                         permit.reservation_id,
+                        permit.scope_key,
                         permit.infohash,
                         permit.metadata_sha256,
                         permit.destination,
@@ -180,6 +218,8 @@ class PermitRegistry:
                         permit.state,
                     ),
                 )
+                if scope_key is not None:
+                    connection.commit()
         return permit
 
     def find_for_metadata(
@@ -285,19 +325,22 @@ class PermitRegistry:
             ).fetchone()
         return row is not None
 
-    def get_for_reservation(self, reservation_id: str) -> Permit | None:
+    def get_for_reservation(
+        self, reservation_id: str, *, scope_key: str | None = None
+    ) -> Permit | None:
         if self._db_path is None:
             with self._lock:
                 return next(
                     (
                         item for item in self._permits.values()
-                        if item.reservation_id == reservation_id
+                        if item.reservation_id == reservation_id and item.scope_key == scope_key
                     ),
                     None,
                 )
         with self._session() as connection:
             row = connection.execute(
-                "SELECT * FROM gateway_permits WHERE reservation_id = ?", (reservation_id,)
+                "SELECT * FROM gateway_permits WHERE reservation_id = ? "
+                "AND scope_key IS ?", (reservation_id, scope_key),
             ).fetchone()
         return self._permit_from_row(row) if row is not None else None
 

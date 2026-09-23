@@ -24,11 +24,12 @@ class SeerrAdapter:
         self.page_size = page_size
 
     async def get_request_status(self, source_id: str) -> int | None:
-        if not source_id.isdecimal():
+        parts = source_id.split(":")
+        if len(parts) not in {1, 2} or not all(part.isdecimal() for part in parts):
             raise ValueError("Seerr request ID is invalid")
         try:
             response = await self.client.get(
-                endpoint(self.base_url, f"/api/v1/request/{source_id}"),
+                endpoint(self.base_url, f"/api/v1/request/{parts[0]}"),
                 headers=self.headers,
             )
         except httpx.HTTPError as error:
@@ -45,11 +46,25 @@ class SeerrAdapter:
             raise ContractError("Seerr request response is not JSON") from error
         if (
             not isinstance(payload, dict)
-            or payload.get("id") != int(source_id)
+            or payload.get("id") != int(parts[0])
             or not isinstance(payload.get("status"), int)
         ):
             raise ContractError("Seerr request response is invalid")
-        return payload["status"]
+        if len(parts) == 1 or payload["status"] != 2:
+            return payload["status"]
+        seasons = payload.get("seasons")
+        if not isinstance(seasons, list):
+            raise ContractError("Seerr request is missing seasons")
+        selected = next(
+            (season for season in seasons if isinstance(season, dict)
+             and season.get("seasonNumber") == int(parts[1])),
+            None,
+        )
+        if selected is None:
+            return None
+        if not isinstance(selected.get("status"), int):
+            raise ContractError("Seerr season status is invalid")
+        return selected["status"]
 
     async def list_approved(self, page: int) -> list[dict[str, str]]:
         if page < 1:
@@ -77,20 +92,36 @@ class SeerrAdapter:
             media = item.get("media")
             if not isinstance(media, dict):
                 raise ContractError("Seerr request is missing media")
-            source_id = media.get("tmdbId") or media.get("tvdbId")
+            source_id = media.get("tmdbId")
             media_type = media.get("mediaType")
-            if not isinstance(source_id, int) or media_type not in {"movie", "tv"}:
+            if (
+                not isinstance(source_id, int) or source_id <= 0
+                or media_type not in {"movie", "tv"}
+            ):
                 raise ContractError("Seerr media identity is incomplete")
-            kind = "movie" if media_type == "movie" else "season"
-            source_name = "tmdb" if media_type == "movie" else "tvdb"
             request_id = item.get("id")
             if not isinstance(request_id, (int, str)):
                 raise ContractError("Seerr request has no stable id")
-            result.append(
-                {
+            if media_type == "movie":
+                result.append({
                     "source_id": str(request_id),
-                    "media_key": f"{kind}:{source_name}:{source_id}",
-                    "kind": kind,
-                }
-            )
+                    "media_key": f"movie:tmdb:{source_id}",
+                    "kind": "movie",
+                })
+                continue
+            seasons = item.get("seasons")
+            if not isinstance(seasons, list):
+                raise ContractError("Seerr TV request is missing seasons")
+            for season in seasons:
+                if not isinstance(season, dict):
+                    raise ContractError("Seerr TV season is invalid")
+                number = season.get("seasonNumber")
+                if not isinstance(number, int) or number < 0:
+                    raise ContractError("Seerr TV season number is invalid")
+                if season.get("status") == 2:
+                    result.append({
+                        "source_id": f"{request_id}:{number}",
+                        "media_key": f"season:tmdb:{source_id}:{number}",
+                        "kind": "season",
+                    })
         return result

@@ -129,6 +129,43 @@ async def test_worker_acquires_only_admitted_movies() -> None:
 
 
 @pytest.mark.asyncio
+async def test_worker_dispatches_only_reserved_seasons_to_series_pipeline() -> None:
+    source = FakeSource(pages=[[
+        {"source_id": "3:4", "media_key": "season:tmdb:97546:4", "kind": "season"},
+        {"source_id": "4:2", "media_key": "season:tmdb:111:2", "kind": "season"},
+    ]])
+    scheduler = FakeScheduler([
+        ReservationResult(True, reservation_id="r1"),
+        ReservationResult(False, reason="waiting_space"),
+    ])
+    acquirer = FakeAcquirer()
+    finalizer = FakeFinalizer()
+    cycle = WorkerCycle(
+        source=source, scheduler=scheduler,
+        series_acquirer=acquirer, series_finalizer=finalizer,
+    )
+    report = await cycle.run_once()
+    assert acquirer.calls == [("season:tmdb:97546:4", "r1")]
+    assert finalizer.calls == [("season:tmdb:97546:4", "r1")]
+    assert report.grabbed == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_continues_pages_after_seerr_expands_one_request_to_seasons() -> None:
+    source = FakeSource(pages=[
+        [{"source_id": "3:4", "media_key": "season:tmdb:97546:4", "kind": "season"}],
+        [{"source_id": "4", "media_key": "movie:tmdb:123", "kind": "movie"}],
+    ])
+    scheduler = FakeScheduler([
+        ReservationResult(False, reason="waiting_space"),
+        ReservationResult(False, reason="waiting_space"),
+    ])
+    report = await WorkerCycle(source=source, scheduler=scheduler).run_once()
+    assert report.processed == 2
+    assert len(scheduler.candidates) == 2
+
+
+@pytest.mark.asyncio
 async def test_worker_reconciles_withdrawn_requests_after_pagination() -> None:
     source = FakeSource(pages=[[
         {"source_id": "7", "media_key": "movie:tmdb:10", "kind": "movie"},
