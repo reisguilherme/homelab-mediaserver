@@ -8,6 +8,13 @@
 4. Executar `smoke.sh` e revisar readiness, logs e versão antes de liberar
    admissões.
 
+No servidor atual, a API está vinculada ao endereço Tailscale. Para o smoke de
+produção, use a configuração que contém o UUID da mídia e esse endereço:
+
+```bash
+sudo bash -c 'source /etc/homeserver/server.env; export HOMESERVER_HEALTH_URL="http://${TAILSCALE_BIND_IP}:8080"; bash /opt/homeserver/current/scripts/smoke.sh --config /etc/homeserver/server.env --environment prod'
+```
+
 O script não substitui `/srv/data`, `/srv/appdata` ou configurações preexistentes
 e impede manifestos sem digests. Para operação real, registrar o SHA efetivo e
 o resultado do smoke em `docs/evidence/` sanitizado.
