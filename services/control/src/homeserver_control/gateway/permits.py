@@ -93,6 +93,10 @@ class PermitRegistry:
                 connection.execute(
                     "ALTER TABLE gateway_permits ADD COLUMN category TEXT NOT NULL DEFAULT ''"
                 )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_permit_reservation "
+                "ON gateway_permits(reservation_id) WHERE reservation_id IS NOT NULL"
+            )
 
     @staticmethod
     def _expires(value: str) -> datetime:
@@ -235,6 +239,22 @@ class PermitRegistry:
                 (infohash.lower(),),
             ).fetchone()
         return row is not None
+
+    def get_for_reservation(self, reservation_id: str) -> Permit | None:
+        if self._db_path is None:
+            with self._lock:
+                return next(
+                    (
+                        item for item in self._permits.values()
+                        if item.reservation_id == reservation_id
+                    ),
+                    None,
+                )
+        with self._session() as connection:
+            row = connection.execute(
+                "SELECT * FROM gateway_permits WHERE reservation_id = ?", (reservation_id,)
+            ).fetchone()
+        return self._permit_from_row(row) if row is not None else None
 
     def authorize(
         self,

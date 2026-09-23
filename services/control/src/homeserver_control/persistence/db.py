@@ -178,6 +178,15 @@ class ReservationRepository:
         with self._connect() as connection:
             return int(connection.execute("SELECT COUNT(*) FROM reservations").fetchone()[0])
 
+    def active_reservation(self, reservation_id: str) -> dict[str, object] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT id, media_key, budget_bytes, state FROM reservations
+                WHERE id = ? AND state IN ('reserved', 'downloading')""",
+                (reservation_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def record_operation(
         self,
         *,

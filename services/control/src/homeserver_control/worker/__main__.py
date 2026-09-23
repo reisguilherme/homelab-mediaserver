@@ -12,9 +12,11 @@ from collections.abc import Callable
 from pathlib import Path
 
 from homeserver_control.adapters.seerr import SeerrAdapter
+from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.recovery import recovery_mode_blocks
 
+from .acquisition import MovieAcquirer
 from .runtime import WorkerCycle
 from .scheduler import AdmissionScheduler, FilesystemSnapshot
 
@@ -50,7 +52,18 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
         snapshot_provider=lambda: _snapshot_from_file(Path(snapshot_path)),
         clock=time.time,
     )
-    return WorkerCycle(source=source, scheduler=scheduler)
+    radarr_url = os.environ.get("HOMESERVER_RADARR_URL")
+    radarr_key = os.environ.get("HOMESERVER_RADARR_API_KEY")
+    acquirer = None
+    if radarr_url and radarr_key:
+        acquirer = MovieAcquirer(
+            repository=repository,
+            permits=PermitRegistry(database),
+            radarr_url=radarr_url,
+            radarr_api_key=radarr_key,
+            prowlarr_url=os.environ.get("HOMESERVER_PROWLARR_URL", "http://prowlarr:9696"),
+        )
+    return WorkerCycle(source=source, scheduler=scheduler, acquirer=acquirer)
 
 
 async def _run_forever(
@@ -73,6 +86,8 @@ async def _run_forever(
     finally:
         if cycle is not None and isinstance(cycle.source, SeerrAdapter):
             await cycle.source.client.aclose()
+        if cycle is not None and isinstance(getattr(cycle, "acquirer", None), MovieAcquirer):
+            await cycle.acquirer.client.aclose()
 
 
 def main() -> None:

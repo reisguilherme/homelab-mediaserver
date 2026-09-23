@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
@@ -17,21 +18,24 @@ class ReservationScheduler(Protocol):
     def admit(self, candidate: AdmissionCandidate) -> ReservationResult: ...
 
 
+class MovieAcquisition(Protocol):
+    async def acquire(self, media_key: str, reservation_id: str) -> str: ...
+
+
+LOGGER = logging.getLogger(__name__)
+
+
 @dataclass(frozen=True)
 class CycleReport:
     processed: int = 0
     accepted: int = 0
     deferred: int = 0
     malformed: int = 0
+    grabbed: int = 0
 
 
 class WorkerCycle:
-    """Reconcile approved requests into persistent reservations.
-
-    This boundary deliberately stops before any Arr/qBittorrent mutation. A
-    request must pass the capacity transaction first; later worker stages can
-    consume the persisted reservation without allowing a source to bypass it.
-    """
+    """Reserve approved requests before any optional movie acquisition."""
 
     _budgets = {
         "movie": 50_000_000_000,
@@ -44,12 +48,14 @@ class WorkerCycle:
         *,
         source: ApprovedRequestSource,
         scheduler: ReservationScheduler,
+        acquirer: MovieAcquisition | None = None,
         page_size: int = 20,
     ) -> None:
         if not 1 <= page_size <= 100:
             raise ValueError("page size must be between 1 and 100")
         self.source = source
         self.scheduler = scheduler
+        self.acquirer = acquirer
         self.page_size = page_size
 
     @classmethod
@@ -74,7 +80,7 @@ class WorkerCycle:
         )
 
     async def run_once(self) -> CycleReport:
-        processed = accepted = deferred = malformed = 0
+        processed = accepted = deferred = malformed = grabbed = 0
         page = 1
         while True:
             batch = await self.source.list_approved(page)
@@ -90,9 +96,22 @@ class WorkerCycle:
                 result = self.scheduler.admit(candidate)
                 if result.accepted:
                     accepted += 1
+                    if (
+                        self.acquirer is not None
+                        and candidate.media_key.startswith("movie:tmdb:")
+                        and result.reservation_id is not None
+                    ):
+                        try:
+                            outcome = await self.acquirer.acquire(
+                                candidate.media_key, result.reservation_id
+                            )
+                            if outcome == "grabbed":
+                                grabbed += 1
+                        except Exception:
+                            LOGGER.exception("movie acquisition failed for %s", candidate.media_key)
                 else:
                     deferred += 1
             if len(batch) < self.page_size:
                 break
             page += 1
-        return CycleReport(processed, accepted, deferred, malformed)
+        return CycleReport(processed, accepted, deferred, malformed, grabbed)
