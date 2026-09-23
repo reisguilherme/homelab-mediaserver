@@ -108,6 +108,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
             capacity_provider=capacity_provider,
         )
         if arr_token:
+            finalizer_client = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
             finalizer = MovieFinalizer(
                 repository=repository,
                 permits=permits,
@@ -116,6 +117,11 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 arr_token=arr_token,
                 radarr_url=radarr_url,
                 radarr_api_key=radarr_key,
+                client=finalizer_client,
+                subtitle_source=(
+                    SubDLSource(api_key=subdl_key, client=finalizer_client)
+                    if subdl_key else None
+                ),
             )
     if sonarr_url and sonarr_key:
         assert permits is not None
@@ -132,12 +138,18 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
             capacity_provider=capacity_provider,
         )
         if arr_token:
+            series_finalizer_client = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
             series_finalizer = SeriesFinalizer(
                 repository=repository, permits=permits,
                 torrent_root="/data/torrents",
                 gateway_url="http://download-gateway:8081",
                 arr_token=arr_token, sonarr_url=sonarr_url,
                 sonarr_api_key=sonarr_key,
+                client=series_finalizer_client,
+                subtitle_source=(
+                    SubDLSource(api_key=subdl_key, client=series_finalizer_client)
+                    if subdl_key else None
+                ),
             )
     return WorkerCycle(
         source=source, scheduler=scheduler, acquirer=acquirer, finalizer=finalizer,

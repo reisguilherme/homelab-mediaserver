@@ -240,13 +240,23 @@ async def test_external_subdl_movie_subtitle_is_required_and_installed(tmp_path,
     imported = False
     posts = []
 
+    class LaterSubtitles:
+        calls = 0
+
+        async def fetch(self, *, tmdb_id, release_title):
+            assert (tmdb_id, release_title) == (152532, "Film.1080p.BluRay")
+            self.calls += 1
+            return srt if self.calls == 2 else None
+
+    source = LaterSubtitles()
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v3/config/mediamanagement":
             return httpx.Response(200, json={"copyUsingHardlinks": True})
         if request.url.path == "/api/v2/torrents/info":
             return httpx.Response(200, json=[{
                 "hash": permit.infohash, "progress": 1, "amount_left": 0,
-                "content_path": "/data/torrents/Film",
+                "content_path": "/data/torrents/Film", "name": "Film.1080p.BluRay",
             }])
         if request.url.path == "/api/v2/torrents/files":
             return httpx.Response(200, json=[{"name": "Film/movie.mkv", "size": 5}])
@@ -267,15 +277,18 @@ async def test_external_subdl_movie_subtitle_is_required_and_installed(tmp_path,
             repository=repo, permits=permits, torrent_root=tmp_path / "torrents",
             media_root=library, gateway_url="http://download-gateway:8081",
             arr_token="secret", radarr_url="http://radarr:7878",
-            radarr_api_key="secret", client=client,
+            radarr_api_key="secret", client=client, subtitle_source=source,
         )
-        with pytest.raises(ValidationError, match="Brazilian"):
-            await finalizer.finalize("movie:tmdb:152532", reserved.reservation_id)
+        assert await finalizer.finalize(
+            "movie:tmdb:152532", reserved.reservation_id
+        ) == "waiting_subtitles"
         assert not posts
-        SubtitleArtifactStore(database).put(reserved.reservation_id, None, permit.infohash, srt)
         assert await finalizer.finalize(
             "movie:tmdb:152532", reserved.reservation_id
         ) == "import_requested"
+        assert SubtitleArtifactStore(database).get(
+            reserved.reservation_id, None, permit.infohash
+        ) == srt
         destination = library / "Film"
         destination.mkdir(parents=True)
         (destination / "movie.mkv").write_bytes(b"video")

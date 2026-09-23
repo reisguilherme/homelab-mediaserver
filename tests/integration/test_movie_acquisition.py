@@ -111,7 +111,8 @@ def test_manifest_excludes_sample_video_but_rejects_second_feature():
 
 
 @pytest.mark.asyncio
-async def test_movie_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path):
+@pytest.mark.parametrize("subtitle_available", [True, False])
+async def test_movie_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path, subtitle_available):
     repo, permits, reservation_id = _reserve(tmp_path)
     store = SubtitleArtifactStore(repo.path)
     torrent = _torrent(subtitle=False)
@@ -145,12 +146,14 @@ async def test_movie_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path):
                     "language": "BR_PT", "format": "srt", "size": len(srt),
                     "release_name": "Dallas.Buyers.Club.2013.1080p.BluRay.x264-SPARKS",
                     "url": "/subtitle/123/abc",
-                }]}],
+                }]}] if subtitle_available else [],
             })
         if request.url.host == "dl.subdl.com":
             return httpx.Response(200, content=srt)
         if request.url.path == "/api/v3/release" and request.method == "POST":
-            assert store.get(reservation_id, None, inspected.infohash) == srt
+            assert store.get(reservation_id, None, inspected.infohash) == (
+                srt if subtitle_available else None
+            )
             posts.append(request)
             return httpx.Response(200, json=release)
         raise AssertionError(f"unexpected request: {request.method} {request.url}")

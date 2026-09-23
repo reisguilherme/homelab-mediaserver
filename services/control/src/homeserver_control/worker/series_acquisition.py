@@ -155,8 +155,6 @@ class SeriesAcquirer(MovieAcquirer):
                     tmdb_id=tmdb_id, release_title=release["title"],
                     season=season, episode=episode,
                 )
-                if external is None:
-                    continue
             yield release, manifest, external
 
     async def acquire(self, media_key: str, reservation_id: str) -> str:

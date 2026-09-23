@@ -15,6 +15,7 @@ from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
 
 from .imports import import_hardlink
+from .subdl import SubDLSource
 from .subtitle_language import is_brazilian_portuguese_subtitle
 from .validation import ValidationError, validate_media
 
@@ -82,6 +83,7 @@ class MovieFinalizer:
         radarr_api_key: str,
         media_root: str | Path = "/data/media/movies",
         client: httpx.AsyncClient | None = None,
+        subtitle_source: SubDLSource | None = None,
     ) -> None:
         if not arr_token or not radarr_api_key:
             raise ValueError("gateway and Radarr credentials are required")
@@ -95,6 +97,7 @@ class MovieFinalizer:
         self.gateway_headers = {"X-Arr-Token": arr_token}
         self.radarr_headers = {"X-Api-Key": radarr_api_key}
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(15.0))
+        self.subtitle_source = subtitle_source
 
     async def _hardlink_import_enabled(self) -> bool:
         response = await self.client.get(
@@ -251,6 +254,12 @@ class MovieFinalizer:
                 raise ValidationError("selected file is outside torrent content")
             selected.append(path)
         videos = [path for path in selected if path.suffix.lower() in _VIDEO]
+        if any(
+            path.suffix.lower() in _SUBTITLE
+            and not is_brazilian_portuguese_subtitle(str(path))
+            for path in selected
+        ):
+            raise ValidationError("selected subtitle is not Brazilian Portuguese")
         subtitles = [
             path for path in selected
             if path.suffix.lower() in _SUBTITLE
@@ -266,7 +275,15 @@ class MovieFinalizer:
         if not subtitles and self.subtitle_store.get(
             reservation_id, None, permit.infohash
         ) is None:
-            raise ValidationError("Brazilian Portuguese subtitle content is not valid")
+            title = torrent.get("name")
+            if self.subtitle_source is not None and isinstance(title, str) and title:
+                found = await self.subtitle_source.fetch(
+                    tmdb_id=int(media_key.rsplit(":", 1)[-1]), release_title=title
+                )
+                if found is not None:
+                    self.subtitle_store.put(reservation_id, None, permit.infohash, found)
+            if self.subtitle_store.get(reservation_id, None, permit.infohash) is None:
+                return "waiting_subtitles"
         if not await self._hardlink_import_enabled():
             return "import_guard"
         if not self.repository.claim_movie_import(reservation_id):

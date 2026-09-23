@@ -125,7 +125,8 @@ def test_sonarr_web_label_is_allowed_only_when_arr_classifies_webdl():
 
 
 @pytest.mark.asyncio
-async def test_series_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path):
+@pytest.mark.parametrize("subtitle_available", [True, False])
+async def test_series_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path, subtitle_available):
     repo, permits, reservation_id = _reserve(tmp_path)
     store = SubtitleArtifactStore(repo.path)
     torrent = _torrent(subtitle=None)
@@ -169,12 +170,14 @@ async def test_series_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path):
                         "format": "srt", "size": len(srt),
                         "url": "/subtitle/123/abc",
                     }],
-                }],
+                }] if subtitle_available else [],
             })
         if request.url.host == "dl.subdl.com":
             return httpx.Response(200, content=srt)
         if request.url.path == "/api/v3/release" and request.method == "POST":
-            assert store.get(reservation_id, "S04E01", inspected.infohash) == srt
+            assert store.get(reservation_id, "S04E01", inspected.infohash) == (
+                srt if subtitle_available else None
+            )
             posts.append(request)
             return httpx.Response(200, json=release)
         raise AssertionError(f"unexpected request {request.method} {request.url}")

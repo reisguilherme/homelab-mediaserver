@@ -9,7 +9,7 @@ from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
 from homeserver_control.worker.series_finalization import SeriesFinalizer
-from homeserver_control.worker.validation import ValidationError, ValidationResult
+from homeserver_control.worker.validation import ValidationResult
 
 
 @pytest.mark.asyncio
@@ -152,6 +152,18 @@ async def test_external_subdl_episode_subtitle_is_required_and_installed(tmp_pat
     imported = False
     posts = []
 
+    class LaterSubtitles:
+        calls = 0
+
+        async def fetch(self, *, tmdb_id, release_title, season, episode):
+            assert (tmdb_id, release_title, season, episode) == (
+                97546, "Ted.Lasso.S04E01.1080p.WEB-DL", 4, 1
+            )
+            self.calls += 1
+            return srt if self.calls == 2 else None
+
+    source = LaterSubtitles()
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/v3/config/mediamanagement":
             return httpx.Response(200, json={"copyUsingHardlinks": True})
@@ -170,6 +182,7 @@ async def test_external_subdl_episode_subtitle_is_required_and_installed(tmp_pat
             return httpx.Response(200, json=[{
                 "hash": permit.infohash, "progress": 1, "amount_left": 0,
                 "content_path": "/data/torrents/Ted.Lasso.S04E01",
+                "name": "Ted.Lasso.S04E01.1080p.WEB-DL",
             }])
         if request.url.path == "/api/v2/torrents/files":
             return httpx.Response(200, json=[{
@@ -186,17 +199,18 @@ async def test_external_subdl_episode_subtitle_is_required_and_installed(tmp_pat
             repository=repo, permits=permits, torrent_root=tmp_path / "torrents",
             media_root=library, gateway_url="http://download-gateway:8081",
             arr_token="secret", sonarr_url="http://sonarr:8989",
-            sonarr_api_key="secret", client=client,
-        )
-        with pytest.raises(ValidationError, match="Brazilian"):
-            await finalizer.finalize("season:tmdb:97546:4", reserved.reservation_id)
-        assert not posts
-        SubtitleArtifactStore(database).put(
-            reserved.reservation_id, "S04E01", permit.infohash, srt
+            sonarr_api_key="secret", client=client, subtitle_source=source,
         )
         assert await finalizer.finalize(
             "season:tmdb:97546:4", reserved.reservation_id
+        ) == "waiting_subtitles"
+        assert not posts
+        assert await finalizer.finalize(
+            "season:tmdb:97546:4", reserved.reservation_id
         ) == "import_requested"
+        assert SubtitleArtifactStore(database).get(
+            reserved.reservation_id, "S04E01", permit.infohash
+        ) == srt
         destination = library / "Ted Lasso" / "Season 04"
         destination.mkdir(parents=True)
         (destination / "Ted.Lasso.S04E01.mkv").write_bytes(b"video")

@@ -251,9 +251,8 @@ class MovieAcquirer:
                 content = await self.subtitle_source.fetch(
                     tmdb_id=int(match.group(1)), release_title=title
                 )
-                if content is None:
-                    continue
-                self.subtitle_store.put(reservation_id, None, infohash, content)
+                if content is not None:
+                    self.subtitle_store.put(reservation_id, None, infohash, content)
             if existing is not None:
                 if (
                     existing.infohash != infohash
