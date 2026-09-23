@@ -15,14 +15,17 @@ from homeserver_control.domain.policy import EPISODE_LIMIT_BYTES
 from homeserver_control.domain.torrent_bytes import TorrentBytesError, inspect_torrent
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
+from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
 
 from .acquisition import _SUBTITLE_SUFFIXES, _VIDEO_SUFFIXES, MovieAcquirer
 from .release_quality import release_rank
+from .subdl import SubDLSource
 from .subtitle_language import is_brazilian_portuguese_subtitle
 
 LOGGER = logging.getLogger(__name__)
 _SEASON_KEY = re.compile(r"season:tmdb:([1-9][0-9]*):([0-9]+)")
 _WEB_DL = re.compile(r"(?<![a-z0-9])web[ ._-]*dl(?![a-z0-9])", re.I)
+_WEB = re.compile(r"(?<![a-z0-9])web(?![a-z0-9])", re.I)
 _REMUX = re.compile(r"(?<![a-z0-9])remux(?![a-z0-9])", re.I)
 
 
@@ -45,7 +48,7 @@ def _series_rank(release: dict[str, object]) -> tuple[int, int, int, int, int] |
     if detail.get("source") == "web":
         if not str(detail.get("name", "")).lower().startswith("webdl"):
             return None
-        if not _WEB_DL.search(title):
+        if not (_WEB_DL.search(title) or _WEB.search(title)):
             return None
         normalized.update(source="webdl", modifier="none")
     elif detail.get("source") == "bluray":
@@ -60,17 +63,21 @@ class SeriesAcquirer(MovieAcquirer):
         self, *, repository: ReservationRepository, permits: PermitRegistry,
         sonarr_url: str, sonarr_api_key: str, prowlarr_url: str,
         client: httpx.AsyncClient | None = None, retry_seconds: int = 900,
+        subtitle_source: SubDLSource | None = None,
+        subtitle_store: SubtitleArtifactStore | None = None,
     ) -> None:
         super().__init__(
             repository=repository, permits=permits, radarr_url=sonarr_url,
             radarr_api_key=sonarr_api_key, prowlarr_url=prowlarr_url,
             client=client, retry_seconds=retry_seconds,
+            subtitle_source=subtitle_source, subtitle_store=subtitle_store,
         )
         self.sonarr_url = sonarr_url.rstrip("/")
 
     @staticmethod
     def _eligible_episode_manifest(
-        torrent: bytes, *, season: int, episode: int
+        torrent: bytes, *, season: int, episode: int,
+        allow_external_subtitle: bool = False,
     ) -> tuple[str, str, tuple[str, ...], int] | None:
         try:
             inspected = inspect_torrent(torrent)
@@ -86,7 +93,7 @@ class SeriesAcquirer(MovieAcquirer):
         if (
             len(videos) != 1 or not 0 < videos[0].length <= EPISODE_LIMIT_BYTES
             or not _single_episode_name(videos[0].path, season, episode)
-            or not subtitles
+            or not subtitles and not allow_external_subtitle
         ):
             return None
         return (
@@ -97,7 +104,8 @@ class SeriesAcquirer(MovieAcquirer):
 
     async def _eligible_release(
         self, *, series_id: int, episode_id: int, season: int, episode: int,
-    ) -> tuple[dict[str, object], tuple[str, str, tuple[str, ...], int]] | None:
+        tmdb_id: int,
+    ) -> tuple[dict[str, object], tuple[str, str, tuple[str, ...], int], bytes | None] | None:
         response = await self.client.get(
             f"{self.sonarr_url}/api/v3/release",
             params={"seriesId": series_id, "episodeId": episode_id},
@@ -127,14 +135,25 @@ class SeriesAcquirer(MovieAcquirer):
             if torrent is None:
                 continue
             manifest = self._eligible_episode_manifest(
-                torrent, season=season, episode=episode
+                torrent, season=season, episode=episode,
+                allow_external_subtitle=self.subtitle_source is not None,
             )
             if manifest is None:
                 continue
             claimed = release.get("infoHash")
             if claimed and (not isinstance(claimed, str) or claimed.lower() != manifest[0]):
                 continue
-            return release, manifest
+            external: bytes | None = None
+            if not any(PurePosixPath(name).suffix.lower() in _SUBTITLE_SUFFIXES
+                       for name in manifest[2]):
+                assert self.subtitle_source is not None
+                external = await self.subtitle_source.fetch(
+                    tmdb_id=tmdb_id, release_title=release["title"],
+                    season=season, episode=episode,
+                )
+                if external is None:
+                    continue
+            return release, manifest, external
         return None
 
     async def acquire(self, media_key: str, reservation_id: str) -> str:
@@ -216,11 +235,14 @@ class SeriesAcquirer(MovieAcquirer):
             self._next_search[f"{reservation_id}:{scope}"] = time.monotonic() + self.retry_seconds
             candidate = await self._eligible_release(
                 series_id=series["id"], episode_id=item["id"],
-                season=season, episode=number,
+                season=season, episode=number, tmdb_id=tmdb_id,
             )
             if candidate is None:
                 return "no_eligible_release"
-            release, (infohash, digest, files, bytes_total) = candidate
+            release, (infohash, digest, files, bytes_total), external = candidate
+            if external is not None:
+                assert self.subtitle_store is not None
+                self.subtitle_store.put(reservation_id, scope, infohash, external)
             if existing is not None:
                 if (
                     existing.infohash != infohash

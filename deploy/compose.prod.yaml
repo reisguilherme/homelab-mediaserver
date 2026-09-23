@@ -110,6 +110,7 @@ services:
       HOMESERVER_ARR_TOKEN: ${HOMESERVER_ARR_TOKEN:?set in /etc/homeserver/server.env}
       HOMESERVER_CAPACITY_SNAPSHOT: ${HOMESERVER_CAPACITY_SNAPSHOT:-/run/homeserver/capacity.json}
       HOMESERVER_RECOVERY_MODE: /var/lib/homeserver/RECOVERY_MODE
+      HOMESERVER_SUBDL_API_KEY_FILE: /run/secrets/subdl.key
     volumes:
       - type: bind
         source: /srv/appdata/control
@@ -122,6 +123,11 @@ services:
       - type: bind
         source: /run/homeserver
         target: /run/homeserver
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /etc/homeserver/subdl.key
+        target: /run/secrets/subdl.key
         read_only: true
         bind: {create_host_path: false}
   download-gateway:

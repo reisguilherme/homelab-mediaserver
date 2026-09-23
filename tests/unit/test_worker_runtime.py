@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import pytest
 
 from homeserver_control.persistence.db import ReservationResult
+from homeserver_control.worker.__main__ import _build_cycle
 from homeserver_control.worker.runtime import WorkerCycle
 
 
@@ -177,3 +178,22 @@ async def test_worker_reconciles_withdrawn_requests_after_pagination() -> None:
     await cycle.run_once()
 
     assert cancellation.approved == {"7"}
+
+
+def test_worker_reads_subdl_key_from_private_file(tmp_path, monkeypatch) -> None:
+    key_file = tmp_path / "subdl.key"
+    key_file.write_text("test-subdl-key\n", encoding="utf-8")
+    monkeypatch.setenv("HOMESERVER_SUBDL_API_KEY_FILE", str(key_file))
+    monkeypatch.setenv("HOMESERVER_SEERR_URL", "http://seerr:5055")
+    monkeypatch.setenv("HOMESERVER_SEERR_API_KEY", "seerr-test")
+    monkeypatch.setenv("HOMESERVER_CAPACITY_SNAPSHOT", str(tmp_path / "capacity.json"))
+    monkeypatch.setenv("HOMESERVER_RADARR_URL", "http://radarr:7878")
+    monkeypatch.setenv("HOMESERVER_RADARR_API_KEY", "radarr-test")
+    monkeypatch.setenv("HOMESERVER_SONARR_URL", "http://sonarr:8989")
+    monkeypatch.setenv("HOMESERVER_SONARR_API_KEY", "sonarr-test")
+    monkeypatch.setenv("HOMESERVER_ARR_TOKEN", "gateway-test")
+    monkeypatch.setenv("HOMESERVER_RECOVERY_MODE", str(tmp_path / "RECOVERY_MODE"))
+    cycle = _build_cycle(tmp_path / "control.sqlite")
+    assert cycle is not None
+    assert cycle.acquirer.subtitle_source.api_key == "test-subdl-key"
+    assert cycle.series_acquirer.subtitle_source.api_key == "test-subdl-key"

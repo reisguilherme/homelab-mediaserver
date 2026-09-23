@@ -8,7 +8,9 @@ import pytest
 from homeserver_control.domain.torrent_bytes import inspect_torrent
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
-from homeserver_control.worker.series_acquisition import SeriesAcquirer
+from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
+from homeserver_control.worker.series_acquisition import SeriesAcquirer, _series_rank
+from homeserver_control.worker.subdl import SubDLSource
 
 
 def _bencode(value):
@@ -24,11 +26,10 @@ def _bencode(value):
 
 
 def _torrent(*, video_bytes=3_000_000_000, subtitle=b"Ted.Lasso.S04E01.pt-BR.srt"):
-    files = [
-        {b"length": video_bytes, b"path": [b"Ted.Lasso.S04E01.mkv"]},
-        {b"length": 1000, b"path": [subtitle]},
-    ]
-    total = video_bytes + 1000
+    files = [{b"length": video_bytes, b"path": [b"Ted.Lasso.S04E01.mkv"]}]
+    if subtitle is not None:
+        files.append({b"length": 1000, b"path": [subtitle]})
+    total = sum(item[b"length"] for item in files)
     info = {
         b"files": files, b"name": b"Ted.Lasso.S04E01",
         b"piece length": 16_777_216,
@@ -58,6 +59,88 @@ def test_series_manifest_requires_one_episode_under_five_gb_and_pt_br():
     assert SeriesAcquirer._eligible_episode_manifest(
         _torrent(video_bytes=5_000_000_001), season=4, episode=1
     ) is None
+
+
+def test_sonarr_web_label_is_allowed_only_when_arr_classifies_webdl():
+    release = {
+        "title": "Ted Lasso S04E01 1080p WEB H264 CAKES",
+        "size": 3_000_000_000,
+        "quality": {"quality": {
+            "source": "web", "name": "WEBDL-1080p", "resolution": 1080,
+        }},
+    }
+    assert _series_rank(release) is not None
+    assert _series_rank({**release, "title": "Ted Lasso S04E01 1080p WEBRip CAKES"}) is None
+
+
+@pytest.mark.asyncio
+async def test_series_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path)
+    store = SubtitleArtifactStore(repo.path)
+    torrent = _torrent(subtitle=None)
+    inspected = inspect_torrent(torrent)
+    srt = b"1\n00:00:01,000 --> 00:00:02,000\nLegenda brasileira\n"
+    release = {
+        "guid": "cakes", "indexerId": 2,
+        "title": "Ted Lasso S04E01 1080p WEB H264 CAKES",
+        "size": 3_000_000_000,
+        "downloadUrl": "http://prowlarr:9696/2/download?id=1",
+        "infoHash": inspected.infohash, "rejected": False,
+        "quality": {"quality": {
+            "source": "web", "name": "WEBDL-1080p", "resolution": 1080,
+        }}, "protocol": "torrent", "episodeIds": [44],
+    }
+    posts = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/series":
+            return httpx.Response(200, json=[{"id": 1, "tmdbId": 97546, "monitored": True}])
+        if request.url.path == "/api/v3/episode":
+            return httpx.Response(200, json=[{
+                "id": 44, "seasonNumber": 4, "episodeNumber": 1,
+                "airDateUtc": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+                "monitored": True, "hasFile": False,
+            }])
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            return httpx.Response(200, json=[release])
+        if request.url.path == "/2/download":
+            return httpx.Response(200, content=torrent)
+        if request.url.host == "api.subdl.com":
+            return httpx.Response(200, json={
+                "status": True, "results": [{"tmdb_id": 97546, "type": "tv"}],
+                "subtitles": [{
+                    "language": "BR_PT", "season": 4, "episode": 1,
+                    "unpack_files": [{
+                        "language": "BR_PT", "season": 4, "episode": 1,
+                        "release_name": "Ted.Lasso.S04E01.1080p.WEB.H264-CAKES",
+                        "format": "srt", "size": len(srt),
+                        "url": "/subtitle/123/abc",
+                    }],
+                }],
+            })
+        if request.url.host == "dl.subdl.com":
+            return httpx.Response(200, content=srt)
+        if request.url.path == "/api/v3/release" and request.method == "POST":
+            assert store.get(reservation_id, "S04E01", inspected.infohash) == srt
+            posts.append(request)
+            return httpx.Response(200, json=release)
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        acquirer = SeriesAcquirer(
+            repository=repo, permits=permits,
+            sonarr_url="http://sonarr:8989", sonarr_api_key="secret",
+            prowlarr_url="http://prowlarr:9696", client=client,
+            subtitle_source=SubDLSource(api_key="test-key", client=client),
+            subtitle_store=store,
+        )
+        assert await acquirer.acquire("season:tmdb:97546:4", reservation_id) == "grabbed"
+    assert len(posts) == 1
+    permit = permits.get_for_reservation(reservation_id, scope_key="S04E01")
+    assert permit is not None
+    assert permit.selected_files == ("Ted.Lasso.S04E01/Ted.Lasso.S04E01.mkv",)
     assert SeriesAcquirer._eligible_episode_manifest(
         _torrent(subtitle=b"Ted.Lasso.S04E01.pt-PT.srt"), season=4, episode=1
     ) is None

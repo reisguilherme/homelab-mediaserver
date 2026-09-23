@@ -11,9 +11,12 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+import httpx
+
 from homeserver_control.adapters.seerr import SeerrAdapter
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
+from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
 from homeserver_control.recovery import recovery_mode_blocks
 
 from .acquisition import MovieAcquirer
@@ -23,6 +26,7 @@ from .runtime import WorkerCycle
 from .scheduler import AdmissionScheduler, FilesystemSnapshot
 from .series_acquisition import SeriesAcquirer
 from .series_finalization import SeriesFinalizer
+from .subdl import SubDLSource
 
 LOGGER = logging.getLogger(__name__)
 
@@ -50,6 +54,11 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
         return None
     repository = ReservationRepository(database)
     repository.initialize()
+    key_file = os.environ.get("HOMESERVER_SUBDL_API_KEY_FILE")
+    subdl_key = Path(key_file).read_text(encoding="utf-8").strip() if key_file else None
+    if key_file and not subdl_key:
+        raise ValueError("SubDL key file is empty")
+    subtitle_store = SubtitleArtifactStore(database) if subdl_key else None
     source = SeerrAdapter(base_url=seerr_url, api_key=seerr_key)
     scheduler = AdmissionScheduler(
         repository=repository,
@@ -65,12 +74,18 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     series_finalizer = None
     if radarr_url and radarr_key:
         permits = PermitRegistry(database)
+        movie_client = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
         acquirer = MovieAcquirer(
             repository=repository,
             permits=permits,
             radarr_url=radarr_url,
             radarr_api_key=radarr_key,
             prowlarr_url=os.environ.get("HOMESERVER_PROWLARR_URL", "http://prowlarr:9696"),
+            client=movie_client,
+            subtitle_source=(
+                SubDLSource(api_key=subdl_key, client=movie_client) if subdl_key else None
+            ),
+            subtitle_store=subtitle_store,
         )
         if arr_token:
             finalizer = MovieFinalizer(
@@ -86,10 +101,16 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     sonarr_key = os.environ.get("HOMESERVER_SONARR_API_KEY")
     if sonarr_url and sonarr_key:
         permits = PermitRegistry(database)
+        series_client = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
         series_acquirer = SeriesAcquirer(
             repository=repository, permits=permits,
             sonarr_url=sonarr_url, sonarr_api_key=sonarr_key,
             prowlarr_url=os.environ.get("HOMESERVER_PROWLARR_URL", "http://prowlarr:9696"),
+            client=series_client,
+            subtitle_source=(
+                SubDLSource(api_key=subdl_key, client=series_client) if subdl_key else None
+            ),
+            subtitle_store=subtitle_store,
         )
         if arr_token:
             series_finalizer = SeriesFinalizer(

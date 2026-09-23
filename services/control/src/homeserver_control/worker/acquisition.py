@@ -17,8 +17,10 @@ from homeserver_control.domain.policy import MOVIE_LIMIT_BYTES
 from homeserver_control.domain.torrent_bytes import TorrentBytesError, inspect_torrent
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
+from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
 
 from .release_quality import release_rank
+from .subdl import SubDLSource
 from .subtitle_language import is_brazilian_portuguese_subtitle
 
 LOGGER = logging.getLogger(__name__)
@@ -39,9 +41,13 @@ class MovieAcquirer:
         prowlarr_url: str,
         client: httpx.AsyncClient | None = None,
         retry_seconds: int = 900,
+        subtitle_source: SubDLSource | None = None,
+        subtitle_store: SubtitleArtifactStore | None = None,
     ) -> None:
         if not radarr_api_key:
             raise ValueError("Radarr API key is required")
+        if subtitle_source is not None and subtitle_store is None:
+            raise ValueError("external subtitle storage is required")
         self.repository = repository
         self.permits = permits
         self.radarr_url = radarr_url.rstrip("/")
@@ -49,6 +55,8 @@ class MovieAcquirer:
         self.headers = {"X-Api-Key": radarr_api_key, "Accept": "application/json"}
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(15.0))
         self.retry_seconds = retry_seconds
+        self.subtitle_source = subtitle_source
+        self.subtitle_store = subtitle_store
         self._next_search: dict[str, float] = {}
         self._posted: set[str] = set()
 
@@ -67,7 +75,9 @@ class MovieAcquirer:
         )
 
     @staticmethod
-    def _eligible_manifest(torrent: bytes, budget: int) -> tuple[str, str, tuple[str, ...]] | None:
+    def _eligible_manifest(
+        torrent: bytes, budget: int, *, allow_external_subtitle: bool = False
+    ) -> tuple[str, str, tuple[str, ...]] | None:
         try:
             inspected = inspect_torrent(torrent)
         except TorrentBytesError:
@@ -83,7 +93,10 @@ class MovieAcquirer:
             if PurePosixPath(item.path).suffix.lower() in _SUBTITLE_SUFFIXES
             and is_brazilian_portuguese_subtitle(item.path)
         ]
-        if len(videos) != 1 or videos[0].length > MOVIE_LIMIT_BYTES or not subtitles:
+        if (
+            len(videos) != 1 or videos[0].length > MOVIE_LIMIT_BYTES
+            or not subtitles and not allow_external_subtitle
+        ):
             return None
         return inspected.infohash, inspected.metadata_sha256, tuple(
             item.path for item in (*videos, *subtitles)
@@ -197,7 +210,9 @@ class MovieAcquirer:
             torrent = await self._metadata(url)
             if torrent is None:
                 continue
-            manifest = self._eligible_manifest(torrent, budget)
+            manifest = self._eligible_manifest(
+                torrent, budget, allow_external_subtitle=self.subtitle_source is not None
+            )
             if manifest is None:
                 continue
             infohash, metadata_sha256, selected_files = manifest
@@ -206,6 +221,18 @@ class MovieAcquirer:
                 not isinstance(claimed_hash, str) or claimed_hash.lower() != infohash
             ):
                 continue
+            if not any(PurePosixPath(name).suffix.lower() in _SUBTITLE_SUFFIXES
+                       for name in selected_files):
+                assert self.subtitle_source is not None and self.subtitle_store is not None
+                title = release.get("title")
+                if not isinstance(title, str):
+                    continue
+                content = await self.subtitle_source.fetch(
+                    tmdb_id=int(match.group(1)), release_title=title
+                )
+                if content is None:
+                    continue
+                self.subtitle_store.put(reservation_id, None, infohash, content)
             if existing is not None:
                 if (
                     existing.infohash != infohash

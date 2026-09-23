@@ -8,7 +8,9 @@ import pytest
 from homeserver_control.domain.torrent_bytes import inspect_torrent
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
+from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
 from homeserver_control.worker.acquisition import MovieAcquirer
+from homeserver_control.worker.subdl import SubDLSource
 
 
 def _bencode(value):
@@ -58,6 +60,65 @@ def test_manifest_allows_video_up_to_80_gb_within_reservation():
     oversized = _torrent(subtitle=True, video_bytes=80_000_000_001)
     assert MovieAcquirer._eligible_manifest(maximum, 81_000_000_000) is not None
     assert MovieAcquirer._eligible_manifest(oversized, 81_000_000_000) is None
+
+
+@pytest.mark.asyncio
+async def test_movie_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path)
+    store = SubtitleArtifactStore(repo.path)
+    torrent = _torrent(subtitle=False)
+    inspected = inspect_torrent(torrent)
+    srt = b"1\n00:00:01,000 --> 00:00:02,000\nLegenda brasileira\n"
+    release = {
+        "guid": "sparks", "indexerId": 2,
+        "title": "Dallas Buyers Club 2013 1080p BluRay x264 SPARKS",
+        "size": 1_500_000_000,
+        "downloadUrl": "http://prowlarr:9696/2/download?id=1",
+        "infoHash": inspected.infohash, "rejected": False,
+        "quality": {"quality": {
+            "source": "bluray", "modifier": "none", "resolution": 1080,
+        }}, "protocol": "torrent",
+    }
+    posts = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/movie":
+            return httpx.Response(200, json=[{"id": 2, "tmdbId": 1101383, "hasFile": False}])
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            return httpx.Response(200, json=[release])
+        if request.url.path == "/2/download":
+            return httpx.Response(200, content=torrent)
+        if request.url.host == "api.subdl.com":
+            return httpx.Response(200, json={
+                "status": True, "results": [{"tmdb_id": 1101383, "type": "movie"}],
+                "subtitles": [{"language": "BR_PT", "unpack_files": [{
+                    "language": "BR_PT", "format": "srt", "size": len(srt),
+                    "release_name": "Dallas.Buyers.Club.2013.1080p.BluRay.x264-SPARKS",
+                    "url": "/subtitle/123/abc",
+                }]}],
+            })
+        if request.url.host == "dl.subdl.com":
+            return httpx.Response(200, content=srt)
+        if request.url.path == "/api/v3/release" and request.method == "POST":
+            assert store.get(reservation_id, None, inspected.infohash) == srt
+            posts.append(request)
+            return httpx.Response(200, json=release)
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
+            subtitle_source=SubDLSource(api_key="test-key", client=client),
+            subtitle_store=store,
+        )
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "grabbed"
+    assert len(posts) == 1
+    permit = permits.get_for_reservation(reservation_id)
+    assert permit is not None
+    assert permit.selected_files == ("Film/movie.mkv",)
 
 
 @pytest.mark.asyncio
