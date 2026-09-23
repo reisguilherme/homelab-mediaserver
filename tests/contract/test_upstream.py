@@ -12,13 +12,15 @@ async def test_seerr_pagination_maps_only_approved_requests() -> None:
         assert request.url.path == "/api/v1/request"
         assert request.url.params["take"] == "20"
         assert request.url.params["skip"] == "20"
+        assert request.url.params["filter"] == "approved"
         return httpx.Response(
             200,
             json={
                 "pageInfo": {"pages": 2, "page": 2},
                 "results": [
-                    {"id": 7, "media": {"tmdbId": 123, "mediaType": "movie"}, "isApproved": True},
-                    {"id": 8, "media": {"tmdbId": 456, "mediaType": "movie"}, "isApproved": False},
+                    {"id": 7, "media": {"tmdbId": 123, "mediaType": "movie"}, "status": 2},
+                    {"id": 8, "media": {"tmdbId": 456, "mediaType": "movie"}, "status": 1},
+                    {"id": 9, "media": {"tmdbId": 789, "mediaType": "movie"}, "status": 3},
                 ],
             },
         )

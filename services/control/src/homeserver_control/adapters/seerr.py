@@ -32,13 +32,19 @@ class SeerrAdapter:
             endpoint(self.base_url, "/api/v1/request"),
             headers=self.headers,
             json_body=None,
-            params={"take": self.page_size, "skip": (page - 1) * self.page_size},
+            params={
+                "take": self.page_size,
+                "skip": (page - 1) * self.page_size,
+                "filter": "approved",
+            },
         )
         if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
             raise ContractError("Seerr request response has no results list")
         result: list[dict[str, str]] = []
         for item in payload["results"]:
-            if not isinstance(item, dict) or item.get("isApproved") is not True:
+            # Seerr returns numeric request status: 1 pending, 2 approved,
+            # 3 declined. It does not expose an isApproved field.
+            if not isinstance(item, dict) or item.get("status") != 2:
                 continue
             media = item.get("media")
             if not isinstance(media, dict):
