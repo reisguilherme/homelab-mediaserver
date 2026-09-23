@@ -18,9 +18,17 @@ from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
 from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 
-from .acquisition import _SUBTITLE_SUFFIXES, _VIDEO_SUFFIXES, MovieAcquirer, _is_sample_video
+from .acquisition import (
+    _SUBTITLE_SUFFIXES,
+    _VIDEO_SUFFIXES,
+    MovieAcquirer,
+    _is_sample_video,
+    _queue_only_rejection,
+    _replacement_has_peers,
+)
 from .capacity_evidence import CapacityEvidence
 from .release_quality import release_rank
+from .source_health import SourceHealthStore
 from .subdl import SubDLSource
 from .subtitle_language import is_brazilian_portuguese_subtitle, is_english_subtitle
 
@@ -70,6 +78,7 @@ class SeriesAcquirer(MovieAcquirer):
         torrent_store: TorrentArtifactStore | None = None,
         capacity_provider: Callable[[], Awaitable[CapacityEvidence]] | None = None,
         gateway_url: str | None = None, arr_token: str | None = None,
+        health_store: SourceHealthStore | None = None,
     ) -> None:
         super().__init__(
             repository=repository, permits=permits, radarr_url=sonarr_url,
@@ -78,6 +87,7 @@ class SeriesAcquirer(MovieAcquirer):
             subtitle_source=subtitle_source, subtitle_store=subtitle_store,
             torrent_store=torrent_store,
             capacity_provider=capacity_provider,
+            health_store=health_store, gateway_url=gateway_url, arr_token=arr_token,
         )
         self.sonarr_url = sonarr_url.rstrip("/")
         if bool(gateway_url) != bool(arr_token):
@@ -211,6 +221,7 @@ class SeriesAcquirer(MovieAcquirer):
     async def _eligible_releases(
         self, *, series_id: int, episode_id: int, season: int, episode: int,
         tmdb_id: int,
+        replacement_reason: str | None = None,
     ) -> AsyncIterator[
         tuple[dict[str, object], tuple[str, str, tuple[str, ...], int], bytes | None, bytes]
     ]:
@@ -230,7 +241,9 @@ class SeriesAcquirer(MovieAcquirer):
         )
         for release in ranked:
             if (
-                release.get("rejected") is not False
+                release.get("rejected") is not False and not (
+                    replacement_reason and _queue_only_rejection(release)
+                )
                 or _series_rank(release) is None
                 or not isinstance(release.get("title"), str)
                 or not _single_episode_name(release["title"], season, episode)
@@ -380,13 +393,37 @@ class SeriesAcquirer(MovieAcquirer):
         for item in pending[:1]:
             number = item["episodeNumber"]
             scope = _episode_tag(season, number)
-            self.permits.retire_expired_authorized(reservation_id, scope_key=scope)
             existing = self.permits.get_for_reservation(reservation_id, scope_key=scope)
+            if existing is None or not (
+                existing.state == "authorized"
+                and self.permits.had_superseded(reservation_id, scope_key=scope)
+            ):
+                self.permits.retire_expired_authorized(reservation_id, scope_key=scope)
+                existing = self.permits.get_for_reservation(reservation_id, scope_key=scope)
+            if existing is None and self.permits.had_superseded(
+                reservation_id, scope_key=scope
+            ):
+                return "replacement_missing_manual"
+            replacement_reason = None
+            old_health = None
             if item.get("hasFile") is True:
                 return "waiting_episodes"
-            if existing is not None and existing.state != "authorized":
+            if existing is not None and existing.state == "confirmed":
+                if self.permits.had_superseded(reservation_id, scope_key=scope):
+                    continue
+                replacement_reason, old_health = await self._source_status(existing)
+                if replacement_reason is None:
+                    continue
+            elif existing is not None and existing.state != "authorized":
+                reconciled = await self._reconcile_uncertain_replacement(existing)
+                if reconciled is not None:
+                    return reconciled
                 continue
-            if (reservation_id, scope) in self._posted:
+            if existing is not None and existing.state == "authorized":
+                retried = await self._retry_replacement(existing)
+                if retried is not None:
+                    return retried
+            if replacement_reason is None and (reservation_id, scope) in self._posted:
                 continue
             if time.monotonic() < self._next_search.get(f"{reservation_id}:{scope}", 0):
                 continue
@@ -395,12 +432,35 @@ class SeriesAcquirer(MovieAcquirer):
             async for candidate in self._eligible_releases(
                 series_id=series["id"], episode_id=item["id"],
                 season=season, episode=number, tmdb_id=tmdb_id,
+                replacement_reason=replacement_reason,
             ):
                 found_candidate = True
                 release, (infohash, digest, files, bytes_total), external, torrent = candidate
+                if replacement_reason and (
+                    existing is None or old_health is None
+                    or infohash == existing.infohash
+                    or not self._replacement_paths_available(existing, torrent)
+                    or not _replacement_has_peers(
+                        release, replacement_reason, old_health.num_seeds
+                    )
+                ):
+                    continue
                 if external is not None:
                     assert self.subtitle_store is not None
                     self.subtitle_store.put(reservation_id, scope, infohash, external)
+                if replacement_reason is not None:
+                    assert existing is not None
+                    try:
+                        return await self._dispatch_replacement(
+                            old=existing, infohash=infohash,
+                            metadata_sha256=digest, selected_files=files,
+                            exact_bytes=bytes_total, torrent=torrent,
+                        )
+                    except PermissionError as error:
+                        if str(error) == "waiting_space":
+                            waiting_space = True
+                            continue
+                        return str(error)
                 if existing is not None:
                     if (
                         existing.infohash != infohash
@@ -432,6 +492,9 @@ class SeriesAcquirer(MovieAcquirer):
                         return "already_permitted"
                 if self.torrent_store is not None:
                     self.torrent_store.put(chosen_permit, torrent)
+                if self.permits.had_superseded(reservation_id, scope_key=scope):
+                    retried = await self._retry_replacement(chosen_permit)
+                    return retried or "replacement_metadata_unavailable"
                 response = await self.client.post(
                     f"{self.sonarr_url}/api/v3/release", headers=self.headers,
                     json={**release, "downloadClientId": 1},
@@ -442,6 +505,10 @@ class SeriesAcquirer(MovieAcquirer):
                 return "grabbed"
             if not found_candidate:
                 no_source = True
+            if replacement_reason == "replacing" and existing is not None:
+                resumed = await self._resume_if_safe(existing)
+                if resumed != "resumed":
+                    return resumed
         if waiting_space:
             return "waiting_space"
         return "no_eligible_release" if no_source else "waiting_episodes"

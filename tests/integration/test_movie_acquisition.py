@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+import time
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -12,6 +14,7 @@ from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactSt
 from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 from homeserver_control.worker.acquisition import MovieAcquirer
 from homeserver_control.worker.capacity_evidence import CapacityEvidence
+from homeserver_control.worker.source_health import SourceHealthStore, TorrentHealth
 from homeserver_control.worker.subdl import SubDLSource
 
 
@@ -32,8 +35,9 @@ def _torrent(
     video_bytes: int = 1_500_000_000,
     extra_video_path: list[bytes] | None = None,
     extra_subtitle_name: bytes | None = None,
+    root_name: bytes = b"Film", video_name: bytes = b"movie.mkv",
 ) -> bytes:
-    files = [{b"length": video_bytes, b"path": [b"movie.mkv"]}]
+    files = [{b"length": video_bytes, b"path": [video_name]}]
     if extra_video_path is not None:
         files.append({b"length": 79_000_000, b"path": extra_video_path})
     if subtitle:
@@ -43,7 +47,7 @@ def _torrent(
     total = sum(item[b"length"] for item in files)
     info = {
         b"files": files,
-        b"name": b"Film",
+        b"name": root_name,
         b"piece length": 16_777_216,
         b"pieces": b"a" * (20 * ((total + 16_777_215) // 16_777_216)),
     }
@@ -663,3 +667,627 @@ async def test_acquirer_rejects_redirecting_torrent_cache(tmp_path):
         )
         assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "no_eligible_release"
     assert permits.get_for_reservation(reservation_id) is None
+
+
+@pytest.mark.asyncio
+async def test_movie_replaces_persistently_stalled_source_with_verified_seeded_release(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path, budget=0)
+    old_torrent = _torrent(subtitle=True)
+    new_torrent = _torrent(
+        subtitle=True, video_bytes=1_600_000_000,
+        root_name=b"Film.Alternative", video_name=b"movie.alternative.mkv",
+    )
+    old_metadata = inspect_torrent(old_torrent)
+    new_metadata = inspect_torrent(new_torrent)
+    assert {item.path for item in old_metadata.files}.isdisjoint(
+        item.path for item in new_metadata.files
+    )
+    old = permits.issue(
+        infohash=old_metadata.infohash, metadata_sha256=old_metadata.metadata_sha256,
+        destination="/data/torrents", category="radarr", reservation_id=reservation_id,
+        selected_files=tuple(item.path for item in old_metadata.files),
+        budget_bytes=old_metadata.total_bytes,
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        capacity=CapacityEvidence(free_bytes=2_000_000_000, remaining_by_hash={}),
+    )
+    permits.authorize(
+        token=old.token, infohash=old.infohash, destination=old.destination,
+        metadata_sha256=old.metadata_sha256,
+        effect=lambda _: {"accepted": True},
+    )
+    torrents = TorrentArtifactStore(repo.path)
+    torrents.put(old, old_torrent)
+    SourceHealthStore(tmp_path / "control.sqlite").observe(
+        old.permit_id,
+        TorrentHealth(
+            infohash=old.infohash, downloaded=0,
+            amount_left=old_metadata.total_bytes, num_seeds=0, dlspeed=0,
+            state="stalledDL", progress=0.0,
+        ),
+        now=time.time() - 31 * 60,
+    )
+    events = []
+    stopped = False
+
+    def release(guid, metadata, seeds):
+        return {
+            "guid": guid, "indexerId": 2,
+            "title": "Film 1080p BluRay REMUX DV Atmos",
+            "size": metadata.total_bytes, "seeders": seeds,
+            "downloadUrl": f"http://prowlarr:9696/2/download?id={guid}",
+            "infoHash": metadata.infohash, "rejected": False,
+            "quality": {"quality": {
+                "source": "bluray", "modifier": "remux", "resolution": 1080,
+            }},
+        }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal stopped
+        if request.url.path == "/internal/torrent-health":
+            assert request.headers["X-Arr-Token"] == "worker-secret"
+            assert request.headers["X-Admission-Permit"] == old.token
+            assert "permit_token" not in request.url.params
+            return httpx.Response(200, json={
+                "hash": old.infohash, "downloaded": 0,
+                "amount_left": old_metadata.total_bytes,
+                "num_seeds": 0, "dlspeed": 0,
+                "state": "stalledDL", "progress": 0.0,
+            })
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/movie":
+            return httpx.Response(200, json=[{
+                "id": 2, "tmdbId": 1101383, "hasFile": False,
+            }])
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            return httpx.Response(200, json=[
+                release("old", old_metadata, 0), release("new", new_metadata, 42),
+            ])
+        if request.url.path == "/2/download":
+            return httpx.Response(200, content={
+                "old": old_torrent, "new": new_torrent,
+            }[request.url.params["id"]])
+        if request.url.path == "/internal/source-state":
+            body = request.read().decode()
+            assert request.headers["X-Arr-Token"] == "worker-secret"
+            assert '"permit_token":"' + old.token + '"' in body
+            assert '"action":"stop"' in body
+            stopped = True
+            events.append("stop")
+            return httpx.Response(200, json={"state": "stopped"})
+        if request.url.path == "/api/v2/torrents/add":
+            assert stopped, "old source must stop before adding the replacement"
+            assert request.headers["X-Arr-Token"] == "worker-secret"
+            assert new_torrent in request.content
+            replacement = permits.get_for_reservation(reservation_id)
+            assert replacement is not None
+            assert request.headers["X-Admission-Permit"] == replacement.token
+            permits.authorize(
+                token=replacement.token, infohash=replacement.infohash,
+                destination=replacement.destination,
+                metadata_sha256=replacement.metadata_sha256,
+                effect=lambda _: {"accepted": True},
+            )
+            events.append("add")
+            return httpx.Response(200, json={"accepted": True})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    async def capacity():
+        events.append("capacity")
+        return CapacityEvidence(
+            free_bytes=2_000_000_000,
+            remaining_by_hash={old.infohash: old_metadata.total_bytes},
+            paused_hashes=frozenset({old.infohash}) if stopped else frozenset(),
+        )
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
+            client=client, capacity_provider=capacity,
+            gateway_url="http://download-gateway:8081", arr_token="worker-secret",
+            health_store=SourceHealthStore(tmp_path / "control.sqlite"),
+            torrent_store=torrents,
+        )
+        await acquirer.acquire("movie:tmdb:1101383", reservation_id)
+
+    replacement = permits.get_for_reservation(reservation_id)
+    assert replacement is not None and replacement.infohash == new_metadata.infohash
+    assert replacement.state == "confirmed"
+    assert permits.is_admitted(old.infohash) is False
+    assert events.index("stop") < events.index("capacity") < events.index("add")
+
+
+@pytest.mark.asyncio
+async def test_movie_keeps_stalled_source_when_alternatives_have_no_seeders(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path, budget=0)
+    old_torrent = _torrent(subtitle=True)
+    old_metadata = inspect_torrent(old_torrent)
+    old = permits.issue(
+        infohash=old_metadata.infohash, metadata_sha256=old_metadata.metadata_sha256,
+        destination="/data/torrents", category="radarr", reservation_id=reservation_id,
+        selected_files=tuple(item.path for item in old_metadata.files),
+        budget_bytes=old_metadata.total_bytes,
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        capacity=CapacityEvidence(free_bytes=2_000_000_000, remaining_by_hash={}),
+    )
+    permits.authorize(
+        token=old.token, infohash=old.infohash, destination=old.destination,
+        metadata_sha256=old.metadata_sha256,
+        effect=lambda _: {"accepted": True},
+    )
+    torrents = TorrentArtifactStore(repo.path)
+    torrents.put(old, old_torrent)
+    SourceHealthStore(tmp_path / "control.sqlite").observe(
+        old.permit_id,
+        TorrentHealth(
+            infohash=old.infohash, downloaded=0,
+            amount_left=old_metadata.total_bytes, num_seeds=0, dlspeed=0,
+            state="stalledDL", progress=0.0,
+        ),
+        now=time.time() - 31 * 60,
+    )
+    web_torrent = _torrent(subtitle=True, video_bytes=1_400_000_000)
+    web_metadata = inspect_torrent(web_torrent)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/torrent-health":
+            assert request.headers["X-Admission-Permit"] == old.token
+            assert "permit_token" not in request.url.params
+            return httpx.Response(200, json={
+                "hash": old.infohash, "downloaded": 0,
+                "amount_left": old_metadata.total_bytes,
+                "num_seeds": 0, "dlspeed": 0,
+                "state": "stalledDL", "progress": 0.0,
+            })
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/movie":
+            return httpx.Response(200, json=[{
+                "id": 2, "tmdbId": 1101383, "hasFile": False,
+            }])
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            return httpx.Response(200, json=[{
+                "guid": "old", "title": "Film 1080p BluRay REMUX",
+                "size": old_metadata.total_bytes, "seeders": 0,
+                "downloadUrl": "http://prowlarr:9696/2/download?id=old",
+                "infoHash": old.infohash, "rejected": False,
+                "quality": {"quality": {
+                    "source": "bluray", "modifier": "remux", "resolution": 1080,
+                }},
+            }, {
+                "guid": "web", "title": "Film 2160p WEB-DL DV Atmos",
+                "size": web_metadata.total_bytes, "seeders": 0,
+                "downloadUrl": "http://prowlarr:9696/2/download?id=web",
+                "infoHash": web_metadata.infohash, "rejected": False,
+                "quality": {"quality": {
+                    "source": "webdl", "modifier": "none", "resolution": 2160,
+                }},
+            }])
+        if request.url.path == "/internal/source-state":
+            raise AssertionError("unseeded alternative must not stop the old source")
+        if request.url.path == "/api/v2/torrents/add":
+            raise AssertionError("unseeded alternative must not be added")
+        if request.url.path == "/2/download":
+            return httpx.Response(200, content={
+                "old": old_torrent, "web": web_torrent,
+            }[request.url.params["id"]])
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
+            client=client, capacity_provider=lambda: None,
+            gateway_url="http://download-gateway:8081", arr_token="worker-secret",
+            health_store=SourceHealthStore(tmp_path / "control.sqlite"),
+            torrent_store=torrents,
+        )
+        await acquirer.acquire("movie:tmdb:1101383", reservation_id)
+
+    assert permits.get_for_reservation(reservation_id).permit_id == old.permit_id
+    assert permits.is_admitted(old.infohash)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("collision", ["selected", "extra"])
+async def test_movie_does_not_replace_with_torrent_writing_an_existing_path(
+    tmp_path, collision,
+):
+    repo, permits, reservation_id = _reserve(tmp_path, budget=0)
+    shared_extra = [b"Extras", b"shared.bin"] if collision == "extra" else None
+    old_torrent = _torrent(subtitle=True, extra_video_path=shared_extra)
+    overlapping_torrent = _torrent(
+        subtitle=True, video_bytes=1_600_000_000,
+        extra_video_path=shared_extra,
+        video_name=(b"movie.alternative.mkv" if collision == "extra"
+                    else b"movie.mkv"),
+        subtitle_name=(b"movie.alternative.pt-BR.srt" if collision == "extra"
+                       else b"movie.pt-BR.srt"),
+    )
+    old_metadata = inspect_torrent(old_torrent)
+    overlapping_metadata = inspect_torrent(overlapping_torrent)
+    assert old_metadata.infohash != overlapping_metadata.infohash
+    assert {item.path for item in old_metadata.files}.intersection(
+        item.path for item in overlapping_metadata.files
+    )
+    old_selected = tuple(
+        item.path for item in old_metadata.files
+        if item.path.endswith((".mkv", ".srt"))
+    )
+    overlapping_selected = tuple(
+        item.path for item in overlapping_metadata.files
+        if item.path.endswith((".mkv", ".srt"))
+    )
+    if collision == "extra":
+        assert set(old_selected).isdisjoint(overlapping_selected)
+    old = permits.issue(
+        infohash=old_metadata.infohash, metadata_sha256=old_metadata.metadata_sha256,
+        destination="/data/torrents", category="radarr", reservation_id=reservation_id,
+        selected_files=old_selected,
+        budget_bytes=old_metadata.total_bytes,
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        capacity=CapacityEvidence(free_bytes=2_000_000_000, remaining_by_hash={}),
+    )
+    permits.authorize(
+        token=old.token, infohash=old.infohash, destination=old.destination,
+        metadata_sha256=old.metadata_sha256,
+        effect=lambda _: {"accepted": True},
+    )
+    torrents = TorrentArtifactStore(repo.path)
+    torrents.put(old, old_torrent)
+    SourceHealthStore(tmp_path / "control.sqlite").observe(
+        old.permit_id,
+        TorrentHealth(
+            infohash=old.infohash, downloaded=0,
+            amount_left=old_metadata.total_bytes, num_seeds=0, dlspeed=0,
+            state="stalledDL", progress=0.0,
+        ),
+        now=time.time() - 31 * 60,
+    )
+    metadata_fetched = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/torrent-health":
+            assert request.headers["X-Admission-Permit"] == old.token
+            assert "permit_token" not in request.url.params
+            return httpx.Response(200, json={
+                "hash": old.infohash, "downloaded": 0,
+                "amount_left": old_metadata.total_bytes,
+                "num_seeds": 0, "dlspeed": 0,
+                "state": "stalledDL", "progress": 0.0,
+            })
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/movie":
+            return httpx.Response(200, json=[{
+                "id": 2, "tmdbId": 1101383, "hasFile": False,
+            }])
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            return httpx.Response(200, json=[{
+                "guid": guid, "title": "Film 1080p BluRay REMUX DV Atmos",
+                "size": metadata.total_bytes, "seeders": seeds,
+                "downloadUrl": f"http://prowlarr:9696/2/download?id={guid}",
+                "infoHash": metadata.infohash, "rejected": False,
+                "quality": {"quality": {
+                    "source": "bluray", "modifier": "remux", "resolution": 1080,
+                }},
+            } for guid, metadata, seeds in (
+                ("old", old_metadata, 0),
+                ("overlap", overlapping_metadata, 45),
+            )])
+        if request.url.path == "/2/download":
+            metadata_fetched.append(request.url.params["id"])
+            return httpx.Response(200, content={
+                "old": old_torrent, "overlap": overlapping_torrent,
+            }[request.url.params["id"]])
+        if request.url.path == "/internal/source-state":
+            raise AssertionError("overlapping paths must not stop the old source")
+        if request.url.path == "/api/v2/torrents/add":
+            raise AssertionError("overlapping paths must not be added")
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    async def capacity():
+        return CapacityEvidence(
+            free_bytes=4_000_000_000,
+            remaining_by_hash={old.infohash: old_metadata.total_bytes},
+        )
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
+            client=client, capacity_provider=capacity,
+            gateway_url="http://download-gateway:8081", arr_token="worker-secret",
+            health_store=SourceHealthStore(tmp_path / "control.sqlite"),
+            torrent_store=torrents,
+        )
+        await acquirer.acquire("movie:tmdb:1101383", reservation_id)
+
+    assert "overlap" in metadata_fetched
+    assert permits.get_for_reservation(reservation_id).permit_id == old.permit_id
+    assert permits.is_admitted(old.infohash)
+
+
+@pytest.mark.asyncio
+async def test_movie_retains_source_when_original_torrent_metadata_is_missing(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path, budget=0)
+    old_torrent = _torrent(subtitle=True)
+    new_torrent = _torrent(
+        subtitle=True, video_bytes=1_600_000_000,
+        root_name=b"Film.Alternative", video_name=b"movie.alternative.mkv",
+    )
+    old_metadata = inspect_torrent(old_torrent)
+    new_metadata = inspect_torrent(new_torrent)
+    assert {item.path for item in old_metadata.files}.isdisjoint(
+        item.path for item in new_metadata.files
+    )
+    old = permits.issue(
+        infohash=old_metadata.infohash, metadata_sha256=old_metadata.metadata_sha256,
+        destination="/data/torrents", category="radarr", reservation_id=reservation_id,
+        selected_files=tuple(item.path for item in old_metadata.files),
+        budget_bytes=old_metadata.total_bytes,
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        capacity=CapacityEvidence(free_bytes=2_000_000_000, remaining_by_hash={}),
+    )
+    permits.authorize(
+        token=old.token, infohash=old.infohash, destination=old.destination,
+        metadata_sha256=old.metadata_sha256,
+        effect=lambda _: {"accepted": True},
+    )
+    SourceHealthStore(repo.path).observe(
+        old.permit_id,
+        TorrentHealth(
+            infohash=old.infohash, downloaded=0,
+            amount_left=old_metadata.total_bytes, num_seeds=0, dlspeed=0,
+            state="stalledDL", progress=0.0,
+        ),
+        now=time.time() - 31 * 60,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/torrent-health":
+            assert request.headers["X-Admission-Permit"] == old.token
+            assert "permit_token" not in request.url.params
+            return httpx.Response(200, json={
+                "hash": old.infohash, "downloaded": 0,
+                "amount_left": old_metadata.total_bytes,
+                "num_seeds": 0, "dlspeed": 0,
+                "state": "stalledDL", "progress": 0.0,
+            })
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/movie":
+            return httpx.Response(200, json=[{
+                "id": 2, "tmdbId": 1101383, "hasFile": False,
+            }])
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            return httpx.Response(200, json=[{
+                "guid": "new", "title": "Film 1080p BluRay REMUX DV Atmos",
+                "size": new_metadata.total_bytes, "seeders": 45,
+                "downloadUrl": "http://prowlarr:9696/2/download?id=new",
+                "infoHash": new_metadata.infohash, "rejected": False,
+                "quality": {"quality": {
+                    "source": "bluray", "modifier": "remux", "resolution": 1080,
+                }},
+            }])
+        if request.url.path == "/2/download":
+            return httpx.Response(200, content=new_torrent)
+        if request.url.path in {"/internal/source-state", "/api/v2/torrents/add"}:
+            raise AssertionError("missing original metadata must block replacement")
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    async def capacity():
+        return CapacityEvidence(
+            free_bytes=2_000_000_000,
+            remaining_by_hash={old.infohash: old_metadata.total_bytes},
+        )
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
+            client=client, capacity_provider=capacity,
+            gateway_url="http://download-gateway:8081", arr_token="worker-secret",
+            health_store=SourceHealthStore(repo.path),
+            torrent_store=TorrentArtifactStore(repo.path),
+        )
+        await acquirer.acquire("movie:tmdb:1101383", reservation_id)
+
+    assert permits.get_for_reservation(reservation_id).permit_id == old.permit_id
+    assert permits.is_admitted(old.infohash)
+
+
+def _uncertain_movie_replacement(tmp_path, *, state):
+    repo, permits, reservation_id = _reserve(tmp_path, budget=0)
+    old_torrent = _torrent(subtitle=True)
+    new_torrent = _torrent(
+        subtitle=True, video_bytes=1_600_000_000,
+        root_name=b"Film.Alternative", video_name=b"movie.alternative.mkv",
+    )
+    old_metadata = inspect_torrent(old_torrent)
+    new_metadata = inspect_torrent(new_torrent)
+    old = permits.issue(
+        infohash=old_metadata.infohash, metadata_sha256=old_metadata.metadata_sha256,
+        destination="/data/torrents", category="radarr", reservation_id=reservation_id,
+        selected_files=tuple(item.path for item in old_metadata.files),
+        budget_bytes=old_metadata.total_bytes,
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        capacity=CapacityEvidence(free_bytes=2_000_000_000, remaining_by_hash={}),
+    )
+    permits.authorize(
+        token=old.token, infohash=old.infohash, destination=old.destination,
+        metadata_sha256=old.metadata_sha256,
+        effect=lambda _: {"accepted": True},
+    )
+    torrents = TorrentArtifactStore(repo.path)
+    torrents.put(old, old_torrent)
+    stopped_capacity = CapacityEvidence(
+        free_bytes=2_000_000_000,
+        remaining_by_hash={old.infohash: old_metadata.total_bytes},
+        paused_hashes=frozenset({old.infohash}),
+    )
+    replacement = permits.replace_confirmed(
+        old.token, infohash=new_metadata.infohash,
+        metadata_sha256=new_metadata.metadata_sha256,
+        selected_files=tuple(item.path for item in new_metadata.files),
+        budget_bytes=new_metadata.total_bytes, capacity=stopped_capacity,
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+    torrents.put(replacement, new_torrent)
+    with sqlite3.connect(repo.path) as connection:
+        connection.execute(
+            "UPDATE gateway_permits SET state = ? WHERE permit_id = ?",
+            (state, replacement.permit_id),
+        )
+    assert permits.get(old.token).state == "superseded"
+    assert old.infohash in stopped_capacity.paused_hashes
+    assert permits.get_for_reservation(reservation_id).state == state
+    return repo, permits, reservation_id, old, replacement, torrents, stopped_capacity
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uncertain_state", ["unknown", "dispatching"])
+async def test_movie_reconciles_uncertain_replacement_without_duplicate_add(
+    tmp_path, uncertain_state,
+):
+    repo, permits, reservation_id, old, replacement, torrents, capacity = (
+        _uncertain_movie_replacement(tmp_path, state=uncertain_state)
+    )
+    reconciled = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/reconcile-source":
+            assert request.headers["X-Arr-Token"] == "worker-secret"
+            assert request.read() == (
+                '{"permit_token":"' + replacement.token + '"}'
+            ).encode()
+            reconciled.append(replacement.token)
+            permits.confirm_replacement(replacement.token)
+            return httpx.Response(200, json={"state": "confirmed"})
+        raise AssertionError(
+            "reconciliation must not search, add or resume a source: "
+            f"{request.method} {request.url}"
+        )
+
+    async def capacity_provider():
+        return capacity
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
+            client=client, capacity_provider=capacity_provider,
+            gateway_url="http://download-gateway:8081", arr_token="worker-secret",
+            health_store=SourceHealthStore(repo.path), torrent_store=torrents,
+        )
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "replaced"
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == (
+            "already_permitted"
+        )
+
+    assert reconciled == [replacement.token]
+    assert permits.get(old.token).state == "superseded"
+    assert permits.get_for_reservation(reservation_id).state == "confirmed"
+    assert permits.get_for_reservation(reservation_id).infohash == replacement.infohash
+
+
+@pytest.mark.asyncio
+async def test_movie_missing_uncertain_replacement_requires_manual_reconciliation(tmp_path):
+    repo, permits, reservation_id, old, replacement, torrents, capacity = (
+        _uncertain_movie_replacement(tmp_path, state="unknown")
+    )
+    reconciled = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/reconcile-source":
+            assert request.headers["X-Arr-Token"] == "worker-secret"
+            assert request.read() == (
+                '{"permit_token":"' + replacement.token + '"}'
+            ).encode()
+            reconciled.append(replacement.token)
+            return httpx.Response(200, json={"state": "missing"})
+        raise AssertionError(
+            "missing replacement must not search, add or resume a source: "
+            f"{request.method} {request.url}"
+        )
+
+    async def capacity_provider():
+        return capacity
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
+            client=client, capacity_provider=capacity_provider,
+            gateway_url="http://download-gateway:8081", arr_token="worker-secret",
+            health_store=SourceHealthStore(repo.path), torrent_store=torrents,
+        )
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == (
+            "replacement_uncertain"
+        )
+
+    assert reconciled == [replacement.token]
+    assert permits.get(old.token).state == "superseded"
+    assert permits.get_for_reservation(reservation_id).state == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_movie_renews_expired_authorized_replacement_before_gateway_add(tmp_path):
+    repo, permits, reservation_id, old, replacement, torrents, stopped_capacity = (
+        _uncertain_movie_replacement(tmp_path, state="authorized")
+    )
+    with sqlite3.connect(repo.path) as connection:
+        connection.execute(
+            "UPDATE gateway_permits SET expires_at = ? WHERE permit_id = ?",
+            ((datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+             replacement.permit_id),
+        )
+    assert permits.get(replacement.token).expires_at <= datetime.now(UTC)
+    fresh_snapshots = []
+    additions = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/torrents/add":
+            assert request.headers["X-Arr-Token"] == "worker-secret"
+            assert request.headers["X-Admission-Permit"] == replacement.token
+            assert torrents.get(replacement) in request.content
+            current = permits.get_for_reservation(reservation_id)
+            assert current is not None and current.permit_id == replacement.permit_id
+            assert current.expires_at > datetime.now(UTC)
+            permits.authorize(
+                token=current.token, infohash=current.infohash,
+                destination=current.destination,
+                metadata_sha256=current.metadata_sha256,
+                effect=lambda _: {"accepted": True},
+            )
+            additions.append(current.permit_id)
+            return httpx.Response(200, json={"accepted": True})
+        raise AssertionError(
+            "renewal must not search releases or restart the old source: "
+            f"{request.method} {request.url}"
+        )
+
+    async def capacity_provider():
+        fresh_snapshots.append(True)
+        return stopped_capacity
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
+            client=client, capacity_provider=capacity_provider,
+            gateway_url="http://download-gateway:8081", arr_token="worker-secret",
+            health_store=SourceHealthStore(repo.path), torrent_store=torrents,
+        )
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "replaced"
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == (
+            "already_permitted"
+        )
+
+    assert len(fresh_snapshots) == 1
+    assert additions == [replacement.permit_id]
+    assert permits.get(old.token).state == "superseded"
+    assert old.infohash in stopped_capacity.paused_hashes
+    assert permits.get_for_reservation(reservation_id).permit_id == replacement.permit_id
+    assert permits.get_for_reservation(reservation_id).state == "confirmed"

@@ -62,6 +62,11 @@ services:
         bind: {create_host_path: false}
   qbittorrent:
     networks: [transfer, egress_transfer]
+    environment:
+      TORRENTING_PORT: ${QBITTORRENT_PEER_PORT:-6881}
+    ports:
+      - "${LAN_BIND_IP:-127.0.0.1}:${QBITTORRENT_PEER_PORT:-6881}:${QBITTORRENT_PEER_PORT:-6881}/tcp"
+      - "${LAN_BIND_IP:-127.0.0.1}:${QBITTORRENT_PEER_PORT:-6881}:${QBITTORRENT_PEER_PORT:-6881}/udp"
     volumes:
       - type: bind
         source: /srv/appdata/qbittorrent

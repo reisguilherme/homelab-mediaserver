@@ -28,6 +28,7 @@ from .runtime import WorkerCycle
 from .scheduler import AdmissionScheduler, FilesystemSnapshot
 from .series_acquisition import SeriesAcquirer
 from .series_finalization import SeriesFinalizer
+from .source_health import SourceHealthStore
 from .subdl import SubDLSource
 
 LOGGER = logging.getLogger(__name__)
@@ -82,6 +83,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     )
     if permits is not None:
         repository.normalize_verified_budgets()
+    health_store = SourceHealthStore(database) if permits is not None and arr_token else None
     async def capacity_provider():
         if not arr_token:
             raise ValueError("gateway token is required for capacity evidence")
@@ -111,6 +113,9 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
             subtitle_store=subtitle_store,
             torrent_store=torrent_store,
             capacity_provider=capacity_provider,
+            health_store=health_store,
+            gateway_url="http://download-gateway:8081" if arr_token else None,
+            arr_token=arr_token,
         )
         if arr_token:
             finalizer_client = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
@@ -146,6 +151,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
             capacity_provider=capacity_provider,
             gateway_url="http://download-gateway:8081" if arr_token else None,
             arr_token=arr_token,
+            health_store=health_store,
         )
         if arr_token:
             series_finalizer_client = httpx.AsyncClient(timeout=httpx.Timeout(15.0))

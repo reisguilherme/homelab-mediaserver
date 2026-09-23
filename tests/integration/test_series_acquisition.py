@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -13,6 +14,7 @@ from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactSt
 from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 from homeserver_control.worker.capacity_evidence import CapacityEvidence
 from homeserver_control.worker.series_acquisition import SeriesAcquirer, _series_rank
+from homeserver_control.worker.source_health import SourceHealthStore, TorrentHealth
 from homeserver_control.worker.subdl import SubDLSource
 
 
@@ -32,6 +34,7 @@ def _torrent(
     *, video_bytes=3_000_000_000, subtitle=b"Ted.Lasso.S04E01.pt-BR.srt",
     extra_video_path: list[bytes] | None = None, extra_subtitle: bytes | None = None,
     season=4, episode=1, video_path=b"Ted.Lasso.S04E01.mkv",
+    root_suffix: bytes = b"",
 ):
     episode_tag = f"S{season:02d}E{episode:02d}".encode()
     files = [{b"length": video_bytes, b"path": [
@@ -47,7 +50,7 @@ def _torrent(
         ]})
     total = sum(item[b"length"] for item in files)
     info = {
-        b"files": files, b"name": b"Ted.Lasso." + episode_tag,
+        b"files": files, b"name": b"Ted.Lasso." + episode_tag + root_suffix,
         b"piece length": 16_777_216,
         b"pieces": b"a" * (20 * ((total + 16_777_215) // 16_777_216)),
     }
@@ -822,3 +825,155 @@ async def test_unconfirmed_permit_does_not_block_preexisting_episode_file(tmp_pa
             "no_eligible_release"
         )
     assert searched == ["21"]
+
+
+@pytest.mark.asyncio
+async def test_series_replaces_stalled_first_episode_without_starting_later_episode(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path, budget=0)
+    old_torrent = _torrent()
+    new_torrent = _torrent(
+        video_bytes=3_100_000_000,
+        video_path=b"Ted.Lasso.S04E01.Alternative.mkv",
+        root_suffix=b".Alternative",
+    )
+    old_metadata = inspect_torrent(old_torrent)
+    new_metadata = inspect_torrent(new_torrent)
+    assert {item.path for item in old_metadata.files}.isdisjoint(
+        item.path for item in new_metadata.files
+    )
+    old = permits.issue(
+        infohash=old_metadata.infohash, metadata_sha256=old_metadata.metadata_sha256,
+        destination="/data/torrents", category="sonarr", reservation_id=reservation_id,
+        scope_key="S04E01", selected_files=tuple(item.path for item in old_metadata.files),
+        budget_bytes=old_metadata.total_bytes,
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        capacity=CapacityEvidence(free_bytes=4_000_000_000, remaining_by_hash={}),
+    )
+    permits.authorize(
+        token=old.token, infohash=old.infohash, destination=old.destination,
+        metadata_sha256=old.metadata_sha256,
+        effect=lambda _: {"accepted": True},
+    )
+    torrents = TorrentArtifactStore(repo.path)
+    torrents.put(old, old_torrent)
+    SourceHealthStore(tmp_path / "control.sqlite").observe(
+        old.permit_id,
+        TorrentHealth(
+            infohash=old.infohash, downloaded=0,
+            amount_left=old_metadata.total_bytes, num_seeds=0, dlspeed=0,
+            state="stalledDL", progress=0.0,
+        ),
+        now=time.time() - 31 * 60,
+    )
+    stopped = False
+    searched = []
+    events = []
+
+    def release(guid, metadata, seeds):
+        return {
+            "guid": guid, "indexerId": 2,
+            "title": "Ted Lasso S04E01 1080p WEB-DL Atmos",
+            "size": metadata.total_bytes, "seeders": seeds,
+            "downloadUrl": f"http://prowlarr:9696/2/download?id={guid}",
+            "infoHash": metadata.infohash,
+            "rejected": True,
+            "rejections": ["Release in queue already meets cutoff: WEBDL-1080p v1"],
+            "quality": {"quality": {
+                "source": "web", "name": "WEBDL-1080p", "resolution": 1080,
+            }},
+            "protocol": "torrent", "episodeIds": [41],
+        }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal stopped
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/series":
+            return httpx.Response(200, json=[{
+                "id": 1, "tmdbId": 97546, "monitored": True,
+            }])
+        if request.url.path == "/api/v3/episode":
+            return httpx.Response(200, json=[
+                *_completed_earlier_seasons(4),
+                {"id": 41, "seasonNumber": 4, "episodeNumber": 1,
+                 "airDateUtc": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+                 "monitored": True, "hasFile": False},
+                {"id": 42, "seasonNumber": 4, "episodeNumber": 2,
+                 "airDateUtc": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+                 "monitored": True, "hasFile": False},
+            ])
+        if request.url.path == "/internal/series-queue-state":
+            assert json.loads(request.content) == {
+                "permit_token": old.token, "action": "start",
+            }
+            return httpx.Response(200, json={"state": "already_started"})
+        if request.url.path == "/internal/torrent-health":
+            assert request.headers["X-Admission-Permit"] == old.token
+            assert "permit_token" not in request.url.params
+            return httpx.Response(200, json={
+                "hash": old.infohash, "downloaded": 0,
+                "amount_left": old_metadata.total_bytes,
+                "num_seeds": 0, "dlspeed": 0,
+                "state": "stalledDL", "progress": 0.0,
+            })
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            searched.append(request.url.params["episodeId"])
+            assert request.url.params["episodeId"] == "41"
+            return httpx.Response(200, json=[
+                release("old", old_metadata, 0), release("new", new_metadata, 36),
+            ])
+        if request.url.path == "/2/download":
+            return httpx.Response(200, content={
+                "old": old_torrent, "new": new_torrent,
+            }[request.url.params["id"]])
+        if request.url.path == "/internal/source-state":
+            assert json.loads(request.content) == {
+                "permit_token": old.token, "action": "stop",
+            }
+            stopped = True
+            events.append("stop")
+            return httpx.Response(200, json={"state": "stopped"})
+        if request.url.path == "/api/v2/torrents/add":
+            assert stopped
+            assert new_torrent in request.content
+            replacement = permits.get_for_reservation(
+                reservation_id, scope_key="S04E01"
+            )
+            assert replacement is not None
+            assert request.headers["X-Admission-Permit"] == replacement.token
+            permits.authorize(
+                token=replacement.token, infohash=replacement.infohash,
+                destination=replacement.destination,
+                metadata_sha256=replacement.metadata_sha256,
+                effect=lambda _: {"accepted": True},
+            )
+            events.append("add")
+            return httpx.Response(200, json={"accepted": True})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    async def capacity():
+        events.append("capacity_after_stop" if stopped else "capacity_before_stop")
+        return CapacityEvidence(
+            free_bytes=4_000_000_000,
+            remaining_by_hash={old.infohash: old_metadata.total_bytes},
+            paused_hashes=frozenset({old.infohash}) if stopped else frozenset(),
+        )
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        acquirer = SeriesAcquirer(
+            repository=repo, permits=permits, sonarr_url="http://sonarr:8989",
+            sonarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
+            client=client, capacity_provider=capacity,
+            gateway_url="http://download-gateway:8081", arr_token="worker-secret",
+            health_store=SourceHealthStore(tmp_path / "control.sqlite"),
+            torrent_store=torrents,
+        )
+        await acquirer.acquire("season:tmdb:97546:4", reservation_id)
+
+    replacement = permits.get_for_reservation(reservation_id, scope_key="S04E01")
+    assert replacement is not None and replacement.infohash == new_metadata.infohash
+    assert replacement.state == "confirmed"
+    assert permits.is_admitted(old.infohash) is False
+    assert permits.get_for_reservation(reservation_id, scope_key="S04E02") is None
+    assert searched == ["41"]
+    assert events.index("stop") < events.index("capacity_after_stop") < events.index("add")

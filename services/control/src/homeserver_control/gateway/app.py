@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import secrets
@@ -79,6 +80,194 @@ def create_app(
     def require_admission() -> None:
         if recovery_mode_blocks(recovery_mode_path):
             raise HTTPException(status_code=503, detail="admission blocked by recovery mode")
+
+    def source_permit(token: str | None, header_token: str | None) -> Permit:
+        if arr_token == "unconfigured" or not token_matches(header_token, arr_token):
+            raise HTTPException(status_code=403, detail="worker credential required")
+        permit = permits.get(token) if isinstance(token, str) else None
+        if (
+            permit is None or permit.state != "confirmed"
+            or permit.category not in {"sonarr", "radarr"}
+            or permit.reservation_id is None
+            or permit.destination != "/data/torrents"
+            or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
+            or (permit.category == "sonarr" and not isinstance(permit.scope_key, str))
+            or (permit.category == "radarr" and permit.scope_key is not None)
+        ):
+            raise HTTPException(status_code=403, detail="confirmed source permit required")
+        active = permits.get_for_reservation(
+            permit.reservation_id, scope_key=permit.scope_key
+        )
+        if active is None or active.permit_id != permit.permit_id:
+            raise HTTPException(status_code=403, detail="active source permit required")
+        return permit
+
+    def source_info(permit: Permit) -> dict[str, Any]:
+        entries = upstream.read("/api/v2/torrents/info", {"hashes": permit.infohash})
+        if not isinstance(entries, list):
+            raise HTTPException(status_code=502, detail="invalid torrent list")
+        matches = [
+            entry for entry in entries if isinstance(entry, dict)
+            and isinstance(entry.get("hash"), str)
+            and entry["hash"].lower() == permit.infohash
+        ]
+        if len(matches) != 1:
+            raise HTTPException(status_code=409, detail="permitted torrent is unavailable")
+        current = matches[0]
+        if (
+            current.get("category") != permit.category
+            or not isinstance(current.get("save_path"), str)
+            or current["save_path"].rstrip("/") != permit.destination
+        ):
+            raise HTTPException(status_code=409, detail="torrent identity changed")
+        return current
+
+    @app.get("/internal/torrent-health")
+    def torrent_health(
+        x_admission_permit: str | None = Header(default=None),
+        x_arr_token: str | None = Header(default=None),
+    ) -> dict[str, str | int | float]:
+        permit = source_permit(x_admission_permit, x_arr_token)
+        current = source_info(permit)
+        progress = current.get("progress")
+        state = current.get("state")
+        if (
+            isinstance(progress, bool) or not isinstance(progress, (int, float))
+            or not 0 <= progress <= 1 or not isinstance(state, str) or not state
+            or any(
+                isinstance(current.get(field), bool)
+                or not isinstance(current.get(field), int)
+                or current[field] < 0
+                for field in ("downloaded", "amount_left", "num_seeds", "dlspeed")
+            )
+        ):
+            raise HTTPException(status_code=502, detail="invalid torrent health")
+        return {
+            "hash": permit.infohash, "progress": progress,
+            "downloaded": current["downloaded"],
+            "amount_left": current["amount_left"],
+            "num_seeds": current["num_seeds"],
+            "dlspeed": current["dlspeed"], "state": state,
+        }
+
+    @app.post("/internal/source-state")
+    async def source_state(
+        request: Request, x_arr_token: str | None = Header(default=None)
+    ) -> dict[str, str]:
+        if arr_token == "unconfigured" or not token_matches(x_arr_token, arr_token):
+            raise HTTPException(status_code=403, detail="worker credential required")
+        try:
+            body = await request.json()
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="invalid JSON body") from error
+        if not isinstance(body, dict) or set(body) != {"permit_token", "action"}:
+            raise HTTPException(status_code=422, detail="permit and action required")
+        action = body["action"]
+        if action not in {"start", "stop"}:
+            raise HTTPException(status_code=422, detail="unsupported source action")
+        permit = source_permit(body["permit_token"], x_arr_token)
+        if action == "start":
+            require_admission()
+        current = source_info(permit)
+        progress = current.get("progress")
+        left = current.get("amount_left")
+        state = current.get("state")
+        if (
+            isinstance(progress, bool) or not isinstance(progress, (int, float))
+            or isinstance(left, bool) or not isinstance(left, int)
+            or not isinstance(state, str)
+        ):
+            raise HTTPException(status_code=502, detail="invalid torrent state")
+        if progress >= 1 or left <= 0:
+            raise HTTPException(status_code=409, detail="source already complete")
+        stopped = state in {"stoppedDL", "stoppedUP", "pausedDL", "pausedUP"}
+        if action == "stop" and stopped:
+            return {"state": "already_stopped"}
+        if action == "start" and not stopped:
+            return {"state": "already_started"}
+        upstream.set_running(permit.infohash, running=action == "start")
+        for attempt in range(5):
+            updated = source_info(permit)
+            updated_state = updated.get("state")
+            if not isinstance(updated_state, str):
+                raise HTTPException(status_code=502, detail="invalid torrent state")
+            if action == "stop" and (
+                updated.get("progress") == 1 or updated.get("amount_left") == 0
+            ):
+                raise HTTPException(status_code=409, detail="source completed during stop")
+            now_stopped = updated_state in {"stoppedDL", "stoppedUP", "pausedDL", "pausedUP"}
+            if now_stopped == (action == "stop"):
+                return {"state": "stopped" if action == "stop" else "started"}
+            if attempt < 4:
+                await asyncio.sleep(0.2)
+        raise HTTPException(status_code=409, detail="torrent state not confirmed")
+
+    @app.post("/internal/reconcile-source")
+    async def reconcile_source(
+        request: Request, x_arr_token: str | None = Header(default=None)
+    ) -> dict[str, str]:
+        if arr_token == "unconfigured" or not token_matches(x_arr_token, arr_token):
+            raise HTTPException(status_code=403, detail="worker credential required")
+        try:
+            body = await request.json()
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="invalid JSON body") from error
+        if not isinstance(body, dict) or set(body) != {"permit_token"}:
+            raise HTTPException(status_code=422, detail="permit token required")
+        token = body["permit_token"]
+        permit = permits.get(token) if isinstance(token, str) else None
+        if (
+            permit is None or permit.state not in {
+                "authorized", "dispatching", "unknown", "confirmed"
+            }
+            or permit.reservation_id is None
+            or permit.category not in {"sonarr", "radarr"}
+            or permit.destination != "/data/torrents"
+            or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
+            or not permits.had_superseded(
+                permit.reservation_id, scope_key=permit.scope_key
+            )
+        ):
+            raise HTTPException(status_code=403, detail="replacement permit required")
+        active = permits.get_for_reservation(
+            permit.reservation_id, scope_key=permit.scope_key
+        )
+        if active is None or active.permit_id != permit.permit_id:
+            raise HTTPException(status_code=403, detail="active replacement permit required")
+        if torrent_store is None:
+            raise HTTPException(status_code=503, detail="torrent metadata store unavailable")
+        metadata = torrent_store.get(permit)
+        if metadata is None:
+            raise HTTPException(status_code=409, detail="verified metadata unavailable")
+        inspected = inspect_torrent(metadata)
+        if inspected.total_bytes != permit.budget_bytes:
+            raise HTTPException(status_code=409, detail="replacement size differs from permit")
+        entries = upstream.read("/api/v2/torrents/info", {"hashes": permit.infohash})
+        if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
+            raise HTTPException(status_code=502, detail="invalid torrent list")
+        matches = [
+            item for item in entries if isinstance(item.get("hash"), str)
+            and item["hash"].lower() == permit.infohash
+        ]
+        if not matches:
+            return {"state": "missing"}
+        if len(matches) != 1:
+            raise HTTPException(status_code=409, detail="ambiguous torrent identity")
+        current = matches[0]
+        if (
+            current.get("category") != permit.category
+            or not isinstance(current.get("save_path"), str)
+            or current["save_path"].rstrip("/") != permit.destination
+            or isinstance(current.get("total_size"), bool)
+            or not isinstance(current.get("total_size"), int)
+            or current["total_size"] != permit.budget_bytes
+        ):
+            raise HTTPException(status_code=409, detail="replacement torrent identity changed")
+        try:
+            permits.confirm_replacement(token)
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        return {"state": "confirmed"}
 
     @app.post("/internal/series-queue-state")
     async def series_queue_state(
@@ -413,6 +602,8 @@ def create_app(
                         )
                     except PermissionError as error:
                         raise HTTPException(status_code=403, detail=str(error)) from error
+                    if internal and permit_token != matched.token:
+                        raise HTTPException(status_code=403, detail="admission permit mismatch")
                     permit_token = matched.token
                 payload = {
                     "infohash": infohash,

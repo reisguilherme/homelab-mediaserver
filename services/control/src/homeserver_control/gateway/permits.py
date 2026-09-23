@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import sqlite3
 from collections.abc import Callable
@@ -103,12 +104,15 @@ class PermitRegistry:
             connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_permit_reservation "
                 "ON gateway_permits(reservation_id) "
-                "WHERE reservation_id IS NOT NULL AND scope_key IS NULL"
+                "WHERE reservation_id IS NOT NULL AND scope_key IS NULL "
+                "AND state IN ('authorized', 'dispatching', 'unknown', 'confirmed')"
             )
+            connection.execute("DROP INDEX IF EXISTS idx_gateway_permit_scope")
             connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_permit_scope "
                 "ON gateway_permits(reservation_id, scope_key) "
-                "WHERE reservation_id IS NOT NULL AND scope_key IS NOT NULL"
+                "WHERE reservation_id IS NOT NULL AND scope_key IS NOT NULL "
+                "AND state IN ('authorized', 'dispatching', 'unknown', 'confirmed')"
             )
 
     @staticmethod
@@ -212,9 +216,17 @@ class PermitRegistry:
             raise ValueError("exact-byte permit requires a persistent reservation and size")
         if self._db_path is None:
             with self._lock:
+                if reservation_id is not None and any(
+                    item.reservation_id == reservation_id
+                    and item.scope_key == scope_key and item.state == "superseded"
+                    for item in self._permits.values()
+                ):
+                    raise PermissionError("replacement_limit")
                 self._permits[permit.token] = permit
         else:
             with self._session() as connection:
+                if reservation_id is not None and capacity is None and scope_key is None:
+                    connection.execute("BEGIN IMMEDIATE")
                 if capacity is not None:
                     connection.execute("BEGIN IMMEDIATE")
                     reservation = connection.execute(
@@ -235,7 +247,8 @@ class PermitRegistry:
                     connection.execute(
                         """UPDATE reservations SET budget_bytes = ? + COALESCE((
                             SELECT SUM(p.budget_bytes) FROM gateway_permits p
-                            WHERE p.reservation_id = ? AND p.state != 'revoked'
+                            WHERE p.reservation_id = ? AND p.state IN
+                            ('authorized', 'dispatching', 'unknown', 'confirmed')
                         ), 0) WHERE id = ?""",
                         (budget_bytes, reservation_id, reservation_id),
                     )
@@ -257,7 +270,8 @@ class PermitRegistry:
                         raise PermissionError("season_reservation_required")
                     committed = connection.execute(
                         "SELECT COALESCE(SUM(budget_bytes), 0) FROM gateway_permits "
-                        "WHERE reservation_id = ? AND scope_key IS NOT NULL",
+                    "WHERE reservation_id = ? AND scope_key IS NOT NULL "
+                    "AND state IN ('authorized', 'dispatching', 'unknown', 'confirmed')",
                         (reservation_id,),
                     ).fetchone()[0]
                     if committed + budget_bytes > reservation["budget_bytes"]:
@@ -268,6 +282,12 @@ class PermitRegistry:
                     ).fetchone()
                     if reservation is not None and reservation["budget_bytes"] == 0:
                         raise PermissionError("capacity_evidence_required")
+                if reservation_id is not None and connection.execute(
+                    "SELECT 1 FROM gateway_permits WHERE reservation_id = ? "
+                    "AND scope_key IS ? AND state = 'superseded' LIMIT 1",
+                    (reservation_id, scope_key),
+                ).fetchone():
+                    raise PermissionError("replacement_limit")
                 connection.execute(
                     """
                     INSERT INTO gateway_permits(
@@ -292,7 +312,7 @@ class PermitRegistry:
                         permit.state,
                     ),
                 )
-                if scope_key is not None or capacity is not None:
+                if reservation_id is not None or capacity is not None:
                     connection.commit()
         return permit
 
@@ -408,15 +428,303 @@ class PermitRegistry:
                     (
                         item for item in self._permits.values()
                         if item.reservation_id == reservation_id and item.scope_key == scope_key
+                        and item.state in {"authorized", "dispatching", "unknown", "confirmed"}
                     ),
                     None,
                 )
         with self._session() as connection:
             row = connection.execute(
                 "SELECT * FROM gateway_permits WHERE reservation_id = ? "
-                "AND scope_key IS ?", (reservation_id, scope_key),
+                "AND scope_key IS ? AND state IN "
+                "('authorized', 'dispatching', 'unknown', 'confirmed')",
+                (reservation_id, scope_key),
             ).fetchone()
         return self._permit_from_row(row) if row is not None else None
+
+    def had_superseded(self, reservation_id: str, *, scope_key: str | None = None) -> bool:
+        """Report whether this exact movie or episode slot has used its one failover."""
+        if self._db_path is None:
+            with self._lock:
+                return any(
+                    item.reservation_id == reservation_id and item.scope_key == scope_key
+                    and item.state == "superseded" for item in self._permits.values()
+                )
+        with self._session() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM gateway_permits WHERE reservation_id = ? "
+                "AND scope_key IS ? AND state = 'superseded' LIMIT 1",
+                (reservation_id, scope_key),
+            ).fetchone()
+        return row is not None
+
+    def confirm_replacement(self, token: str) -> Permit:
+        """Resolve an uncertain replacement only after the gateway verifies qBittorrent."""
+        if self._db_path is None:
+            with self._lock:
+                permit = self._permits.get(token)
+                if (
+                    permit is None or permit.state not in {
+                        "authorized", "dispatching", "unknown", "confirmed"
+                    }
+                    or permit.reservation_id is None
+                    or not self.had_superseded(
+                        permit.reservation_id, scope_key=permit.scope_key
+                    )
+                ):
+                    raise PermissionError("replacement_permit_required")
+                permit.state = "confirmed"
+                permit.result = {"accepted": True, "infohash": permit.infohash}
+                return permit
+
+        with self._session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM gateway_permits WHERE token = ?", (token,)
+            ).fetchone()
+            permit = self._permit_from_row(row) if row is not None else None
+            if (
+                permit is None or permit.state not in {
+                    "authorized", "dispatching", "unknown", "confirmed"
+                }
+                or permit.reservation_id is None
+            ):
+                raise PermissionError("replacement_permit_required")
+            if not connection.execute(
+                "SELECT 1 FROM gateway_permits WHERE reservation_id = ? "
+                "AND scope_key IS ? AND state = 'superseded' LIMIT 1",
+                (permit.reservation_id, permit.scope_key),
+            ).fetchone() or not connection.execute(
+                "SELECT 1 FROM reservations WHERE id = ? "
+                "AND state IN ('reserved', 'downloading', 'waiting_episodes')",
+                (permit.reservation_id,),
+            ).fetchone():
+                raise PermissionError("replacement_permit_required")
+            result = {"accepted": True, "infohash": permit.infohash}
+            if permit.state == "confirmed":
+                if permit.result != result:
+                    raise PermissionError("replacement_result_mismatch")
+                connection.commit()
+                return permit
+            connection.execute(
+                "UPDATE gateway_permits SET state = 'confirmed', result_json = ? "
+                "WHERE permit_id = ? AND state IN ('authorized', 'dispatching', 'unknown')",
+                (json.dumps(result, sort_keys=True), permit.permit_id),
+            )
+            connection.commit()
+            permit.state = "confirmed"
+            permit.result = result
+            return permit
+
+    def renew_replacement_authorized(
+        self, token: str, *, capacity: CapacityEvidence, expires_at: datetime,
+    ) -> Permit:
+        """Renew an undispatched replacement without abandoning its exact-byte claim."""
+        if not isinstance(capacity, CapacityEvidence) or expires_at <= datetime.now(UTC):
+            raise ValueError("fresh replacement capacity and expiry are required")
+        if self._db_path is None:
+            with self._lock:
+                permit = self._permits.get(token)
+                if (
+                    permit is None or permit.state != "authorized"
+                    or permit.reservation_id is None or permit.budget_bytes is None
+                ):
+                    raise PermissionError("authorized_replacement_required")
+                old = next((
+                    item for item in self._permits.values()
+                    if item.reservation_id == permit.reservation_id
+                    and item.scope_key == permit.scope_key
+                    and item.state == "superseded"
+                ), None)
+                if old is None or old.infohash not in capacity.paused_hashes:
+                    raise PermissionError("source_not_stopped")
+                if permit.budget_bytes > max(
+                    0, capacity.free_bytes - capacity.other_pending_bytes
+                ):
+                    raise PermissionError("waiting_space")
+                permit.expires_at = expires_at
+                return permit
+
+        with self._session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM gateway_permits WHERE token = ?", (token,)
+            ).fetchone()
+            permit = self._permit_from_row(row) if row is not None else None
+            if (
+                permit is None or permit.state != "authorized"
+                or permit.reservation_id is None
+                or permit.budget_bytes is None or permit.budget_bytes <= 0
+            ):
+                raise PermissionError("authorized_replacement_required")
+            old = connection.execute(
+                "SELECT infohash FROM gateway_permits WHERE reservation_id = ? "
+                "AND scope_key IS ? AND state = 'superseded' LIMIT 1",
+                (permit.reservation_id, permit.scope_key),
+            ).fetchone()
+            if old is None or old["infohash"] not in capacity.paused_hashes:
+                raise PermissionError("source_not_stopped")
+            if not connection.execute(
+                "SELECT 1 FROM reservations WHERE id = ? "
+                "AND state IN ('reserved', 'downloading', 'waiting_episodes')",
+                (permit.reservation_id,),
+            ).fetchone():
+                raise PermissionError("reservation_required")
+            pending = self._pending_bytes(connection, capacity)
+            if permit.expires_at <= datetime.now(UTC):
+                pending += min(
+                    permit.budget_bytes,
+                    capacity.remaining_by_hash.get(permit.infohash, permit.budget_bytes),
+                )
+            if pending > capacity.free_bytes:
+                raise PermissionError("waiting_space")
+            connection.execute(
+                "UPDATE gateway_permits SET expires_at = ? WHERE permit_id = ? "
+                "AND state = 'authorized'",
+                (expires_at.isoformat(), permit.permit_id),
+            )
+            connection.commit()
+            permit.expires_at = expires_at
+            return permit
+
+    def replace_confirmed(
+        self, old_token: str, *, infohash: str, metadata_sha256: str,
+        selected_files: tuple[str, ...], budget_bytes: int,
+        capacity: CapacityEvidence, expires_at: datetime,
+    ) -> Permit:
+        """Atomically replace one stopped source while retaining its bytes and audit row."""
+        if not isinstance(infohash, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", infohash):
+            raise ValueError("invalid replacement infohash")
+        digest = self._validate_metadata_digest(metadata_sha256)
+        if digest is None:
+            raise ValueError("replacement metadata is required")
+        if (
+            not isinstance(selected_files, tuple) or not selected_files
+            or any(not isinstance(name, str) or not name for name in selected_files)
+            or len(set(selected_files)) != len(selected_files)
+            or isinstance(budget_bytes, bool) or not isinstance(budget_bytes, int)
+            or budget_bytes <= 0 or not isinstance(capacity, CapacityEvidence)
+            or expires_at <= datetime.now(UTC)
+        ):
+            raise ValueError("invalid replacement evidence")
+        new_hash = infohash.lower()
+
+        def replacement(old: Permit) -> Permit:
+            return Permit(
+                permit_id=str(uuid4()), token=secrets.token_urlsafe(32),
+                infohash=new_hash, metadata_sha256=digest,
+                destination=old.destination, category=old.category,
+                reservation_id=old.reservation_id, scope_key=old.scope_key,
+                selected_files=selected_files, budget_bytes=budget_bytes,
+                expires_at=expires_at,
+            )
+
+        if self._db_path is None:
+            with self._lock:
+                old = self._permits.get(old_token)
+                if old is None or old.state != "confirmed" or old.reservation_id is None:
+                    raise PermissionError("confirmed_source_required")
+                if old.infohash not in capacity.paused_hashes:
+                    raise PermissionError("source_not_stopped")
+                if any(
+                    item.reservation_id == old.reservation_id
+                    and item.scope_key == old.scope_key and item.state == "superseded"
+                    for item in self._permits.values()
+                ):
+                    raise PermissionError("replacement_limit")
+                if any(
+                    item.infohash == new_hash and item.reservation_id == old.reservation_id
+                    and item.scope_key == old.scope_key for item in self._permits.values()
+                ):
+                    raise ValueError("same_infohash_or_prior_source")
+                if budget_bytes > max(0, capacity.free_bytes - capacity.other_pending_bytes):
+                    raise PermissionError("waiting_space")
+                new = replacement(old)
+                old.state = "superseded"
+                self._permits[new.token] = new
+                return new
+
+        with self._session() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM gateway_permits WHERE token = ?", (old_token,)
+            ).fetchone()
+            old = self._permit_from_row(row) if row is not None else None
+            if old is None or old.state != "confirmed" or old.reservation_id is None:
+                raise PermissionError("confirmed_source_required")
+            if old.infohash not in capacity.paused_hashes:
+                raise PermissionError("source_not_stopped")
+            if connection.execute(
+                "SELECT 1 FROM gateway_permits WHERE reservation_id = ? "
+                "AND scope_key IS ? AND state = 'superseded' LIMIT 1",
+                (old.reservation_id, old.scope_key),
+            ).fetchone():
+                raise PermissionError("replacement_limit")
+            reservation = connection.execute(
+                "SELECT media_key FROM reservations WHERE id = ? "
+                "AND state IN ('reserved', 'downloading', 'waiting_episodes')",
+                (old.reservation_id,),
+            ).fetchone()
+            if reservation is None:
+                raise PermissionError("reservation_required")
+            media_key = reservation["media_key"]
+            if (
+                (old.scope_key is None and (
+                    old.category != "radarr" or not media_key.startswith("movie:tmdb:")
+                ))
+                or (old.scope_key is not None and (
+                    old.category != "sonarr" or not media_key.startswith("season:tmdb:")
+                ))
+            ):
+                raise PermissionError("source_identity_changed")
+            if connection.execute(
+                "SELECT 1 FROM movie_imports WHERE reservation_id = ? LIMIT 1",
+                (old.reservation_id,),
+            ).fetchone() or connection.execute(
+                "SELECT 1 FROM episode_imports WHERE permit_id = ? LIMIT 1",
+                (old.permit_id,),
+            ).fetchone():
+                raise PermissionError("import_started")
+            if connection.execute(
+                "SELECT 1 FROM gateway_permits WHERE reservation_id = ? "
+                "AND scope_key IS ? AND infohash = ? LIMIT 1",
+                (old.reservation_id, old.scope_key, new_hash),
+            ).fetchone():
+                raise ValueError("same_infohash_or_prior_source")
+            if connection.execute(
+                "SELECT 1 FROM gateway_permits WHERE infohash = ? "
+                "AND state IN ('authorized', 'dispatching', 'unknown', 'confirmed') LIMIT 1",
+                (new_hash,),
+            ).fetchone():
+                raise PermissionError("source_already_admitted")
+            pending = self._pending_bytes(connection, capacity)
+            if budget_bytes > max(0, capacity.free_bytes - pending):
+                raise PermissionError("waiting_space")
+            new = replacement(old)
+            connection.execute(
+                "UPDATE gateway_permits SET state = 'superseded' "
+                "WHERE permit_id = ? AND state = 'confirmed'", (old.permit_id,),
+            )
+            connection.execute(
+                """INSERT INTO gateway_permits(
+                    permit_id, token, operation_id, reservation_id, scope_key, infohash,
+                    metadata_sha256, destination, category, selected_files_json,
+                    budget_bytes, expires_at, state, result_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'authorized', NULL)""",
+                (new.permit_id, new.token, new.operation_id, new.reservation_id,
+                 new.scope_key, new.infohash, new.metadata_sha256, new.destination,
+                 new.category, json.dumps(new.selected_files), new.budget_bytes,
+                 new.expires_at.isoformat()),
+            )
+            connection.execute(
+                """UPDATE reservations SET budget_bytes = COALESCE((
+                    SELECT SUM(p.budget_bytes) FROM gateway_permits p
+                    WHERE p.reservation_id = ? AND p.state IN
+                    ('authorized', 'dispatching', 'unknown', 'confirmed')
+                ), 0) WHERE id = ?""",
+                (old.reservation_id, old.reservation_id),
+            )
+            connection.commit()
+            return new
 
     def retire_expired_authorized(
         self, reservation_id: str, *, scope_key: str | None = None
@@ -443,7 +751,8 @@ class PermitRegistry:
                 connection.execute(
                     """UPDATE reservations SET budget_bytes = COALESCE((
                         SELECT SUM(p.budget_bytes) FROM gateway_permits p
-                        WHERE p.reservation_id = ? AND p.state != 'revoked'
+                        WHERE p.reservation_id = ? AND p.state IN
+                        ('authorized', 'dispatching', 'unknown', 'confirmed')
                     ), 0) WHERE id = ?""",
                     (reservation_id, reservation_id),
                 )
@@ -469,18 +778,24 @@ class PermitRegistry:
             with token_lock:
                 permit = self._permits.get(token)
                 self._validate_payload(permit, infohash, destination, expected_digest)
-                if permit.result is not None:
+                if permit.result is not None and permit.state == "confirmed":
                     return permit.result
                 if permit.state != "authorized":
                     raise PermissionError(f"permit_{permit.state}")
                 permit.state = "dispatching"
                 try:
-                    permit.result = effect(permit)
+                    result = effect(permit)
                 except Exception:
-                    permit.state = "unknown"
+                    if permit.state == "dispatching":
+                        permit.state = "unknown"
                     raise
+                if permit.state == "confirmed" and permit.result is not None:
+                    return permit.result
+                if permit.state != "dispatching":
+                    raise PermissionError("permit_state_changed")
+                permit.result = result
                 permit.state = "confirmed"
-                return permit.result
+                return result
 
         connection = self._connect()
         try:
@@ -493,7 +808,7 @@ class PermitRegistry:
                 raise PermissionError("permit_required")
             permit = self._permit_from_row(row)
             self._validate_payload(permit, infohash, destination, expected_digest)
-            if permit.result is not None:
+            if permit.result is not None and permit.state == "confirmed":
                 connection.commit()
                 return permit.result
             if permit.state != "authorized":
@@ -511,14 +826,23 @@ class PermitRegistry:
         except Exception:
             with self._session() as update:
                 update.execute(
-                    "UPDATE gateway_permits SET state = 'unknown' WHERE token = ?", (token,)
+                    "UPDATE gateway_permits SET state = 'unknown' "
+                    "WHERE token = ? AND state = 'dispatching'", (token,)
                 )
             raise
         with self._session() as update:
-            update.execute(
-                "UPDATE gateway_permits SET state = 'confirmed', result_json = ? WHERE token = ?",
+            cursor = update.execute(
+                "UPDATE gateway_permits SET state = 'confirmed', result_json = ? "
+                "WHERE token = ? AND state = 'dispatching'",
                 (json.dumps(result, sort_keys=True), token),
             )
+            if cursor.rowcount == 0:
+                row = update.execute(
+                    "SELECT state, result_json FROM gateway_permits WHERE token = ?", (token,)
+                ).fetchone()
+                if row is not None and row["state"] == "confirmed" and row["result_json"]:
+                    return json.loads(row["result_json"])
+                raise PermissionError("permit_state_changed")
         return result
 
     @staticmethod

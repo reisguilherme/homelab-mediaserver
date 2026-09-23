@@ -129,7 +129,7 @@ class WorkerCycle:
                         outcome = await self.acquirer.acquire(
                             candidate.media_key, reservation_id
                         )
-                        if outcome == "grabbed":
+                        if outcome in {"grabbed", "replaced"}:
                             grabbed += 1
                     except Exception:
                         LOGGER.exception(
@@ -155,7 +155,7 @@ class WorkerCycle:
                         outcome = await self.series_acquirer.acquire(
                             candidate.media_key, reservation_id
                         )
-                        if outcome == "grabbed":
+                        if outcome in {"grabbed", "replaced"}:
                             grabbed += 1
                     except Exception:
                         LOGGER.exception(

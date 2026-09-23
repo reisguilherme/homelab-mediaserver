@@ -8,6 +8,48 @@ Antes da primeira aquisição, configurar uma instância de Sonarr e Radarr,
 desabilitar busca/RSS/grabs autônomos e apontar os Arr apenas para o gateway.
 O qBittorrent permanece na rede `transfer`; não publicar sua API na LAN.
 
+## Porta de peers do qBittorrent
+
+Em produção, o Compose publica somente a porta de transferência P2P do
+qBittorrent, em TCP e UDP, no endereço `LAN_BIND_IP`. Sem esse endereço, a
+publicação fica restrita a `127.0.0.1`. O padrão é a porta `6881`; para usar
+outra, definir `QBITTORRENT_PEER_PORT` em `/etc/homeserver/server.env` antes do
+deploy. A mesma porta é configurada no cliente via `TORRENTING_PORT`. Não usar
+`TAILSCALE_BIND_IP` para essa publicação nem expor a WebUI/API `8080` na LAN.
+
+Após o deploy, conferir a porta publicada e as preferências de conexão do
+qBittorrent: a porta de escuta deve ser a mesma em TCP e UDP.
+
+```bash
+docker ps --filter name=homeserver-qbittorrent --format '{{.Ports}}'
+```
+
+Publicar a porta no host não cria uma regra de entrada no roteador nem garante
+peers de entrada da Internet; a velocidade ainda depende dos seeds da release.
+
+## Troca de fonte sem progresso
+
+O worker mede o progresso de cada filme e do primeiro episódio pendente de cada
+série. Só procura outra fonte após 30 minutos sem avanço, sem seeds conectados
+e com velocidade zero, ou após uma hora com média abaixo de 1 MiB/s. Um
+episódio pausado por ordem cronológica não entra nessa avaliação. A alternativa
+precisa ter seeds reportados, qualidade permitida, metadados verificáveis,
+legenda elegível, caminho de arquivo distinto e espaço livre suficiente para
+seu tamanho exato. O gateway para a fonte anterior, verifica a parada e só
+então autoriza a nova. Os arquivos parciais antigos permanecem no disco.
+
+Há no máximo uma troca automática por filme ou episódio para evitar que várias
+fontes parciais consumam o armazenamento. Se a segunda fonte também parar ou
+não existir candidata segura, verificar os logs do worker e os seeds nos
+indexadores; escolher outra fonte manualmente exige uma nova análise de espaço
+e dos arquivos parciais preservados.
+
+Se a resposta ao envio da nova fonte se perder, o worker consulta o qBittorrent
+e confirma o permit apenas quando hash, categoria, destino e tamanho coincidirem
+com o manifesto persistido. Caso o torrent continue ausente após uma operação
+incerta, a fonte antiga permanece parada e o worker registra a necessidade de
+reconciliação manual, sem repetir um efeito cujo resultado não foi comprovado.
+
 Validar a versão real das imagens e preencher digests no manifesto de release.
 Tags do arquivo `config/versions.env` são referências de desenvolvimento, não
 prova de compatibilidade ou de segurança da produção.

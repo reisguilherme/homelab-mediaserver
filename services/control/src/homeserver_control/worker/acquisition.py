@@ -22,6 +22,7 @@ from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStor
 
 from .capacity_evidence import CapacityEvidence
 from .release_quality import release_rank
+from .source_health import SourceHealthStore, TorrentHealth
 from .subdl import SubDLSource
 from .subtitle_language import is_brazilian_portuguese_subtitle, is_english_subtitle
 
@@ -30,6 +31,28 @@ _VIDEO_SUFFIXES = {".mkv", ".mp4", ".m4v", ".avi", ".mov"}
 _SUBTITLE_SUFFIXES = {".srt", ".ass", ".ssa", ".vtt"}
 _MAX_METADATA = 16 * 1024 * 1024
 _TORRENT_CACHE = "https://itorrents.net/torrent"
+
+
+def _queue_only_rejection(release: dict[str, object]) -> bool:
+    """Ignore only Arr's existing-queue veto while validating a replacement."""
+    reasons = release.get("rejections")
+    return (
+        release.get("rejected") is True
+        and isinstance(reasons, list) and bool(reasons)
+        and all(isinstance(item, str)
+                and item.startswith("Release in queue already meets cutoff:")
+                for item in reasons)
+    )
+
+
+def _replacement_has_peers(release: dict[str, object], reason: str,
+                           current_seeds: int) -> bool:
+    reported = release.get("seeders")
+    return (
+        isinstance(reported, int) and not isinstance(reported, bool)
+        and (reported >= 1 if reason in {"stalled", "replacing"}
+             else reported >= max(5, current_seeds * 2))
+    )
 
 
 def _is_sample_video(path: str) -> bool:
@@ -55,6 +78,9 @@ class MovieAcquirer:
         subtitle_store: SubtitleArtifactStore | None = None,
         torrent_store: TorrentArtifactStore | None = None,
         capacity_provider: Callable[[], Awaitable[CapacityEvidence]] | None = None,
+        health_store: SourceHealthStore | None = None,
+        gateway_url: str | None = None,
+        arr_token: str | None = None,
     ) -> None:
         if not radarr_api_key:
             raise ValueError("Radarr API key is required")
@@ -71,8 +97,171 @@ class MovieAcquirer:
         self.subtitle_store = subtitle_store
         self.torrent_store = torrent_store
         self.capacity_provider = capacity_provider
+        if health_store is not None and not all(
+            value is not None for value in (gateway_url, arr_token, capacity_provider)
+        ):
+            raise ValueError("source replacement requires health, gateway and token")
+        self.health_store = health_store
+        self.gateway_url = gateway_url.rstrip("/") if gateway_url else None
+        self.arr_token = arr_token
         self._next_search: dict[str, float] = {}
+        self._next_health_check: dict[str, float] = {}
         self._posted: set[str] = set()
+
+    async def _source_status(self, permit) -> tuple[str | None, TorrentHealth | None]:
+        if self.health_store is None or self.gateway_url is None or self.arr_token is None:
+            return None, None
+        now = time.monotonic()
+        if now < self._next_health_check.get(permit.permit_id, 0):
+            return None, None
+        self._next_health_check[permit.permit_id] = now + 60
+        response = await self.client.get(
+            f"{self.gateway_url}/internal/torrent-health",
+            headers={"X-Arr-Token": self.arr_token,
+                     "X-Admission-Permit": permit.token},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("invalid gateway source health")
+        health = TorrentHealth.from_mapping(payload)
+        if health.infohash != permit.infohash:
+            raise ValueError("gateway source identity changed")
+        return self.health_store.observe(permit.permit_id, health, now=time.time()), health
+
+    async def _source_state(self, permit, action: str) -> None:
+        assert self.gateway_url is not None and self.arr_token is not None
+        response = await self.client.post(
+            f"{self.gateway_url}/internal/source-state",
+            headers={"X-Arr-Token": self.arr_token},
+            json={"permit_token": permit.token, "action": action},
+        )
+        response.raise_for_status()
+
+    async def _resume_if_safe(self, permit) -> str:
+        """Only restart a stopped source when its remaining bytes still fit."""
+        assert self.capacity_provider is not None
+        try:
+            capacity = await self.capacity_provider()
+        except Exception:
+            LOGGER.warning("Cannot restart source %s without fresh capacity", permit.infohash)
+            return "capacity_unavailable"
+        if self.permits.pending_bytes(
+            capacity, include_infohash=permit.infohash
+        ) > capacity.free_bytes:
+            LOGGER.warning("Keeping source %s stopped because space is insufficient",
+                           permit.infohash)
+            return "waiting_space"
+        await self._source_state(permit, "start")
+        assert self.health_store is not None
+        self.health_store.clear_replacing(permit.permit_id)
+        return "resumed"
+
+    async def _dispatch_replacement(
+        self, *, old, infohash: str, metadata_sha256: str,
+        selected_files: tuple[str, ...], exact_bytes: int, torrent: bytes,
+    ) -> str:
+        assert self.health_store is not None
+        assert self.gateway_url is not None and self.arr_token is not None
+        assert self.capacity_provider is not None
+        self.health_store.mark_replacing(old.permit_id)
+        await self._source_state(old, "stop")
+        try:
+            capacity = await self.capacity_provider()
+            chosen = self.permits.replace_confirmed(
+                old.token, infohash=infohash, metadata_sha256=metadata_sha256,
+                selected_files=selected_files, budget_bytes=exact_bytes,
+                capacity=capacity, expires_at=datetime.now(UTC) + timedelta(minutes=30),
+            )
+        except Exception:
+            # The old permit still exists unless the atomic database transition
+            # committed; only then would restarting it violate the new queue.
+            current = self.permits.get(old.token)
+            if current is not None and current.state == "confirmed":
+                await self._resume_if_safe(old)
+            raise
+        if self.torrent_store is not None:
+            self.torrent_store.put(chosen, torrent)
+        await self._add_verified_torrent(chosen, torrent)
+        LOGGER.info("Replaced stalled source %s with %s for %s",
+                    old.infohash, chosen.infohash, old.reservation_id)
+        return "replaced"
+
+    async def _add_verified_torrent(self, permit, torrent: bytes) -> None:
+        assert self.gateway_url is not None and self.arr_token is not None
+        response = await self.client.post(
+            f"{self.gateway_url}/api/v2/torrents/add",
+            headers={"X-Arr-Token": self.arr_token,
+                     "X-Admission-Permit": permit.token},
+            data={"category": permit.category, "savepath": permit.destination,
+                  "stopped": "false"},
+            files={"torrents": ("verified.torrent", torrent, "application/x-bittorrent")},
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("accepted") is not True:
+            raise ValueError("gateway did not confirm replacement torrent")
+
+    async def _retry_replacement(self, permit) -> str | None:
+        if (
+            permit.state != "authorized" or permit.reservation_id is None
+            or not self.permits.had_superseded(
+                permit.reservation_id, scope_key=permit.scope_key
+            )
+        ):
+            return None
+        if self.torrent_store is None or self.capacity_provider is None:
+            return None
+        torrent = self.torrent_store.get(permit)
+        if torrent is None:
+            return None
+        capacity = await self.capacity_provider()
+        if permit.expires_at <= datetime.now(UTC) + timedelta(minutes=2):
+            try:
+                permit = self.permits.renew_replacement_authorized(
+                    permit.token, capacity=capacity,
+                    expires_at=datetime.now(UTC) + timedelta(minutes=30),
+                )
+            except PermissionError as error:
+                if str(error) == "waiting_space":
+                    return "waiting_space"
+                raise
+        elif self.permits.pending_bytes(capacity) > capacity.free_bytes:
+            return "waiting_space"
+        await self._add_verified_torrent(permit, torrent)
+        return "replaced"
+
+    async def _reconcile_uncertain_replacement(self, permit) -> str | None:
+        if (
+            permit.state not in {"unknown", "dispatching"}
+            or permit.reservation_id is None
+            or not self.permits.had_superseded(
+                permit.reservation_id, scope_key=permit.scope_key
+            )
+        ):
+            return None
+        assert self.gateway_url is not None and self.arr_token is not None
+        response = await self.client.post(
+            f"{self.gateway_url}/internal/reconcile-source",
+            headers={"X-Arr-Token": self.arr_token},
+            json={"permit_token": permit.token},
+        )
+        response.raise_for_status()
+        result = response.json()
+        state = result.get("state") if isinstance(result, dict) else None
+        if state == "confirmed":
+            LOGGER.info("Reconciled replacement torrent %s", permit.infohash)
+            return "replaced"
+        if state == "missing":
+            key = f"unknown:{permit.permit_id}"
+            if time.monotonic() >= self._next_search.get(key, 0):
+                LOGGER.warning(
+                    "Replacement torrent %s is uncertain and absent upstream; "
+                    "manual reconciliation required", permit.infohash
+                )
+                self._next_search[key] = time.monotonic() + 900
+            return "replacement_uncertain"
+        raise ValueError("invalid replacement reconciliation response")
 
     def _trusted_download_url(self, value: object) -> bool:
         if not isinstance(value, str):
@@ -166,17 +355,54 @@ class MovieAcquirer:
         payload = response.json()
         return isinstance(payload, dict) and payload.get("copyUsingHardlinks") is True
 
+    def _replacement_paths_available(self, old, candidate_torrent: bytes) -> bool:
+        """Do not let a replacement write any path held by the stopped torrent."""
+        if self.torrent_store is None:
+            return False
+        old_torrent = self.torrent_store.get(old)
+        if old_torrent is None:
+            return False
+        try:
+            previous = inspect_torrent(old_torrent)
+            candidate = inspect_torrent(candidate_torrent)
+        except TorrentBytesError:
+            return False
+        return {item.path for item in previous.files}.isdisjoint(
+            item.path for item in candidate.files
+        )
+
     async def acquire(self, media_key: str, reservation_id: str) -> str:
         reservation = self.repository.active_reservation(reservation_id)
         if reservation is None or reservation["media_key"] != media_key:
             return "reservation_inactive"
-        self.permits.retire_expired_authorized(reservation_id)
         existing = self.permits.get_for_reservation(reservation_id)
+        if existing is None or not (
+            existing.state == "authorized" and self.permits.had_superseded(reservation_id)
+        ):
+            self.permits.retire_expired_authorized(reservation_id)
+            existing = self.permits.get_for_reservation(reservation_id)
+        if existing is None and self.permits.had_superseded(reservation_id):
+            return "replacement_missing_manual"
+        replacement_reason: str | None = None
+        old_health: TorrentHealth | None = None
         if existing is not None:
-            if existing.state != "authorized" or reservation_id in self._posted:
+            reconciled = await self._reconcile_uncertain_replacement(existing)
+            if reconciled is not None:
+                return reconciled
+            if existing.state == "confirmed":
+                if self.permits.had_superseded(reservation_id):
+                    return "already_permitted"
+                replacement_reason, old_health = await self._source_status(existing)
+                if replacement_reason is None:
+                    return "already_permitted"
+            elif existing.state != "authorized" or reservation_id in self._posted:
                 return "already_permitted"
-            if datetime.now(UTC) >= existing.expires_at:
+            if (existing.state == "authorized" and datetime.now(UTC) >= existing.expires_at
+                    and not self.permits.had_superseded(reservation_id)):
                 return "permit_expired"
+            retried = await self._retry_replacement(existing)
+            if retried is not None:
+                return retried
         now = time.monotonic()
         if now < self._next_search.get(reservation_id, 0):
             return "search_deferred"
@@ -228,7 +454,16 @@ class MovieAcquirer:
         )
         waiting_space = False
         for release in ordered:
-            if release.get("rejected") is not False or release_rank(release) is None:
+            if (release_rank(release) is None or
+                    release.get("rejected") is not False and not (
+                        replacement_reason and _queue_only_rejection(release)
+                    )):
+                continue
+            if replacement_reason and (
+                existing is None or old_health is None or not _replacement_has_peers(
+                    release, replacement_reason, old_health.num_seeds
+                )
+            ):
                 continue
             reported = release.get("size")
             if isinstance(reported, bool) or not isinstance(reported, int) or reported <= 0:
@@ -245,6 +480,10 @@ class MovieAcquirer:
             if manifest is None:
                 continue
             infohash, metadata_sha256, selected_files = manifest
+            if replacement_reason and existing is not None and not (
+                self._replacement_paths_available(existing, torrent)
+            ):
+                continue
             exact_bytes = inspect_torrent(torrent).total_bytes
             claimed_hash = release.get("infoHash")
             if claimed_hash and (
@@ -268,6 +507,22 @@ class MovieAcquirer:
                     )
                     if content is not None:
                         self.subtitle_store.put(reservation_id, None, infohash, content)
+            if replacement_reason is not None:
+                assert existing is not None
+                if infohash == existing.infohash:
+                    continue
+                try:
+                    return await self._dispatch_replacement(
+                        old=existing, infohash=infohash,
+                        metadata_sha256=metadata_sha256,
+                        selected_files=selected_files, exact_bytes=exact_bytes,
+                        torrent=torrent,
+                    )
+                except PermissionError as error:
+                    if str(error) == "waiting_space":
+                        waiting_space = True
+                        continue
+                    return str(error)
             if existing is not None:
                 if (
                     existing.infohash != infohash
@@ -299,6 +554,9 @@ class MovieAcquirer:
                     return "already_permitted"
             if self.torrent_store is not None:
                 self.torrent_store.put(chosen_permit, torrent)
+            if self.permits.had_superseded(reservation_id):
+                retried = await self._retry_replacement(chosen_permit)
+                return retried or "replacement_metadata_unavailable"
             response = await self.client.post(
                 f"{self.radarr_url}/api/v3/release",
                 headers=self.headers,
@@ -308,4 +566,8 @@ class MovieAcquirer:
             self._posted.add(reservation_id)
             LOGGER.info("Radarr grab requested for %s, reservation %s", media_key, reservation_id)
             return "grabbed"
+        if replacement_reason == "replacing" and existing is not None:
+            resumed = await self._resume_if_safe(existing)
+            if resumed != "resumed":
+                return resumed
         return "waiting_space" if waiting_space else "no_eligible_release"

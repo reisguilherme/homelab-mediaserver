@@ -186,7 +186,8 @@ class ReservationRepository:
             connection.execute(
                 """UPDATE reservations SET budget_bytes = COALESCE((
                     SELECT SUM(p.budget_bytes) FROM gateway_permits p
-                    WHERE p.reservation_id = reservations.id AND p.state != 'revoked'
+                    WHERE p.reservation_id = reservations.id AND p.state IN
+                    ('authorized', 'dispatching', 'unknown', 'confirmed')
                 ), 0)
                 WHERE state IN ('reserved', 'downloading', 'waiting_episodes')"""
             )

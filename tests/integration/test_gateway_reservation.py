@@ -1,3 +1,4 @@
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 
@@ -317,3 +318,288 @@ def test_concurrent_exact_claims_cannot_spend_same_free_bytes(tmp_path) -> None:
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         assert sorted(pool.map(claim, (1, 2))) == [False, True]
+
+
+def test_confirmed_source_replacement_preserves_old_permit_and_exact_capacity(tmp_path) -> None:
+    database = tmp_path / "control.sqlite"
+    repository = ReservationRepository(database)
+    repository.initialize()
+    permits = PermitRegistry(database)
+    reservation = repository.reserve(
+        request_id="seerr:replace", source_id="replace",
+        media_key="season:tmdb:2:1", filesystem_id="test-uuid",
+        budget_bytes=0, free_bytes=10_000, total_bytes=20_000,
+    )
+    assert reservation.reservation_id
+    old = permits.issue(
+        infohash="a" * 40, metadata_sha256="b" * 64,
+        destination="/data/torrents", category="sonarr",
+        reservation_id=reservation.reservation_id, scope_key="S01E01",
+        selected_files=("old.mkv",), budget_bytes=2_000,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        capacity=CapacityEvidence(free_bytes=10_000, remaining_by_hash={}),
+    )
+    permits.authorize(
+        token=old.token, infohash=old.infohash, destination=old.destination,
+        metadata_sha256=old.metadata_sha256,
+        effect=lambda _: {"accepted": True},
+    )
+    stopped = CapacityEvidence(
+        free_bytes=3_000, remaining_by_hash={old.infohash: 1_500},
+        paused_hashes=frozenset({old.infohash}),
+    )
+    replacement = permits.replace_confirmed(
+        old.token, infohash="c" * 40, metadata_sha256="d" * 64,
+        selected_files=("new.mkv",), budget_bytes=2_500,
+        capacity=stopped, expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    assert replacement.state == "authorized"
+    assert replacement.reservation_id == old.reservation_id
+    assert replacement.scope_key == old.scope_key
+    assert replacement.category == old.category
+    assert replacement.destination == old.destination
+    assert PermitRegistry(database).get(old.token).state == "superseded"
+    assert PermitRegistry(database).had_superseded(
+        reservation.reservation_id, scope_key="S01E01"
+    )
+    assert permits.get_for_reservation(
+        reservation.reservation_id, scope_key="S01E01"
+    ) == replacement
+    assert not permits.is_admitted(old.infohash)
+    assert repository.active_reservation(reservation.reservation_id)["budget_bytes"] == 2_500
+    repository.normalize_verified_budgets()
+    assert repository.active_reservation(reservation.reservation_id)["budget_bytes"] == 2_500
+    with pytest.raises(PermissionError, match="permit_superseded"):
+        permits.authorize(
+            token=old.token, infohash=old.infohash, destination=old.destination,
+            metadata_sha256=old.metadata_sha256,
+            effect=lambda _: {"accepted": True},
+        )
+    with pytest.raises(PermissionError):
+        permits.find_for_metadata(
+            infohash=old.infohash, metadata_sha256=old.metadata_sha256,
+            destination=old.destination, category=old.category,
+        )
+    permits.authorize(
+        token=replacement.token, infohash=replacement.infohash,
+        destination=replacement.destination, metadata_sha256=replacement.metadata_sha256,
+        effect=lambda _: {"accepted": True},
+    )
+    with pytest.raises(PermissionError, match="replacement_limit"):
+        permits.replace_confirmed(
+            replacement.token, infohash="e" * 40, metadata_sha256="f" * 64,
+            selected_files=("third.mkv",), budget_bytes=2_500,
+            capacity=CapacityEvidence(
+                free_bytes=3_000, remaining_by_hash={replacement.infohash: 2_000},
+                paused_hashes=frozenset({replacement.infohash}),
+            ), expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+
+
+def test_source_replacement_rejects_unstopped_reused_or_unaffordable_candidate(tmp_path) -> None:
+    database = tmp_path / "control.sqlite"
+    repository = ReservationRepository(database)
+    repository.initialize()
+    permits = PermitRegistry(database)
+    reservation = repository.reserve(
+        request_id="seerr:film", source_id="film",
+        media_key="movie:tmdb:3", filesystem_id="test-uuid",
+        budget_bytes=0, free_bytes=10_000, total_bytes=20_000,
+    )
+    assert reservation.reservation_id
+    old = permits.issue(
+        infohash="a" * 40, metadata_sha256="b" * 64,
+        destination="/data/torrents", category="radarr",
+        reservation_id=reservation.reservation_id, selected_files=("old.mkv",),
+        budget_bytes=2_000, expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        capacity=CapacityEvidence(free_bytes=10_000, remaining_by_hash={}),
+    )
+    permits.authorize(
+        token=old.token, infohash=old.infohash, destination=old.destination,
+        metadata_sha256=old.metadata_sha256,
+        effect=lambda _: {"accepted": True},
+    )
+    candidate = {
+        "infohash": "c" * 40, "metadata_sha256": "d" * 64,
+        "selected_files": ("new.mkv",), "budget_bytes": 2_500,
+        "expires_at": datetime.now(UTC) + timedelta(minutes=5),
+    }
+    with pytest.raises(PermissionError, match="source_not_stopped"):
+        permits.replace_confirmed(
+            old.token, **candidate,
+            capacity=CapacityEvidence(free_bytes=3_000, remaining_by_hash={old.infohash: 1_500}),
+        )
+    evidence = CapacityEvidence(
+        free_bytes=2_000, remaining_by_hash={old.infohash: 1_500},
+        paused_hashes=frozenset({old.infohash}),
+    )
+    with pytest.raises(PermissionError, match="waiting_space"):
+        permits.replace_confirmed(old.token, **candidate, capacity=evidence)
+    with pytest.raises(ValueError, match="same_infohash"):
+        permits.replace_confirmed(
+            old.token, **{**candidate, "infohash": old.infohash},
+            capacity=CapacityEvidence(
+                free_bytes=3_000, remaining_by_hash={old.infohash: 1_500},
+                paused_hashes=frozenset({old.infohash}),
+            ),
+        )
+    assert permits.get(old.token).state == "confirmed"
+    assert permits.get_for_reservation(reservation.reservation_id) == permits.get(old.token)
+
+
+def test_existing_database_unique_indexes_upgrade_before_source_replacement(tmp_path) -> None:
+    database = tmp_path / "control.sqlite"
+    repository = ReservationRepository(database)
+    repository.initialize()
+    permits = PermitRegistry(database)
+    reservation = repository.reserve(
+        request_id="seerr:legacy", source_id="legacy",
+        media_key="movie:tmdb:11", filesystem_id="test-uuid",
+        budget_bytes=0, free_bytes=10_000, total_bytes=20_000,
+    )
+    assert reservation.reservation_id
+    old = permits.issue(
+        infohash="a" * 40, metadata_sha256="b" * 64,
+        destination="/data/torrents", category="radarr",
+        reservation_id=reservation.reservation_id, selected_files=("old.mkv",),
+        budget_bytes=2_000, expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        capacity=CapacityEvidence(free_bytes=10_000, remaining_by_hash={}),
+    )
+    permits.authorize(
+        token=old.token, infohash=old.infohash, destination=old.destination,
+        metadata_sha256=old.metadata_sha256,
+        effect=lambda _: {"accepted": True},
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP INDEX idx_gateway_permit_reservation")
+        connection.execute("DROP INDEX idx_gateway_permit_scope")
+        connection.execute(
+            "CREATE UNIQUE INDEX idx_gateway_permit_reservation "
+            "ON gateway_permits(reservation_id) "
+            "WHERE reservation_id IS NOT NULL AND scope_key IS NULL"
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX idx_gateway_permit_scope "
+            "ON gateway_permits(reservation_id, scope_key) "
+            "WHERE reservation_id IS NOT NULL AND scope_key IS NOT NULL"
+        )
+    upgraded = PermitRegistry(database)
+    with sqlite3.connect(database) as connection:
+        sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'idx_gateway_permit_reservation'"
+        ).fetchone()[0]
+    assert "AND state IN" in sql
+    replacement = upgraded.replace_confirmed(
+        old.token, infohash="c" * 40, metadata_sha256="d" * 64,
+        selected_files=("new.mkv",), budget_bytes=2_500,
+        capacity=CapacityEvidence(
+            free_bytes=3_000, remaining_by_hash={old.infohash: 1_500},
+            paused_hashes=frozenset({old.infohash}),
+        ), expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    assert replacement.infohash == "c" * 40
+    assert upgraded.get(old.token).state == "superseded"
+
+
+def test_expired_authorized_replacement_renews_only_with_fresh_exact_capacity(tmp_path) -> None:
+    database = tmp_path / "control.sqlite"
+    repository = ReservationRepository(database)
+    repository.initialize()
+    permits = PermitRegistry(database)
+    reservation = repository.reserve(
+        request_id="seerr:renew", source_id="renew",
+        media_key="movie:tmdb:13", filesystem_id="test-uuid",
+        budget_bytes=0, free_bytes=10_000, total_bytes=20_000,
+    )
+    assert reservation.reservation_id
+    old = permits.issue(
+        infohash="a" * 40, metadata_sha256="b" * 64,
+        destination="/data/torrents", category="radarr",
+        reservation_id=reservation.reservation_id, selected_files=("old.mkv",),
+        budget_bytes=2_000, expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        capacity=CapacityEvidence(free_bytes=10_000, remaining_by_hash={}),
+    )
+    permits.authorize(
+        token=old.token, infohash=old.infohash, destination=old.destination,
+        metadata_sha256=old.metadata_sha256,
+        effect=lambda _: {"accepted": True},
+    )
+    new = permits.replace_confirmed(
+        old.token, infohash="c" * 40, metadata_sha256="d" * 64,
+        selected_files=("new.mkv",), budget_bytes=2_500,
+        capacity=CapacityEvidence(
+            free_bytes=3_000, remaining_by_hash={old.infohash: 1_500},
+            paused_hashes=frozenset({old.infohash}),
+        ), expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE gateway_permits SET expires_at = ? WHERE token = ?",
+            ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), new.token),
+        )
+    not_enough = CapacityEvidence(
+        free_bytes=2_000, remaining_by_hash={old.infohash: 1_500},
+        paused_hashes=frozenset({old.infohash}),
+    )
+    with pytest.raises(PermissionError, match="waiting_space"):
+        permits.renew_replacement_authorized(
+            new.token, capacity=not_enough,
+            expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        )
+    renewed = permits.renew_replacement_authorized(
+        new.token, capacity=CapacityEvidence(
+            free_bytes=3_000, remaining_by_hash={old.infohash: 1_500},
+            paused_hashes=frozenset({old.infohash}),
+        ), expires_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+    assert renewed.permit_id == new.permit_id
+    assert renewed.expires_at > datetime.now(UTC)
+    assert permits.retire_expired_authorized(reservation.reservation_id) == 0
+    assert repository.active_reservation(reservation.reservation_id)["budget_bytes"] == 2_500
+
+
+def test_retired_replacement_cannot_be_reissued_as_an_initial_source(tmp_path) -> None:
+    database = tmp_path / "control.sqlite"
+    repository = ReservationRepository(database)
+    repository.initialize()
+    permits = PermitRegistry(database)
+    reservation = repository.reserve(
+        request_id="seerr:retired", source_id="retired",
+        media_key="movie:tmdb:14", filesystem_id="test-uuid",
+        budget_bytes=0, free_bytes=10_000, total_bytes=20_000,
+    )
+    assert reservation.reservation_id
+    old = permits.issue(
+        infohash="a" * 40, metadata_sha256="b" * 64,
+        destination="/data/torrents", category="radarr",
+        reservation_id=reservation.reservation_id, selected_files=("old.mkv",),
+        budget_bytes=2_000, expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        capacity=CapacityEvidence(free_bytes=10_000, remaining_by_hash={}),
+    )
+    permits.authorize(
+        token=old.token, infohash=old.infohash, destination=old.destination,
+        metadata_sha256=old.metadata_sha256,
+        effect=lambda _: {"accepted": True},
+    )
+    new = permits.replace_confirmed(
+        old.token, infohash="c" * 40, metadata_sha256="d" * 64,
+        selected_files=("new.mkv",), budget_bytes=2_500,
+        capacity=CapacityEvidence(
+            free_bytes=3_000, remaining_by_hash={old.infohash: 1_500},
+            paused_hashes=frozenset({old.infohash}),
+        ), expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE gateway_permits SET expires_at = ? WHERE token = ?",
+            ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), new.token),
+        )
+    assert permits.retire_expired_authorized(reservation.reservation_id) == 1
+    with pytest.raises(PermissionError, match="replacement_limit"):
+        permits.issue(
+            infohash="e" * 40, metadata_sha256="f" * 64,
+            destination="/data/torrents", category="radarr",
+            reservation_id=reservation.reservation_id, selected_files=("third.mkv",),
+            budget_bytes=2_500, expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            capacity=CapacityEvidence(free_bytes=10_000, remaining_by_hash={}),
+        )
