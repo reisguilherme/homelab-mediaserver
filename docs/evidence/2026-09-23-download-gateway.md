@@ -12,6 +12,7 @@ Release de código `6a784a64d13787e8c41c8729939aa25ba9e06ba7`, implantada no ser
 - O pedido, o cadastro vazio no Radarr e os registros de reserva do teste foram removidos. O filme não tinha arquivo associado, e a pasta de torrents continha zero arquivos.
 - Depois da release, a API respondeu `200` em `/health/ready`, o gateway respondeu `200` em `/health/live`, e o worker completou ciclos sem repetir o erro `Event loop is closed`.
 - O backup Restic de configuração terminou com `Result=success` e `ExecMainStatus=0`; o stack voltou a `active/running`.
+- O repositório Restic criptografado foi sincronizado para `backup/restic` no desktop e passou em `restic check`. A tarefa do Windows `HomeServer Backup Pull` ficou pronta para execução diária às 04:30 (horário de São Paulo).
 
 ## Limite da validação
 
