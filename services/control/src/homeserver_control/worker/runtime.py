@@ -99,6 +99,7 @@ class WorkerCycle:
     async def run_once(self) -> CycleReport:
         processed = accepted = deferred = malformed = grabbed = 0
         approved_source_ids: set[str] = set()
+        admitted: list[tuple[AdmissionCandidate, str]] = []
         page = 1
         while True:
             batch = await self.source.list_approved(page)
@@ -115,67 +116,65 @@ class WorkerCycle:
                 result = self.scheduler.admit(candidate)
                 if result.accepted:
                     accepted += 1
-                    if (
-                        candidate.media_key.startswith("movie:tmdb:")
-                        and result.reservation_id is not None
-                    ):
-                        if self.acquirer is not None:
-                            try:
-                                outcome = await self.acquirer.acquire(
-                                    candidate.media_key, result.reservation_id
-                                )
-                                if outcome == "grabbed":
-                                    grabbed += 1
-                            except Exception:
-                                LOGGER.exception(
-                                    "movie acquisition failed for %s", candidate.media_key
-                                )
-                        if self.finalizer is not None:
-                            try:
-                                outcome = await self.finalizer.finalize(
-                                    candidate.media_key, result.reservation_id
-                                )
-                                if outcome in {"import_requested", "complete"}:
-                                    LOGGER.info(
-                                        "movie finalization %s for %s", outcome,
-                                        candidate.media_key,
-                                    )
-                            except Exception:
-                                LOGGER.exception(
-                                    "movie finalization failed for %s", candidate.media_key
-                                )
-                    elif (
-                        candidate.media_key.startswith("season:tmdb:")
-                        and result.reservation_id is not None
-                    ):
-                        if self.series_acquirer is not None:
-                            try:
-                                outcome = await self.series_acquirer.acquire(
-                                    candidate.media_key, result.reservation_id
-                                )
-                                if outcome == "grabbed":
-                                    grabbed += 1
-                            except Exception:
-                                LOGGER.exception(
-                                    "series acquisition failed for %s", candidate.media_key
-                                )
-                        if self.series_finalizer is not None:
-                            try:
-                                outcome = await self.series_finalizer.finalize(
-                                    candidate.media_key, result.reservation_id
-                                )
-                                if outcome in {"import_requested", "complete"}:
-                                    LOGGER.info(
-                                        "series finalization %s for %s", outcome,
-                                        candidate.media_key,
-                                    )
-                            except Exception:
-                                LOGGER.exception(
-                                    "series finalization failed for %s", candidate.media_key
-                                )
+                    if result.reservation_id is not None:
+                        admitted.append((candidate, result.reservation_id))
                 else:
                     deferred += 1
             page += 1
+
+        for candidate, reservation_id in admitted:
+            if candidate.media_key.startswith("movie:tmdb:"):
+                if self.acquirer is not None:
+                    try:
+                        outcome = await self.acquirer.acquire(
+                            candidate.media_key, reservation_id
+                        )
+                        if outcome == "grabbed":
+                            grabbed += 1
+                    except Exception:
+                        LOGGER.exception(
+                            "movie acquisition failed for %s", candidate.media_key
+                        )
+                if self.finalizer is not None:
+                    try:
+                        outcome = await self.finalizer.finalize(
+                            candidate.media_key, reservation_id
+                        )
+                        if outcome in {"import_requested", "complete"}:
+                            LOGGER.info(
+                                "movie finalization %s for %s", outcome,
+                                candidate.media_key,
+                            )
+                    except Exception:
+                        LOGGER.exception(
+                            "movie finalization failed for %s", candidate.media_key
+                        )
+            elif candidate.media_key.startswith("season:tmdb:"):
+                if self.series_acquirer is not None:
+                    try:
+                        outcome = await self.series_acquirer.acquire(
+                            candidate.media_key, reservation_id
+                        )
+                        if outcome == "grabbed":
+                            grabbed += 1
+                    except Exception:
+                        LOGGER.exception(
+                            "series acquisition failed for %s", candidate.media_key
+                        )
+                if self.series_finalizer is not None:
+                    try:
+                        outcome = await self.series_finalizer.finalize(
+                            candidate.media_key, reservation_id
+                        )
+                        if outcome in {"import_requested", "complete"}:
+                            LOGGER.info(
+                                "series finalization %s for %s", outcome,
+                                candidate.media_key,
+                            )
+                    except Exception:
+                        LOGGER.exception(
+                            "series finalization failed for %s", candidate.media_key
+                        )
         cancelled = (
             await self.cancellation.reconcile(approved_source_ids)
             if self.cancellation is not None else 0

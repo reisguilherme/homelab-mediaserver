@@ -180,6 +180,31 @@ async def test_worker_reconciles_withdrawn_requests_after_pagination() -> None:
     assert cancellation.approved == {"7"}
 
 
+@pytest.mark.asyncio
+async def test_worker_admits_every_page_before_slow_acquisition() -> None:
+    source = FakeSource(pages=[
+        [{"source_id": "1", "media_key": "movie:tmdb:10", "kind": "movie"}],
+        [{"source_id": "2", "media_key": "movie:tmdb:11", "kind": "movie"}],
+    ])
+    scheduler = FakeScheduler([
+        ReservationResult(True, reservation_id="r1"),
+        ReservationResult(True, reservation_id="r2"),
+    ])
+    seen_admissions: list[int] = []
+
+    class InspectingAcquirer:
+        async def acquire(self, media_key: str, reservation_id: str) -> str:
+            seen_admissions.append(len(scheduler.candidates))
+            return "no_eligible_release"
+
+    cycle = WorkerCycle(source=source, scheduler=scheduler,
+                        acquirer=InspectingAcquirer())
+    report = await cycle.run_once()
+    assert report.accepted == 2
+    assert [item.request_id for item in scheduler.candidates] == ["seerr:1", "seerr:2"]
+    assert seen_admissions == [2, 2]
+
+
 def test_worker_reads_subdl_key_from_private_file(tmp_path, monkeypatch) -> None:
     key_file = tmp_path / "subdl.key"
     key_file.write_text("test-subdl-key\n", encoding="utf-8")
