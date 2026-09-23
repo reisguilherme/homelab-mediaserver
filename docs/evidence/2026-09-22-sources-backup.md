@@ -9,6 +9,13 @@ categorias respectivas. Nenhum cliente de download foi ativado: o gateway
 ainda não implementa o adaptador real do qBittorrent nem o fluxo completo de
 permits. A regra de reserva impede ligar Arr diretamente ao qBittorrent.
 
+O qBittorrent recebeu uma credencial persistente em arquivo root-only no
+servidor; o login continuou válido após reiniciar o container e também
+funcionou a partir da rede do gateway. O caminho padrão é `/data/torrents`,
+novos torrents entram parados, o RSS automático está desligado e o upload
+global está limitado a aproximadamente 20 Mbps. A interface HTTP permanece
+publicada somente no loopback do servidor.
+
 EZTV/EZTVL falharam em resolução DNS e showRSS expirou. RuTracker.org e
 o feed pessoal showRSS aguardam credenciais. BitSearch, TheRARBG e
 TorrentGalaxyClone não aparecem entre as definições da versão instalada do
