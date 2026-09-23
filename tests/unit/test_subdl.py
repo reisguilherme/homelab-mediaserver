@@ -111,3 +111,38 @@ async def test_subdl_rejects_oversized_or_invalid_srt():
             tmdb_id=152532,
             release_title="Dallas Buyers Club 2013 1080p BluRay x264 SPARKS",
         ) is None
+
+
+@pytest.mark.asyncio
+async def test_subdl_reuses_one_title_search_when_checking_multiple_releases():
+    searches = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal searches
+        if request.url.host == "api.subdl.com":
+            searches += 1
+            return httpx.Response(200, json={
+                "status": True, "results": [{"tmdb_id": 97546, "type": "tv"}],
+                "subtitles": [{
+                    "language": "BR_PT", "season": 4, "episode": 1,
+                    "unpack_files": [{
+                        "language": "BR_PT", "season": 4, "episode": 1,
+                        "release_name": "Ted.Lasso.S04E01.1080p.WEB.H264-CAKES",
+                        "format": "srt", "size": len(_SRT),
+                        "url": "/subtitle/123/abc",
+                    }],
+                }],
+            })
+        return httpx.Response(200, content=_SRT)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = SubDLSource(api_key="test-key", client=client)
+        assert await source.fetch(
+            tmdb_id=97546, release_title="Ted Lasso S04E01 1080p WEB H264 ETHEL",
+            season=4, episode=1,
+        ) is None
+        assert await source.fetch(
+            tmdb_id=97546, release_title="Ted Lasso S04E01 1080p WEB H264 CAKES",
+            season=4, episode=1,
+        ) == _SRT
+    assert searches == 1

@@ -11,7 +11,13 @@ from homeserver_control.domain.policy import EPISODE_LIMIT_BYTES
 from homeserver_control.gateway.permits import Permit, PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 
-from .finalization import _SUBTITLE, _VIDEO, MovieFinalizer, _subtitle_has_content
+from .finalization import (
+    _SUBTITLE,
+    _VIDEO,
+    MovieFinalizer,
+    _subtitle_has_content,
+    _write_external_subtitle,
+)
 from .imports import import_hardlink
 from .series_acquisition import _episode_tag, _single_episode_name
 from .subtitle_language import is_brazilian_portuguese_subtitle
@@ -92,7 +98,15 @@ class SeriesFinalizer(MovieFinalizer):
         ]
         source = next((path for path in subtitles if _subtitle_has_content(path)), None)
         if source is None:
-            raise ValidationError("Brazilian Portuguese subtitle vanished after import")
+            if subtitles:
+                raise ValidationError("Brazilian Portuguese subtitle vanished after import")
+            content = self.subtitle_store.get(
+                permit.reservation_id, permit.scope_key, permit.infohash
+            )
+            if content is None:
+                raise ValidationError("Brazilian Portuguese subtitle vanished after import")
+            _write_external_subtitle(video, content, self.media_root)
+            return
         target = video.with_name(f"{video.stem}.pt-BR{source.suffix.lower()}")
         if target.exists():
             if target.is_symlink() or not _subtitle_has_content(target):
@@ -150,13 +164,16 @@ class SeriesFinalizer(MovieFinalizer):
                      and is_brazilian_portuguese_subtitle(str(path))]
         if (
             len(videos) != 1 or not _single_episode_name(str(videos[0]), season, number)
-            or not subtitles
         ):
             raise ValidationError("episode video or Brazilian Portuguese subtitle is missing")
         validated = validate_media(videos[0], maximum_bytes=EPISODE_LIMIT_BYTES)
         if not validated.probe.audio_languages:
             raise ValidationError("episode has no audio stream")
-        if not any(_subtitle_has_content(path) for path in subtitles):
+        if subtitles and not any(_subtitle_has_content(path) for path in subtitles):
+            raise ValidationError("Brazilian Portuguese subtitle content is not valid")
+        if not subtitles and self.subtitle_store.get(
+            permit.reservation_id, permit.scope_key, permit.infohash
+        ) is None:
             raise ValidationError("Brazilian Portuguese subtitle content is not valid")
         return content_path
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from urllib.parse import urlsplit
 
 import httpx
@@ -22,6 +23,9 @@ class SubDLSource:
             raise ValueError("SubDL API key is required")
         self.api_key = api_key
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(20.0))
+        self._search_cache: dict[
+            tuple[int, int | None, int | None], tuple[float, list[object]]
+        ] = {}
 
     async def fetch(
         self, *, tmdb_id: int, release_title: str,
@@ -39,28 +43,34 @@ class SubDLSource:
         }
         if is_tv:
             params.update(season_number=season, episode_number=episode)
-        try:
-            response = await self.client.get(
-                "https://api.subdl.com/api/v1/subtitles", params=params,
-                timeout=20.0, follow_redirects=False,
-            )
-            if response.status_code != 200:
+        cache_key = (tmdb_id, season, episode)
+        cached = self._search_cache.get(cache_key)
+        if cached is not None and cached[0] > time.monotonic():
+            subtitles = cached[1]
+        else:
+            try:
+                response = await self.client.get(
+                    "https://api.subdl.com/api/v1/subtitles", params=params,
+                    timeout=20.0, follow_redirects=False,
+                )
+                if response.status_code != 200:
+                    return None
+                payload = response.json()
+            except (httpx.HTTPError, ValueError):
                 return None
-            payload = response.json()
-        except (httpx.HTTPError, ValueError):
-            return None
-        if not isinstance(payload, dict) or payload.get("status") is not True:
-            return None
-        results = payload.get("results")
-        subtitles = payload.get("subtitles")
-        if (
-            not isinstance(results, list) or not results
-            or not isinstance(results[0], dict)
-            or results[0].get("tmdb_id") != tmdb_id
-            or results[0].get("type") != ("tv" if is_tv else "movie")
-            or not isinstance(subtitles, list)
-        ):
-            return None
+            if not isinstance(payload, dict) or payload.get("status") is not True:
+                return None
+            results = payload.get("results")
+            subtitles = payload.get("subtitles")
+            if (
+                not isinstance(results, list) or not results
+                or not isinstance(results[0], dict)
+                or results[0].get("tmdb_id") != tmdb_id
+                or results[0].get("type") != ("tv" if is_tv else "movie")
+                or not isinstance(subtitles, list)
+            ):
+                return None
+            self._search_cache[cache_key] = (time.monotonic() + 900, subtitles)
         wanted = _release_key(release_title)
         for subtitle in subtitles:
             if not isinstance(subtitle, dict) or subtitle.get("language") != "BR_PT":

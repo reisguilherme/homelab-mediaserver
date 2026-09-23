@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from pathlib import Path, PurePosixPath
 
 import httpx
 
 from homeserver_control.domain.policy import MOVIE_LIMIT_BYTES
-from homeserver_control.gateway.permits import PermitRegistry
+from homeserver_control.domain.subtitle_content import valid_srt
+from homeserver_control.gateway.permits import Permit, PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
+from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
 
 from .imports import import_hardlink
 from .subtitle_language import is_brazilian_portuguese_subtitle
@@ -34,6 +38,38 @@ def _subtitle_has_content(path: Path) -> bool:
     return "WEBVTT" in text and "-->" in text
 
 
+def _write_external_subtitle(video: Path, content: bytes, media_root: Path) -> None:
+    if not valid_srt(content):
+        raise ValidationError("Brazilian Portuguese subtitle content is not valid")
+    target = video.with_name(f"{video.stem}.pt-BR.srt")
+    root = media_root.resolve(strict=True)
+    if not target.parent.resolve(strict=True).is_relative_to(root):
+        raise ValidationError("subtitle target escapes library")
+    if target.exists() or target.is_symlink():
+        if target.is_symlink() or target.read_bytes() != content:
+            raise ValidationError("existing library subtitle differs from verified source")
+        return
+    temporary: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", prefix=".pt-br-", suffix=".tmp", dir=target.parent, delete=False
+        ) as output:
+            temporary = output.name
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, 0o644)
+        os.link(temporary, target)
+    except FileExistsError as error:
+        if target.is_symlink() or target.read_bytes() != content:
+            raise ValidationError(
+                "existing library subtitle differs from verified source"
+            ) from error
+    finally:
+        if temporary is not None:
+            Path(temporary).unlink(missing_ok=True)
+
+
 class MovieFinalizer:
     def __init__(
         self,
@@ -52,6 +88,7 @@ class MovieFinalizer:
             raise ValueError("gateway and Radarr credentials are required")
         self.repository = repository
         self.permits = permits
+        self.subtitle_store = SubtitleArtifactStore(repository.path)
         self.torrent_root = Path(torrent_root)
         self.media_root = Path(media_root)
         self.gateway_url = gateway_url.rstrip("/")
@@ -113,16 +150,24 @@ class MovieFinalizer:
             raise ValidationError("Radarr movie file is outside the library")
         return resolved
 
-    def _ensure_subtitle(self, movie: dict[str, object], selected_files: tuple[str, ...]) -> None:
+    def _ensure_subtitle(self, movie: dict[str, object], permit: Permit) -> None:
         video = self._movie_file(movie)
         subtitles = [
-            self._local_path(f"/data/torrents/{name}") for name in selected_files
+            self._local_path(f"/data/torrents/{name}") for name in permit.selected_files
             if PurePosixPath(name).suffix.lower() in _SUBTITLE
             and is_brazilian_portuguese_subtitle(name)
         ]
         source = next((path for path in subtitles if _subtitle_has_content(path)), None)
         if source is None:
-            raise ValidationError("Brazilian Portuguese subtitle vanished after import")
+            if subtitles:
+                raise ValidationError("Brazilian Portuguese subtitle vanished after import")
+            content = self.subtitle_store.get(
+                permit.reservation_id, None, permit.infohash
+            )
+            if content is None:
+                raise ValidationError("Brazilian Portuguese subtitle vanished after import")
+            _write_external_subtitle(video, content, self.media_root)
+            return
         target = video.with_name(f"{video.stem}.pt-BR{source.suffix.lower()}")
         if target.exists():
             if target.is_symlink() or not _subtitle_has_content(target):
@@ -149,7 +194,7 @@ class MovieFinalizer:
             movie = await self._radarr_movie(media_key)
             if movie is None or not movie.get("hasFile"):
                 return "import_pending"
-            self._ensure_subtitle(movie, permit.selected_files)
+            self._ensure_subtitle(movie, permit)
             self.repository.complete_movie_import(reservation_id)
             return "complete"
 
@@ -203,12 +248,16 @@ class MovieFinalizer:
             if path.suffix.lower() in _SUBTITLE
             and is_brazilian_portuguese_subtitle(str(path))
         ]
-        if len(videos) != 1 or not subtitles:
+        if len(videos) != 1:
             raise ValidationError("movie video or Brazilian Portuguese subtitle is missing")
         validated = validate_media(videos[0], maximum_bytes=MOVIE_LIMIT_BYTES)
         if not validated.probe.audio_languages:
             raise ValidationError("movie has no audio stream")
-        if not any(_subtitle_has_content(path) for path in subtitles):
+        if subtitles and not any(_subtitle_has_content(path) for path in subtitles):
+            raise ValidationError("Brazilian Portuguese subtitle content is not valid")
+        if not subtitles and self.subtitle_store.get(
+            reservation_id, None, permit.infohash
+        ) is None:
             raise ValidationError("Brazilian Portuguese subtitle content is not valid")
         if not self.repository.claim_movie_import(reservation_id):
             return "import_pending"
