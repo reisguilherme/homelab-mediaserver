@@ -19,7 +19,7 @@ Production release: `2fded1569b6f56e18f48848552918e8de1ee4ff1` from `codex/downl
 ## Remaining request limits
 
 - Twelve request rows were `waiting_space`. Active reservations totaled 443 GB against roughly 474.4 GB free on the 502.9 GB media filesystem; the 5% safety margin left too little unreserved capacity for another 81 GB movie or 100 GB season reservation.
-- The Invite and Slow Horses had reservations but no confirmed gateway permit in this snapshot. They still require an eligible release with a bundled pt-BR subtitle or an exact-release SubDL SRT; their final source outcome was not proven in this rollout.
+- The Invite and Slow Horses had reservations but no confirmed gateway permit. Direct acquisition checks returned `no_eligible_release` for both under the current quality, metadata, and exact-release pt-BR requirements. No single rejection reason was established for every candidate.
 - Bazarr's SubDL provider was active and returned pt-BR results. OpenSubtitles.com authentication with the supplied credentials returned HTTP 401; Bazarr also reported HTTP 426 for that provider. It was disabled pending corrected account/API access. Podnapisi remained configured but had a connection error during the manual check.
 
 The Seerr “Requested” label may remain until Arr import completes even while a permitted torrent is downloading. The gateway permit and Arr/qBittorrent queues are the operational evidence of active acquisition.
