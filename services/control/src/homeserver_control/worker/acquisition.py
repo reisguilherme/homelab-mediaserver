@@ -45,6 +45,7 @@ class MovieAcquirer:
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(15.0))
         self.retry_seconds = retry_seconds
         self._next_search: dict[str, float] = {}
+        self._posted: set[str] = set()
 
     def _trusted_download_url(self, value: object) -> bool:
         if not isinstance(value, str):
@@ -106,8 +107,12 @@ class MovieAcquirer:
         reservation = self.repository.active_reservation(reservation_id)
         if reservation is None or reservation["media_key"] != media_key:
             return "reservation_inactive"
-        if self.permits.get_for_reservation(reservation_id) is not None:
-            return "already_permitted"
+        existing = self.permits.get_for_reservation(reservation_id)
+        if existing is not None:
+            if existing.state != "authorized" or reservation_id in self._posted:
+                return "already_permitted"
+            if datetime.now(UTC) >= existing.expires_at:
+                return "permit_expired"
         now = time.monotonic()
         if now < self._next_search.get(reservation_id, 0):
             return "search_deferred"
@@ -190,21 +195,33 @@ class MovieAcquirer:
                 not isinstance(claimed_hash, str) or claimed_hash.lower() != infohash
             ):
                 continue
-            try:
-                self.permits.issue(
-                    infohash=infohash, metadata_sha256=metadata_sha256,
-                    destination="/data/torrents", category="radarr",
-                    reservation_id=reservation_id, selected_files=selected_files,
-                    budget_bytes=budget, expires_at=datetime.now(UTC) + timedelta(minutes=30),
-                )
-            except sqlite3.IntegrityError:
-                return "already_permitted"
+            if existing is not None:
+                if (
+                    existing.infohash != infohash
+                    or existing.metadata_sha256 != metadata_sha256
+                    or existing.category != "radarr"
+                    or existing.destination != "/data/torrents"
+                    or existing.budget_bytes != budget
+                    or existing.selected_files != selected_files
+                ):
+                    continue
+            else:
+                try:
+                    self.permits.issue(
+                        infohash=infohash, metadata_sha256=metadata_sha256,
+                        destination="/data/torrents", category="radarr",
+                        reservation_id=reservation_id, selected_files=selected_files,
+                        budget_bytes=budget, expires_at=datetime.now(UTC) + timedelta(minutes=30),
+                    )
+                except sqlite3.IntegrityError:
+                    return "already_permitted"
             response = await self.client.post(
                 f"{self.radarr_url}/api/v3/release",
                 headers=self.headers,
                 json={**release, "downloadClientId": 1},
             )
             response.raise_for_status()
+            self._posted.add(reservation_id)
             LOGGER.info("Radarr grab requested for %s, reservation %s", media_key, reservation_id)
             return "grabbed"
         return "no_eligible_release"

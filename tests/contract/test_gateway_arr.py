@@ -82,6 +82,28 @@ def test_arr_add_requires_preissued_metadata_permit() -> None:
     assert upstream.added[0]["infohash"] == inspected.infohash
 
 
+def test_radarr_boolean_form_state_is_accepted_only_when_starting() -> None:
+    client, permits, upstream = _client()
+    client.post("/api/v2/auth/login", data={"username": "arr", "password": "secret"})
+    inspected = inspect_torrent(TORRENT)
+    permits.issue(
+        infohash=inspected.infohash, destination="/data/torrents", category="radarr",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        metadata_sha256=inspected.metadata_sha256, budget_bytes=123,
+    )
+    stopped = client.post(
+        "/api/v2/torrents/add", data={"category": "radarr", "stopped": "True"},
+        files={"torrents": ("movie.torrent", TORRENT)},
+    )
+    assert stopped.status_code == 422
+    started = client.post(
+        "/api/v2/torrents/add", data={"category": "radarr", "stopped": "False"},
+        files={"torrents": ("movie.torrent", TORRENT)},
+    )
+    assert started.status_code == 200
+    assert len(upstream.added) == 1
+
+
 def test_arr_url_and_unsafe_mutations_are_rejected() -> None:
     client, _, upstream = _client()
     client.post("/api/v2/auth/login", data={"username": "arr", "password": "secret"})

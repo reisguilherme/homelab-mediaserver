@@ -188,7 +188,12 @@ def create_app(
                 raise HTTPException(status_code=422, detail="invalid multipart body") from error
             if set(form) - {"torrents", "category", "savepath", "stopped"}:
                 raise HTTPException(status_code=422, detail="unsupported torrent options")
-            if len(form.getlist("torrents")) != 1 or form.get("stopped", "false") != "false":
+            stopped = form.get("stopped", "false")
+            if (
+                len(form.getlist("torrents")) != 1
+                or not isinstance(stopped, str)
+                or stopped.lower() != "false"
+            ):
                 raise HTTPException(status_code=422, detail="unsupported torrent state")
             upload = form.get("torrents")
             destination = form.get("savepath", "/data/torrents")
