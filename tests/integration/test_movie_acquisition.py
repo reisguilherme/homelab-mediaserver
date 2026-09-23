@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
@@ -1291,3 +1292,68 @@ async def test_movie_renews_expired_authorized_replacement_before_gateway_add(tm
     assert old.infohash in stopped_capacity.paused_hashes
     assert permits.get_for_reservation(reservation_id).permit_id == replacement.permit_id
     assert permits.get_for_reservation(reservation_id).state == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_movie_reconciles_initial_unknown_permit_without_new_grab(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path, budget=0)
+    torrent = _torrent(subtitle=True)
+    metadata = inspect_torrent(torrent)
+    permit = permits.issue(
+        infohash=metadata.infohash, metadata_sha256=metadata.metadata_sha256,
+        destination="/data/torrents", category="radarr", reservation_id=reservation_id,
+        selected_files=tuple(item.path for item in metadata.files),
+        budget_bytes=metadata.total_bytes,
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        capacity=CapacityEvidence(free_bytes=2_000_000_000, remaining_by_hash={}),
+    )
+    torrents = TorrentArtifactStore(repo.path)
+    torrents.put(permit, torrent)
+    with sqlite3.connect(repo.path) as connection:
+        connection.execute(
+            "UPDATE gateway_permits SET state = 'unknown' WHERE permit_id = ?",
+            (permit.permit_id,),
+        )
+    assert not permits.had_superseded(reservation_id)
+    assert permits.get_for_reservation(reservation_id).state == "unknown"
+    reconciled = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/internal/reconcile-source":
+            assert request.headers["X-Arr-Token"] == "worker-secret"
+            assert json.loads(request.content) == {"permit_token": permit.token}
+            reconciled.append(permit.token)
+            with sqlite3.connect(repo.path) as connection:
+                connection.execute(
+                    "UPDATE gateway_permits SET state = 'confirmed', result_json = ? "
+                    "WHERE permit_id = ?",
+                    (json.dumps({"accepted": True, "infohash": permit.infohash}),
+                     permit.permit_id),
+                )
+            return httpx.Response(200, json={"state": "confirmed"})
+        raise AssertionError(
+            "initial reconciliation must not search or add another torrent: "
+            f"{request.method} {request.url}"
+        )
+
+    async def capacity_provider():
+        return CapacityEvidence(
+            free_bytes=2_000_000_000,
+            remaining_by_hash={permit.infohash: metadata.total_bytes},
+        )
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
+            client=client, capacity_provider=capacity_provider,
+            gateway_url="http://download-gateway:8081", arr_token="worker-secret",
+            health_store=SourceHealthStore(repo.path), torrent_store=torrents,
+        )
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == (
+            "reconciled"
+        )
+
+    assert reconciled == [permit.token]
+    assert permits.get_for_reservation(reservation_id).state == "confirmed"
+    assert permits.is_admitted(metadata.infohash)

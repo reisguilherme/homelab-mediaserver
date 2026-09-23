@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -603,3 +604,79 @@ def test_retired_replacement_cannot_be_reissued_as_an_initial_source(tmp_path) -
             budget_bytes=2_500, expires_at=datetime.now(UTC) + timedelta(minutes=5),
             capacity=CapacityEvidence(free_bytes=10_000, remaining_by_hash={}),
         )
+
+
+def test_list_uncertain_includes_active_episode_scopes_only_and_caps_limit(tmp_path) -> None:
+    database = tmp_path / "control.sqlite"
+    repository = ReservationRepository(database)
+    repository.initialize()
+    permits = PermitRegistry(database)
+    active = repository.reserve(
+        request_id="seerr:active-season", source_id="active-season",
+        media_key="season:tmdb:17:1", filesystem_id="test-uuid",
+        budget_bytes=0, free_bytes=10_000, total_bytes=20_000,
+    )
+    inactive = repository.reserve(
+        request_id="seerr:inactive-film", source_id="inactive-film",
+        media_key="movie:tmdb:18", filesystem_id="test-uuid",
+        budget_bytes=0, free_bytes=10_000, total_bytes=20_000,
+    )
+    first = permits.issue(
+        infohash="a" * 40, metadata_sha256="b" * 64,
+        destination="/data/torrents", category="sonarr",
+        reservation_id=active.reservation_id, scope_key="S01E01",
+        selected_files=("episode1.mkv",), budget_bytes=100,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        capacity=CapacityEvidence(free_bytes=10_000, remaining_by_hash={}),
+    )
+    second = permits.issue(
+        infohash="c" * 40, metadata_sha256="d" * 64,
+        destination="/data/torrents", category="sonarr",
+        reservation_id=active.reservation_id, scope_key="S01E02",
+        selected_files=("episode2.mkv",), budget_bytes=100,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        capacity=CapacityEvidence(free_bytes=10_000, remaining_by_hash={}),
+    )
+    ignored = permits.issue(
+        infohash="e" * 40, metadata_sha256="f" * 64,
+        destination="/data/torrents", category="radarr",
+        reservation_id=inactive.reservation_id,
+        selected_files=("film.mkv",), budget_bytes=100,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        capacity=CapacityEvidence(free_bytes=10_000, remaining_by_hash={}),
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE gateway_permits SET state = 'unknown' WHERE token IN (?, ?)",
+            (first.token, ignored.token),
+        )
+        connection.execute(
+            "UPDATE gateway_permits SET state = 'dispatching' WHERE token = ?",
+            (second.token,),
+        )
+        connection.execute(
+            "UPDATE reservations SET state = 'cancelled' WHERE id = ?",
+            (inactive.reservation_id,),
+        )
+    assert {item.token for item in permits.list_uncertain()} == {first.token, second.token}
+    ordered = sorted((first, second), key=lambda item: item.permit_id)
+    assert [item.permit_id for item in permits.list_uncertain(limit=1)] == [
+        ordered[0].permit_id
+    ]
+    assert [
+        item.permit_id for item in permits.list_uncertain(
+            limit=1, after_id=ordered[0].permit_id
+        )
+    ] == [ordered[1].permit_id]
+    assert permits.list_uncertain(limit=1, after_id=ordered[1].permit_id) == []
+    assert len(permits.list_uncertain(limit=10_000)) == 2
+    with pytest.raises(ValueError):
+        permits.list_uncertain(limit=0)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE gateway_permits SET state = 'confirmed', result_json = ? "
+            "WHERE permit_id = ?",
+            (json.dumps({"accepted": True, "infohash": "f" * 40}), first.permit_id),
+        )
+    with pytest.raises(PermissionError, match="confirmed_result_mismatch"):
+        permits.confirm_reconciled_source(first.token)

@@ -415,7 +415,7 @@ class SeriesAcquirer(MovieAcquirer):
                 if replacement_reason is None:
                     continue
             elif existing is not None and existing.state != "authorized":
-                reconciled = await self._reconcile_uncertain_replacement(existing)
+                reconciled = await self._reconcile_uncertain_source(existing)
                 if reconciled is not None:
                     return reconciled
                 continue

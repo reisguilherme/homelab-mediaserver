@@ -1,6 +1,7 @@
 import httpx
 import pytest
 
+from homeserver_control.adapters.http import EffectUncertain
 from homeserver_control.adapters.qbittorrent import QBittorrentAdapter
 
 
@@ -20,7 +21,9 @@ def test_adapter_forwards_only_verified_torrent_bytes() -> None:
             return httpx.Response(200, text="Ok.")
         if request.url.path == "/api/v2/torrents/info":
             assert request.url.params["hashes"] == infohash
-            return httpx.Response(200, json=[{"hash": infohash}])
+            return httpx.Response(200, json=[{
+                "hash": infohash, "category": "sonarr", "save_path": "/data/torrents",
+            }])
         raise AssertionError(request.url.path)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -53,7 +56,9 @@ def test_adapter_forwards_permitted_magnet() -> None:
             return httpx.Response(200, text="Ok.")
         if request.url.path == "/api/v2/torrents/info":
             assert request.url.params["hashes"] == infohash
-            return httpx.Response(200, json=[{"hash": infohash}])
+            return httpx.Response(200, json=[{
+                "hash": infohash, "category": "radarr", "save_path": "/data/torrents",
+            }])
         raise AssertionError(request.url.path)
 
     adapter = QBittorrentAdapter(
@@ -64,6 +69,90 @@ def test_adapter_forwards_permitted_magnet() -> None:
         "infohash": infohash, "savepath": "/data/torrents",
         "category": "radarr", "magnet_url": magnet,
     })["accepted"] is True
+
+
+def test_adapter_waits_for_torrent_to_appear_after_accepted_add() -> None:
+    infohash = "c" * 40
+    info_reads = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal info_reads
+        if request.url.path == "/api/v2/auth/login":
+            return httpx.Response(200, text="Ok.")
+        if request.url.path == "/api/v2/torrents/add":
+            return httpx.Response(200, text="Ok.")
+        if request.url.path == "/api/v2/torrents/info":
+            assert request.url.params["hashes"] == infohash
+            info_reads += 1
+            return httpx.Response(200, json=[{
+                "hash": infohash, "category": "sonarr", "save_path": "/data/torrents",
+            }] if info_reads == 3 else [])
+        raise AssertionError(request.url.path)
+
+    adapter = QBittorrentAdapter(
+        base_url="http://qbittorrent:8080", username="admin", password="secret",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert adapter.add_torrent({
+        "infohash": infohash, "savepath": "/data/torrents",
+        "category": "sonarr", "torrent_bytes": b"verified metadata",
+    }) == {"accepted": True, "infohash": infohash}
+    assert info_reads == 3
+
+
+def test_adapter_keeps_uncertain_result_when_accepted_torrent_never_appears() -> None:
+    infohash = "d" * 40
+    info_reads = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal info_reads
+        if request.url.path == "/api/v2/auth/login":
+            return httpx.Response(200, text="Ok.")
+        if request.url.path == "/api/v2/torrents/add":
+            return httpx.Response(200, text="Ok.")
+        if request.url.path == "/api/v2/torrents/info":
+            info_reads += 1
+            return httpx.Response(200, json=[])
+        raise AssertionError(request.url.path)
+
+    adapter = QBittorrentAdapter(
+        base_url="http://qbittorrent:8080", username="admin", password="secret",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(EffectUncertain, match="accepted but torrent was not visible"):
+        adapter.add_torrent({
+            "infohash": infohash, "savepath": "/data/torrents",
+            "category": "sonarr", "torrent_bytes": b"verified metadata",
+        })
+    assert info_reads == 5
+
+
+@pytest.mark.parametrize("returned", [
+    {"hash": "f" * 40, "category": "sonarr", "save_path": "/data/torrents"},
+    {"hash": "e" * 40, "category": "radarr", "save_path": "/data/torrents"},
+    {"hash": "e" * 40, "category": "sonarr", "save_path": "/other"},
+])
+def test_adapter_does_not_confirm_wrong_torrent_identity(returned) -> None:
+    infohash = "e" * 40
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return httpx.Response(200, text="Ok.")
+        if request.url.path == "/api/v2/torrents/add":
+            return httpx.Response(200, text="Ok.")
+        if request.url.path == "/api/v2/torrents/info":
+            return httpx.Response(200, json=[returned])
+        raise AssertionError(request.url.path)
+
+    adapter = QBittorrentAdapter(
+        base_url="http://qbittorrent:8080", username="admin", password="secret",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(EffectUncertain):
+        adapter.add_torrent({
+            "infohash": infohash, "savepath": "/data/torrents",
+            "category": "sonarr", "torrent_bytes": b"verified metadata",
+        })
 
 
 def test_adapter_starts_or_stops_only_one_exact_torrent_hash() -> None:

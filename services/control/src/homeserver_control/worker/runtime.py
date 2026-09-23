@@ -30,6 +30,10 @@ class Cancellation(Protocol):
     async def reconcile(self, approved_source_ids: set[str]) -> int: ...
 
 
+class UncertainSourceReconciliation(Protocol):
+    async def reconcile(self) -> int: ...
+
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -62,6 +66,7 @@ class WorkerCycle:
         series_acquirer: MovieAcquisition | None = None,
         series_finalizer: MovieFinalization | None = None,
         cancellation: Cancellation | None = None,
+        source_reconciler: UncertainSourceReconciliation | None = None,
         page_size: int = 20,
     ) -> None:
         if not 1 <= page_size <= 100:
@@ -73,6 +78,7 @@ class WorkerCycle:
         self.series_acquirer = series_acquirer
         self.series_finalizer = series_finalizer
         self.cancellation = cancellation
+        self.source_reconciler = source_reconciler
         self.page_size = page_size
 
     @classmethod
@@ -97,6 +103,11 @@ class WorkerCycle:
         )
 
     async def run_once(self) -> CycleReport:
+        if self.source_reconciler is not None:
+            try:
+                await self.source_reconciler.reconcile()
+            except Exception:
+                LOGGER.exception("uncertain source reconciliation failed")
         processed = accepted = deferred = malformed = grabbed = 0
         approved_source_ids: set[str] = set()
         admitted: list[tuple[AdmissionCandidate, str]] = []

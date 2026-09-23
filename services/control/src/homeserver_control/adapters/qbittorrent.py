@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Mapping
 from typing import Any
 
@@ -94,9 +95,25 @@ class QBittorrentAdapter:
                 raise ContractError("qBittorrent add response is incompatible") from error
             if not isinstance(result, dict) or result.get("success_count", 0) < 1:
                 raise ContractError("qBittorrent did not accept the torrent")
-        if not self.find_by_infohash(infohash):
-            raise EffectUncertain("qBittorrent accepted but torrent was not visible")
-        return {"accepted": True, "infohash": infohash.lower()}
+        # An accepted add can precede the torrent's appearance in the info API.
+        deadline = time.monotonic() + 1.0
+        for attempt in range(5):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            matches = [
+                item for item in self.find_by_infohash(infohash, timeout=remaining)
+                if isinstance(item.get("hash"), str)
+                and item["hash"].lower() == infohash.lower()
+                and item.get("category") == category
+                and isinstance(item.get("save_path"), str)
+                and item["save_path"].rstrip("/") == destination.rstrip("/")
+            ]
+            if len(matches) == 1:
+                return {"accepted": True, "infohash": infohash.lower()}
+            if attempt < 4:
+                time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+        raise EffectUncertain("qBittorrent accepted but torrent was not visible")
 
     def read(self, path: str, params: dict[str, str] | None = None) -> object:
         allowed = {
@@ -119,10 +136,13 @@ class QBittorrentAdapter:
         except ValueError as error:
             raise ContractError("qBittorrent JSON response is incompatible") from error
 
-    def find_by_infohash(self, infohash: str) -> list[dict[str, Any]]:
+    def find_by_infohash(
+        self, infohash: str, *, timeout: float | None = None
+    ) -> list[dict[str, Any]]:
         self._ensure_login()
+        options = {"timeout": timeout} if timeout is not None else {}
         response = self._request(
-            "GET", "/api/v2/torrents/info", params={"hashes": infohash.lower()}
+            "GET", "/api/v2/torrents/info", params={"hashes": infohash.lower()}, **options
         )
         try:
             payload = response.json()

@@ -52,6 +52,15 @@ class FakeCancellation:
         return 0
 
 
+class FakeSourceReconciler:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def reconcile(self) -> int:
+        self.calls += 1
+        return 2
+
+
 @pytest.mark.asyncio
 async def test_worker_reserves_approved_requests_without_dispatching_downloads() -> None:
     source = FakeSource(
@@ -178,6 +187,40 @@ async def test_worker_reconciles_withdrawn_requests_after_pagination() -> None:
     await cycle.run_once()
 
     assert cancellation.approved == {"7"}
+
+
+@pytest.mark.asyncio
+async def test_worker_reconciles_uncertain_sources_even_without_approved_requests() -> None:
+    reconciler = FakeSourceReconciler()
+    cycle = WorkerCycle(
+        source=FakeSource(pages=[]), scheduler=FakeScheduler([]),
+        source_reconciler=reconciler,
+    )
+
+    report = await cycle.run_once()
+
+    assert report.processed == 0
+    assert reconciler.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_worker_reconciles_uncertain_sources_before_polling_seerr() -> None:
+    reconciler = FakeSourceReconciler()
+
+    class InspectingSource:
+        async def list_approved(self, page: int) -> list[dict[str, object]]:
+            assert reconciler.calls == 1
+            raise RuntimeError("Seerr unavailable")
+
+    cycle = WorkerCycle(
+        source=InspectingSource(), scheduler=FakeScheduler([]),
+        source_reconciler=reconciler,
+    )
+
+    with pytest.raises(RuntimeError, match="Seerr unavailable"):
+        await cycle.run_once()
+
+    assert reconciler.calls == 1
 
 
 @pytest.mark.asyncio

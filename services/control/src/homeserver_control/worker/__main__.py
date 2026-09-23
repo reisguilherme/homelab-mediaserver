@@ -29,6 +29,7 @@ from .scheduler import AdmissionScheduler, FilesystemSnapshot
 from .series_acquisition import SeriesAcquirer
 from .series_finalization import SeriesFinalizer
 from .source_health import SourceHealthStore
+from .source_reconciliation import SourceReconciler
 from .subdl import SubDLSource
 
 LOGGER = logging.getLogger(__name__)
@@ -173,6 +174,12 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
         source=source, scheduler=scheduler, acquirer=acquirer, finalizer=finalizer,
         series_acquirer=series_acquirer, series_finalizer=series_finalizer,
         cancellation=CancellationReconciler(source=source, repository=repository),
+        source_reconciler=(
+            SourceReconciler(
+                permits=permits, gateway_url="http://download-gateway:8081",
+                arr_token=arr_token, client=httpx.AsyncClient(timeout=httpx.Timeout(15.0)),
+            ) if permits is not None and arr_token else None
+        ),
     )
 
 
@@ -208,6 +215,10 @@ async def _run_forever(
             getattr(cycle, "series_finalizer", None), SeriesFinalizer
         ):
             await cycle.series_finalizer.client.aclose()
+        if cycle is not None and isinstance(
+            getattr(cycle, "source_reconciler", None), SourceReconciler
+        ):
+            await cycle.source_reconciler.client.aclose()
 
 
 def main() -> None:

@@ -697,3 +697,135 @@ def test_reconcile_uncertain_replacement_only_after_verified_qbit_presence(
         "accepted": True, "infohash": new.infohash,
     }
     assert client.post(path, json=body, headers=headers).json() == {"state": "confirmed"}
+
+
+@pytest.mark.parametrize(
+    ("category", "scope_key", "media_key"),
+    [
+        ("radarr", None, "movie:tmdb:15"),
+        ("sonarr", "S01E03", "season:tmdb:15:1"),
+    ],
+)
+@pytest.mark.parametrize("uncertain_state", ["unknown", "dispatching"])
+def test_reconcile_initial_uncertain_source_with_verified_identity(
+    tmp_path, category, scope_key, media_key, uncertain_state,
+) -> None:
+    database = tmp_path / "control.sqlite"
+    repository = ReservationRepository(database)
+    repository.initialize()
+    permits = PermitRegistry(database)
+    reservation = repository.reserve(
+        request_id=f"seerr:{category}", source_id=category,
+        media_key=media_key, filesystem_id="test-uuid",
+        budget_bytes=0, free_bytes=10_000, total_bytes=20_000,
+    )
+    inspected = inspect_torrent(TORRENT)
+    permit = permits.issue(
+        infohash=inspected.infohash, metadata_sha256=inspected.metadata_sha256,
+        destination="/data/torrents", category=category,
+        reservation_id=reservation.reservation_id, scope_key=scope_key,
+        selected_files=("test.mp4",), budget_bytes=inspected.total_bytes,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        capacity=CapacityEvidence(free_bytes=1_000, remaining_by_hash={}),
+    )
+    store = TorrentArtifactStore(database)
+    store.put(permit, TORRENT)
+    with pytest.raises(RuntimeError, match="response lost"):
+        permits.authorize(
+            token=permit.token, infohash=permit.infohash,
+            destination=permit.destination, metadata_sha256=permit.metadata_sha256,
+            effect=lambda _: (_ for _ in ()).throw(RuntimeError("response lost")),
+        )
+    if uncertain_state == "dispatching":
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "UPDATE gateway_permits SET state = 'dispatching' WHERE token = ?",
+                (permit.token,),
+            )
+
+    class InitialUpstream(Upstream):
+        info = None
+
+        def read(self, path, params=None):
+            if path == "/api/v2/torrents/info":
+                return [self.info] if self.info is not None else []
+            return super().read(path, params)
+
+    upstream = InitialUpstream()
+    client = TestClient(create_app(
+        permits=permits, upstream=upstream, arr_token="secret", torrent_store=store,
+    ))
+    path = "/internal/reconcile-source"
+    body = {"permit_token": permit.token}
+    headers = {"X-Arr-Token": "secret"}
+    assert client.post(path, json=body, headers=headers).json() == {"state": "missing"}
+    upstream.info = {
+        "hash": permit.infohash, "category": category,
+        "save_path": "/data/elsewhere", "total_size": inspected.total_bytes,
+    }
+    assert client.post(path, json=body, headers=headers).status_code == 409
+    upstream.info = {**upstream.info, "save_path": "/data/torrents", "total_size": 122}
+    assert client.post(path, json=body, headers=headers).status_code == 409
+    assert permits.get(permit.token).state == uncertain_state
+    upstream.info = {**upstream.info, "total_size": inspected.total_bytes}
+    assert client.post(path, json=body, headers=headers).json() == {"state": "confirmed"}
+    assert permits.get(permit.token).state == "confirmed"
+    assert permits.is_admitted(permit.infohash)
+    assert client.post(path, json=body, headers=headers).json() == {"state": "confirmed"}
+
+
+@pytest.mark.parametrize("invalid_state", ["revoked", "inactive_reservation"])
+def test_reconcile_rejects_revoked_or_inactive_reservation(
+    tmp_path, invalid_state,
+) -> None:
+    database = tmp_path / "control.sqlite"
+    repository = ReservationRepository(database)
+    repository.initialize()
+    permits = PermitRegistry(database)
+    reservation = repository.reserve(
+        request_id="seerr:inactive", source_id="inactive",
+        media_key="movie:tmdb:16", filesystem_id="test-uuid",
+        budget_bytes=0, free_bytes=10_000, total_bytes=20_000,
+    )
+    inspected = inspect_torrent(TORRENT)
+    permit = permits.issue(
+        infohash=inspected.infohash, metadata_sha256=inspected.metadata_sha256,
+        destination="/data/torrents", category="radarr",
+        reservation_id=reservation.reservation_id, selected_files=("test.mp4",),
+        budget_bytes=inspected.total_bytes,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        capacity=CapacityEvidence(free_bytes=1_000, remaining_by_hash={}),
+    )
+    store = TorrentArtifactStore(database)
+    store.put(permit, TORRENT)
+    with sqlite3.connect(database) as connection:
+        if invalid_state == "revoked":
+            connection.execute(
+                "UPDATE gateway_permits SET state = 'revoked' WHERE token = ?",
+                (permit.token,),
+            )
+        else:
+            connection.execute(
+                "UPDATE reservations SET state = 'cancelled' WHERE id = ?",
+                (reservation.reservation_id,),
+            )
+
+    class PresentUpstream(Upstream):
+        def read(self, path, params=None):
+            if path == "/api/v2/torrents/info":
+                return [{
+                    "hash": permit.infohash, "category": "radarr",
+                    "save_path": "/data/torrents", "total_size": inspected.total_bytes,
+                }]
+            return super().read(path, params)
+
+    client = TestClient(create_app(
+        permits=permits, upstream=PresentUpstream(), arr_token="secret",
+        torrent_store=store,
+    ))
+    response = client.post(
+        "/internal/reconcile-source", json={"permit_token": permit.token},
+        headers={"X-Arr-Token": "secret"},
+    )
+    assert response.status_code == 403
+    assert permits.get(permit.token).state != "confirmed"

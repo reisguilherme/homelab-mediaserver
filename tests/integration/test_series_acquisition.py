@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -977,3 +978,89 @@ async def test_series_replaces_stalled_first_episode_without_starting_later_epis
     assert permits.get_for_reservation(reservation_id, scope_key="S04E02") is None
     assert searched == ["41"]
     assert events.index("stop") < events.index("capacity_after_stop") < events.index("add")
+
+
+@pytest.mark.asyncio
+async def test_series_reconciles_initial_unknown_episode_without_new_grab(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path, budget=0)
+    torrent = _torrent()
+    metadata = inspect_torrent(torrent)
+    permit = permits.issue(
+        infohash=metadata.infohash, metadata_sha256=metadata.metadata_sha256,
+        destination="/data/torrents", category="sonarr", reservation_id=reservation_id,
+        scope_key="S04E01", selected_files=tuple(item.path for item in metadata.files),
+        budget_bytes=metadata.total_bytes,
+        expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        capacity=CapacityEvidence(free_bytes=4_000_000_000, remaining_by_hash={}),
+    )
+    torrents = TorrentArtifactStore(repo.path)
+    torrents.put(permit, torrent)
+    with sqlite3.connect(repo.path) as connection:
+        connection.execute(
+            "UPDATE gateway_permits SET state = 'unknown' WHERE permit_id = ?",
+            (permit.permit_id,),
+        )
+    assert not permits.had_superseded(reservation_id, scope_key="S04E01")
+    assert permits.get_for_reservation(reservation_id, scope_key="S04E01").state == (
+        "unknown"
+    )
+    reconciled = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/series":
+            return httpx.Response(200, json=[{
+                "id": 1, "tmdbId": 97546, "monitored": True,
+            }])
+        if request.url.path == "/api/v3/episode":
+            return httpx.Response(200, json=[
+                *_completed_earlier_seasons(4),
+                {"id": 41, "seasonNumber": 4, "episodeNumber": 1,
+                 "airDateUtc": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+                 "monitored": True, "hasFile": False},
+                {"id": 42, "seasonNumber": 4, "episodeNumber": 2,
+                 "airDateUtc": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+                 "monitored": True, "hasFile": False},
+            ])
+        if request.url.path == "/internal/reconcile-source":
+            assert request.headers["X-Arr-Token"] == "worker-secret"
+            assert json.loads(request.content) == {"permit_token": permit.token}
+            reconciled.append(permit.token)
+            with sqlite3.connect(repo.path) as connection:
+                connection.execute(
+                    "UPDATE gateway_permits SET state = 'confirmed', result_json = ? "
+                    "WHERE permit_id = ?",
+                    (json.dumps({"accepted": True, "infohash": permit.infohash}),
+                     permit.permit_id),
+                )
+            return httpx.Response(200, json={"state": "confirmed"})
+        raise AssertionError(
+            "episode reconciliation must not search or add another torrent: "
+            f"{request.method} {request.url}"
+        )
+
+    async def capacity_provider():
+        return CapacityEvidence(
+            free_bytes=4_000_000_000,
+            remaining_by_hash={permit.infohash: metadata.total_bytes},
+        )
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        acquirer = SeriesAcquirer(
+            repository=repo, permits=permits, sonarr_url="http://sonarr:8989",
+            sonarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
+            client=client, capacity_provider=capacity_provider,
+            gateway_url="http://download-gateway:8081", arr_token="worker-secret",
+            health_store=SourceHealthStore(repo.path), torrent_store=torrents,
+        )
+        assert await acquirer.acquire("season:tmdb:97546:4", reservation_id) == (
+            "reconciled"
+        )
+
+    assert reconciled == [permit.token]
+    assert permits.get_for_reservation(reservation_id, scope_key="S04E01").state == (
+        "confirmed"
+    )
+    assert permits.is_admitted(metadata.infohash)
+    assert permits.get_for_reservation(reservation_id, scope_key="S04E02") is None

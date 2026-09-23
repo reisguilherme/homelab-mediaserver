@@ -457,8 +457,40 @@ class PermitRegistry:
             ).fetchone()
         return row is not None
 
-    def confirm_replacement(self, token: str) -> Permit:
-        """Resolve an uncertain replacement only after the gateway verifies qBittorrent."""
+    def list_uncertain(
+        self, limit: int = 100, *, after_id: str | None = None
+    ) -> list[Permit]:
+        """Enumerate uncertain sources with a cursor across movie and episode slots."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        if after_id is not None and (not isinstance(after_id, str) or not after_id):
+            raise ValueError("after_id must be a nonempty permit ID")
+        capped = min(limit, 100)
+        if self._db_path is None:
+            with self._lock:
+                return sorted(
+                    (
+                        item for item in self._permits.values()
+                        if item.reservation_id is not None
+                        and item.state in {"unknown", "dispatching"}
+                        and (after_id is None or item.permit_id > after_id)
+                    ),
+                    key=lambda item: item.permit_id,
+                )[:capped]
+        with self._session() as connection:
+            rows = connection.execute(
+                "SELECT p.* FROM gateway_permits p "
+                "JOIN reservations r ON r.id = p.reservation_id "
+                "WHERE p.state IN ('unknown', 'dispatching') "
+                "AND r.state IN ('reserved', 'downloading', 'waiting_episodes') "
+                "AND p.permit_id > ? "
+                "ORDER BY p.permit_id LIMIT ?",
+                (after_id or "", capped),
+            ).fetchall()
+        return [self._permit_from_row(row) for row in rows]
+
+    def confirm_reconciled_source(self, token: str) -> Permit:
+        """Confirm a source only after the gateway verifies persisted metadata and qBittorrent."""
         if self._db_path is None:
             with self._lock:
                 permit = self._permits.get(token)
@@ -467,11 +499,15 @@ class PermitRegistry:
                         "authorized", "dispatching", "unknown", "confirmed"
                     }
                     or permit.reservation_id is None
-                    or not self.had_superseded(
+                    or (permit.state == "authorized" and not self.had_superseded(
                         permit.reservation_id, scope_key=permit.scope_key
-                    )
+                    ))
                 ):
-                    raise PermissionError("replacement_permit_required")
+                    raise PermissionError("reconcilable_source_required")
+                if permit.state == "confirmed":
+                    if permit.result != {"accepted": True, "infohash": permit.infohash}:
+                        raise PermissionError("confirmed_result_mismatch")
+                    return permit
                 permit.state = "confirmed"
                 permit.result = {"accepted": True, "infohash": permit.infohash}
                 return permit
@@ -488,21 +524,34 @@ class PermitRegistry:
                 }
                 or permit.reservation_id is None
             ):
-                raise PermissionError("replacement_permit_required")
-            if not connection.execute(
+                raise PermissionError("reconcilable_source_required")
+            if permit.state == "authorized" and not connection.execute(
                 "SELECT 1 FROM gateway_permits WHERE reservation_id = ? "
                 "AND scope_key IS ? AND state = 'superseded' LIMIT 1",
                 (permit.reservation_id, permit.scope_key),
-            ).fetchone() or not connection.execute(
-                "SELECT 1 FROM reservations WHERE id = ? "
-                "AND state IN ('reserved', 'downloading', 'waiting_episodes')",
-                (permit.reservation_id,),
             ).fetchone():
                 raise PermissionError("replacement_permit_required")
+            reservation = connection.execute(
+                "SELECT media_key FROM reservations WHERE id = ? "
+                "AND state IN ('reserved', 'downloading', 'waiting_episodes')",
+                (permit.reservation_id,),
+            ).fetchone()
+            if reservation is None or (
+                permit.scope_key is None and (
+                    permit.category != "radarr"
+                    or not reservation["media_key"].startswith("movie:tmdb:")
+                )
+            ) or (
+                permit.scope_key is not None and (
+                    permit.category != "sonarr"
+                    or not reservation["media_key"].startswith("season:tmdb:")
+                )
+            ):
+                raise PermissionError("active_source_reservation_required")
             result = {"accepted": True, "infohash": permit.infohash}
             if permit.state == "confirmed":
                 if permit.result != result:
-                    raise PermissionError("replacement_result_mismatch")
+                    raise PermissionError("confirmed_result_mismatch")
                 connection.commit()
                 return permit
             connection.execute(
@@ -514,6 +563,10 @@ class PermitRegistry:
             permit.state = "confirmed"
             permit.result = result
             return permit
+
+    def confirm_replacement(self, token: str) -> Permit:
+        """Compatibility alias for callers confirming an already verified replacement."""
+        return self.confirm_reconciled_source(token)
 
     def renew_replacement_authorized(
         self, token: str, *, capacity: CapacityEvidence, expires_at: datetime,

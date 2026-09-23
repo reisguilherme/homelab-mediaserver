@@ -231,13 +231,10 @@ class MovieAcquirer:
         await self._add_verified_torrent(permit, torrent)
         return "replaced"
 
-    async def _reconcile_uncertain_replacement(self, permit) -> str | None:
+    async def _reconcile_uncertain_source(self, permit) -> str | None:
         if (
             permit.state not in {"unknown", "dispatching"}
             or permit.reservation_id is None
-            or not self.permits.had_superseded(
-                permit.reservation_id, scope_key=permit.scope_key
-            )
         ):
             return None
         assert self.gateway_url is not None and self.arr_token is not None
@@ -249,19 +246,22 @@ class MovieAcquirer:
         response.raise_for_status()
         result = response.json()
         state = result.get("state") if isinstance(result, dict) else None
+        replacement = self.permits.had_superseded(
+            permit.reservation_id, scope_key=permit.scope_key
+        )
         if state == "confirmed":
-            LOGGER.info("Reconciled replacement torrent %s", permit.infohash)
-            return "replaced"
+            LOGGER.info("Reconciled torrent %s", permit.infohash)
+            return "replaced" if replacement else "reconciled"
         if state == "missing":
             key = f"unknown:{permit.permit_id}"
             if time.monotonic() >= self._next_search.get(key, 0):
                 LOGGER.warning(
-                    "Replacement torrent %s is uncertain and absent upstream; "
+                    "Torrent %s is uncertain and absent upstream; "
                     "manual reconciliation required", permit.infohash
                 )
                 self._next_search[key] = time.monotonic() + 900
-            return "replacement_uncertain"
-        raise ValueError("invalid replacement reconciliation response")
+            return "replacement_uncertain" if replacement else "source_uncertain"
+        raise ValueError("invalid source reconciliation response")
 
     def _trusted_download_url(self, value: object) -> bool:
         if not isinstance(value, str):
@@ -386,7 +386,7 @@ class MovieAcquirer:
         replacement_reason: str | None = None
         old_health: TorrentHealth | None = None
         if existing is not None:
-            reconciled = await self._reconcile_uncertain_replacement(existing)
+            reconciled = await self._reconcile_uncertain_source(existing)
             if reconciled is not None:
                 return reconciled
             if existing.state == "confirmed":

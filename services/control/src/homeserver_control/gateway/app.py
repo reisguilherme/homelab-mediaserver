@@ -224,16 +224,16 @@ def create_app(
             or permit.category not in {"sonarr", "radarr"}
             or permit.destination != "/data/torrents"
             or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
-            or not permits.had_superseded(
+            or (permit.state == "authorized" and not permits.had_superseded(
                 permit.reservation_id, scope_key=permit.scope_key
-            )
+            ))
         ):
-            raise HTTPException(status_code=403, detail="replacement permit required")
+            raise HTTPException(status_code=403, detail="reconcilable source permit required")
         active = permits.get_for_reservation(
             permit.reservation_id, scope_key=permit.scope_key
         )
         if active is None or active.permit_id != permit.permit_id:
-            raise HTTPException(status_code=403, detail="active replacement permit required")
+            raise HTTPException(status_code=403, detail="active source permit required")
         if torrent_store is None:
             raise HTTPException(status_code=503, detail="torrent metadata store unavailable")
         metadata = torrent_store.get(permit)
@@ -264,7 +264,7 @@ def create_app(
         ):
             raise HTTPException(status_code=409, detail="replacement torrent identity changed")
         try:
-            permits.confirm_replacement(token)
+            permits.confirm_reconciled_source(token)
         except PermissionError as error:
             raise HTTPException(status_code=403, detail=str(error)) from error
         return {"state": "confirmed"}
