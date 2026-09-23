@@ -6,7 +6,7 @@ host; a imagem está fixada por digest.
 Suas integrações com Sonarr e Radarr passaram no teste de conexão. Após o
 comando de sincronização, havia quatro indexadores em cada Arr, filtrados pelas
 categorias respectivas. Nenhum cliente de download foi ativado: o gateway
-ainda não implementa o adaptador real do qBittorrent nem o fluxo completo de
+ainda não instancia o adaptador real do qBittorrent nem conclui o fluxo de
 permits. A regra de reserva impede ligar Arr diretamente ao qBittorrent.
 
 O qBittorrent recebeu uma credencial persistente em arquivo root-only no
@@ -15,6 +15,12 @@ funcionou a partir da rede do gateway. O caminho padrão é `/data/torrents`,
 novos torrents entram parados, o RSS automático está desligado e o upload
 global está limitado a aproximadamente 20 Mbps. A interface HTTP permanece
 publicada somente no loopback do servidor.
+
+O próximo marco do cliente de download é capturar o contrato HTTP que os Arr
+usam, ligar o adaptador real somente ao gateway e emitir uma permissão após
+reserva e inspeção do torrent. Testes devem provar que qualquer adição sem
+permissão é recusada e que uma transferência autorizada é reconciliada após
+reinício. Só depois disso Sonarr e Radarr podem apontar para o gateway.
 
 EZTV/EZTVL falharam em resolução DNS e showRSS expirou. RuTracker.org e
 o feed pessoal showRSS aguardam credenciais. BitSearch, TheRARBG e
