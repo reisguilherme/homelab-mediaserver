@@ -75,3 +75,38 @@ async def test_free_bytes_are_measured_after_queue_progress(tmp_path, monkeypatc
             snapshot_path=snapshot, data_root=tmp_path,
             gateway_url="http://gateway:8081", arr_token="private", client=client)
     assert evidence.free_bytes == 2_000_000
+
+
+@pytest.mark.asyncio
+async def test_capacity_excludes_known_stopped_torrents_but_counts_active_and_unknown_state(
+    tmp_path, monkeypatch,
+) -> None:
+    snapshot = tmp_path / "capacity.json"
+    snapshot.write_text(json.dumps({"filesystem_id": "media-uuid",
+                                    "measured_at": time.time()}), encoding="utf-8")
+    monkeypatch.setattr("os.path.ismount", lambda path: True)
+    monkeypatch.setattr("os.statvfs", lambda path: SimpleNamespace(
+        f_bavail=10_000_000, f_frsize=1000))
+    queue = [
+        {"hash": "a" * 40, "total_size": 3000, "amount_left": 2000,
+         "admitted": True, "state": "stoppedDL"},
+        {"hash": "b" * 40, "total_size": 3000, "amount_left": 1500,
+         "admitted": True, "state": "downloading"},
+        {"hash": "c" * 40, "total_size": 3000, "amount_left": 2500,
+         "admitted": False, "state": "pausedDL"},
+        {"hash": "d" * 40, "total_size": 3000, "amount_left": 500,
+         "admitted": False, "state": "downloading"},
+        {"hash": "e" * 40, "total_size": 3000, "amount_left": 400,
+         "admitted": False},
+        {"hash": "f" * 40, "total_size": 0, "amount_left": 0,
+         "admitted": True, "state": "stoppedDL"},
+    ]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json=queue)
+    )) as client:
+        evidence = await read_capacity_evidence(
+            snapshot_path=snapshot, data_root=tmp_path,
+            gateway_url="http://gateway:8081", arr_token="private", client=client)
+    assert evidence.remaining_by_hash == {"a" * 40: 2000, "b" * 40: 1500}
+    assert evidence.paused_hashes == frozenset({"a" * 40, "f" * 40})
+    assert evidence.other_pending_bytes == 900

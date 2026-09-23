@@ -48,14 +48,14 @@ def test_worker_capacity_view_includes_unmanaged_queue_without_names() -> None:
     def read(path, params=None):
         if path == "/api/v2/torrents/info":
             return [{"hash": "a" * 40, "total_size": 3000, "amount_left": 2000,
-                     "name": "private torrent"}]
+                     "state": "stoppedDL", "name": "private torrent"}]
         return original(path, params)
     upstream.read = read
     assert client.get("/internal/queue-capacity").status_code == 403
     response = client.get("/internal/queue-capacity", headers={"X-Arr-Token": "secret"})
     assert response.status_code == 200
     assert response.json() == [{"hash": "a" * 40, "total_size": 3000,
-                                "amount_left": 2000, "admitted": False}]
+                                "amount_left": 2000, "state": "stoppedDL", "admitted": False}]
 
 
 def test_arr_login_and_read_contract() -> None:

@@ -198,6 +198,48 @@ def test_unmanaged_queue_bytes_are_claimed_before_new_permit(tmp_path) -> None:
         )
 
 
+def test_new_exact_claim_ignores_paused_confirmed_future_but_counts_pending(tmp_path) -> None:
+    database = tmp_path / "control.sqlite"
+    repository = ReservationRepository(database)
+    repository.initialize()
+    permits = PermitRegistry(database)
+    reservation = repository.reserve(
+        request_id="season", source_id="season", media_key="season:tmdb:2:1",
+        filesystem_id="test-uuid", budget_bytes=0,
+        free_bytes=10_000, total_bytes=20_000,
+    )
+    assert reservation.reservation_id
+    common = {
+        "destination": "/data/torrents", "category": "sonarr",
+        "reservation_id": reservation.reservation_id,
+        "expires_at": datetime.now(UTC) + timedelta(minutes=5),
+    }
+    first = permits.issue(
+        **common, scope_key="S01E01", infohash="a" * 40, budget_bytes=2000,
+        capacity=CapacityEvidence(free_bytes=3000, remaining_by_hash={}),
+    )
+    permits.authorize(
+        token=first.token, infohash=first.infohash, destination=first.destination,
+        effect=lambda _: {"accepted": True},
+    )
+    paused_evidence = CapacityEvidence(
+        free_bytes=3000, remaining_by_hash={first.infohash: 1500},
+        paused_hashes=frozenset({first.infohash}),
+    )
+    assert permits.pending_bytes(paused_evidence) == 0
+    assert permits.pending_bytes(paused_evidence, include_infohash=first.infohash) == 1500
+    second = permits.issue(
+        **common, scope_key="S01E02", infohash="b" * 40, budget_bytes=2000,
+        capacity=paused_evidence,
+    )
+    assert second.budget_bytes == 2000
+    with pytest.raises(PermissionError, match="waiting_space"):
+        permits.issue(
+            **common, scope_key="S01E03", infohash="c" * 40, budget_bytes=2000,
+            capacity=paused_evidence,
+        )
+
+
 def test_old_speculative_budgets_normalize_to_existing_permits(tmp_path) -> None:
     database = tmp_path / "control.sqlite"
     repository = ReservationRepository(database)

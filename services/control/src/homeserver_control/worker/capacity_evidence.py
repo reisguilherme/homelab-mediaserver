@@ -16,6 +16,7 @@ class CapacityEvidence:
     free_bytes: int
     remaining_by_hash: dict[str, int]
     other_pending_bytes: int = 0
+    paused_hashes: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if (
@@ -34,6 +35,8 @@ class CapacityEvidence:
                 or not isinstance(self.other_pending_bytes, int)
                 or self.other_pending_bytes < 0):
             raise ValueError("invalid unmanaged queue size")
+        if any(not isinstance(item, str) or len(item) != 40 for item in self.paused_hashes):
+            raise ValueError("invalid stopped torrent identity")
 
 
 async def read_capacity_evidence(
@@ -60,6 +63,7 @@ async def read_capacity_evidence(
         raise ValueError("gateway_queue_unavailable")
     remaining: dict[str, int] = {}
     other_pending = 0
+    paused: set[str] = set()
     for item in payload:
         if not isinstance(item, dict):
             raise ValueError("invalid gateway queue entry")
@@ -67,8 +71,11 @@ async def read_capacity_evidence(
         total = item.get("total_size")
         left = item.get("amount_left")
         admitted = item.get("admitted")
+        stopped = item.get("state") in {"stoppedDL", "stoppedUP", "pausedDL", "pausedUP"}
         if not isinstance(infohash, str) or len(infohash) != 40 or not isinstance(admitted, bool):
             raise ValueError("invalid gateway queue identity")
+        if admitted and stopped:
+            paused.add(infohash.lower())
         known = (isinstance(total, int) and not isinstance(total, bool) and total > 0
                  and isinstance(left, int) and not isinstance(left, bool) and 0 <= left <= total)
         if not known:
@@ -77,9 +84,10 @@ async def read_capacity_evidence(
             continue
         if admitted:
             remaining[infohash.lower()] = left
-        else:
+        elif not stopped:
             other_pending += left
     stats = os.statvfs(data_root)
     free_bytes = stats.f_bavail * stats.f_frsize
     return CapacityEvidence(free_bytes=free_bytes, remaining_by_hash=remaining,
-                            other_pending_bytes=other_pending)
+                            other_pending_bytes=other_pending,
+                            paused_hashes=frozenset(paused))

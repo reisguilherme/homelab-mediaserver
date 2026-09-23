@@ -92,7 +92,7 @@ class SeriesAcquirer(MovieAcquirer):
     ) -> str | None:
         if self.gateway_url is None or self.arr_token is None:
             return None
-        changes: list[tuple[str, str]] = []
+        changes: list[tuple[str, str, str]] = []
         seen_scopes: set[str] = set()
         for item in episodes:
             if item["seasonNumber"] != season or item["id"] in imported_episode_ids:
@@ -105,9 +105,9 @@ class SeriesAcquirer(MovieAcquirer):
             if permit is None or permit.state != "confirmed":
                 continue
             action = "start" if item["id"] == active_episode_id else "stop"
-            changes.append((action, permit.token))
+            changes.append((action, permit.token, permit.infohash))
         # Stop later torrents before considering a capacity-checked start.
-        for action, token in sorted(changes, key=lambda item: item[0] != "stop"):
+        for action, token, infohash in sorted(changes, key=lambda item: item[0] != "stop"):
             blocked_status = None
             if action == "start":
                 if self.capacity_provider is None:
@@ -115,7 +115,9 @@ class SeriesAcquirer(MovieAcquirer):
                 else:
                     try:
                         capacity = await self.capacity_provider()
-                        pending_bytes = self.permits.pending_bytes(capacity)
+                        pending_bytes = self.permits.pending_bytes(
+                            capacity, include_infohash=infohash
+                        )
                     except Exception as error:
                         LOGGER.warning(
                             "series capacity evidence unavailable: %s", type(error).__name__

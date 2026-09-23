@@ -209,6 +209,7 @@ def create_app(
                 "hash": entry.get("hash"),
                 "total_size": entry.get("total_size"),
                 "amount_left": entry.get("amount_left"),
+                "state": entry.get("state"),
                 "admitted": permits.is_admitted(entry["hash"])
                 if isinstance(entry.get("hash"), str) else False,
             }

@@ -112,9 +112,12 @@ class PermitRegistry:
             )
 
     @staticmethod
-    def _pending_bytes(connection: sqlite3.Connection, capacity: CapacityEvidence) -> int:
+    def _pending_bytes(
+        connection: sqlite3.Connection, capacity: CapacityEvidence,
+        *, include_infohash: str | None = None,
+    ) -> int:
         rows = connection.execute(
-            """SELECT p.infohash, p.budget_bytes FROM gateway_permits p
+            """SELECT p.infohash, p.budget_bytes, p.state FROM gateway_permits p
             JOIN reservations r ON r.id = p.reservation_id
             WHERE r.state IN ('reserved', 'downloading', 'waiting_episodes')
               AND p.state IN ('authorized', 'dispatching', 'unknown', 'confirmed')
@@ -130,13 +133,20 @@ class PermitRegistry:
             min(row["budget_bytes"], capacity.remaining_by_hash.get(
                 row["infohash"], row["budget_bytes"]
             )) for row in rows
+            if row["state"] != "confirmed"
+            or row["infohash"] not in capacity.paused_hashes
+            or row["infohash"] == include_infohash
         )
 
-    def pending_bytes(self, capacity: CapacityEvidence) -> int:
+    def pending_bytes(
+        self, capacity: CapacityEvidence, *, include_infohash: str | None = None,
+    ) -> int:
         if self._db_path is None:
             raise ValueError("persistent permits required for queue capacity")
         with self._session() as connection:
-            return self._pending_bytes(connection, capacity)
+            return self._pending_bytes(
+                connection, capacity, include_infohash=include_infohash
+            )
 
     @staticmethod
     def _expires(value: str) -> datetime:

@@ -650,7 +650,22 @@ async def test_series_reconciles_existing_torrents_across_seasons_in_order(tmp_p
 
     async with httpx.AsyncClient(transport=_transport(handler)) as client:
         async def capacity():
-            return CapacityEvidence(free_bytes=20_000_000_000, remaining_by_hash={})
+            return CapacityEvidence(
+                free_bytes=4_000_000_000,
+                remaining_by_hash={permit.infohash: 2_000_000_000 for permit in (
+                    permits.get_for_reservation(season1_reservation, scope_key="S01E01"),
+                    permits.get_for_reservation(season1_reservation, scope_key="S01E02"),
+                    permits.get_for_reservation(season2_reservation, scope_key="S02E01"),
+                ) if permit is not None},
+                other_pending_bytes=1_000_000_000,
+                paused_hashes=frozenset(
+                    permit.infohash for permit in (
+                        permits.get_for_reservation(season1_reservation, scope_key="S01E01"),
+                        permits.get_for_reservation(season1_reservation, scope_key="S01E02"),
+                        permits.get_for_reservation(season2_reservation, scope_key="S02E01"),
+                    ) if permit is not None
+                ),
+            )
 
         acquirer = SeriesAcquirer(
             repository=repo, permits=permits,
