@@ -22,15 +22,18 @@ os Arr usam `/api/v2/auth/login`, `app/webapiVersion`, `app/version`,
 `app/preferences`, `torrents/categories`, `torrents/info`, `torrents/properties`,
 `torrents/files` e `torrents/add`. O gateway responde apenas a esse subconjunto
 de leitura e ao `add` admitido. `delete`, `setCategory`, `createCategory`,
-`setShareLimits`, `topPrio` e `setForceStart` permanecem bloqueados.
+`setShareLimits` e `setForceStart` permanecem bloqueados. `topPrio` não é exposto
+à sessão dos Arr; somente a rotina interna autenticada do gateway pode usá-lo
+para ordenar filmes admitidos por seeds e preservar a precedência dos episódios
+elegíveis, sempre com permissão confirmada e identidade conferida no qBittorrent.
 
 O caminho de adição implementado aceita somente upload de `.torrent` v1. O
 gateway reinterpreta os bytes, verifica infohash, digest completo, arquivos,
 tamanho, categoria, destino e permit ligado a uma reserva existente antes de
 encaminhar os mesmos bytes ao qBittorrent. Magnet e URL de torrent são negados
 até que exista obtenção e inspeção prévia segura. A seleção automática de
-releases e a importação validada ainda não estão implementadas; conectar os Arr
-ao gateway não deve ser confundido com liberar a aquisição automática.
+releases e a importação validada dependem de reserva, inspeção do torrent,
+verificação de capacidade e permissão confirmada pelo gateway.
 
 Em produção, qBittorrent usa `transfer` + `egress_transfer`; Sonarr/Radarr e
 Prowlarr usam `apps` + `egress`. O gateway é o único serviço ligado a `apps`

@@ -21,7 +21,7 @@ from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactSt
 from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 
 from .capacity_evidence import CapacityEvidence
-from .release_quality import release_rank
+from .release_quality import release_rank, release_seeders
 from .source_health import SourceHealthStore, TorrentHealth
 from .subdl import SubDLSource
 from .subtitle_language import is_brazilian_portuguese_subtitle, is_english_subtitle
@@ -160,6 +160,7 @@ class MovieAcquirer:
     async def _dispatch_replacement(
         self, *, old, infohash: str, metadata_sha256: str,
         selected_files: tuple[str, ...], exact_bytes: int, torrent: bytes,
+        reported_seeders: int | None = None,
     ) -> str:
         assert self.health_store is not None
         assert self.gateway_url is not None and self.arr_token is not None
@@ -172,6 +173,7 @@ class MovieAcquirer:
                 old.token, infohash=infohash, metadata_sha256=metadata_sha256,
                 selected_files=selected_files, budget_bytes=exact_bytes,
                 capacity=capacity, expires_at=datetime.now(UTC) + timedelta(minutes=30),
+                reported_seeders=reported_seeders,
             )
         except Exception:
             # The old permit still exists unless the atomic database transition
@@ -449,7 +451,7 @@ class MovieAcquirer:
             raise ValueError("Radarr release response is invalid")
         ordered = sorted(
             (item for item in items if isinstance(item, dict)),
-            key=lambda item: release_rank(item) or (0, 0, 0, 0, 0),
+            key=lambda item: release_rank(item) or (0, 0, 0, 0, 0, 0),
             reverse=True,
         )
         waiting_space = False
@@ -516,7 +518,7 @@ class MovieAcquirer:
                         old=existing, infohash=infohash,
                         metadata_sha256=metadata_sha256,
                         selected_files=selected_files, exact_bytes=exact_bytes,
-                        torrent=torrent,
+                        torrent=torrent, reported_seeders=release_seeders(release),
                     )
                 except PermissionError as error:
                     if str(error) == "waiting_space":
@@ -544,6 +546,7 @@ class MovieAcquirer:
                         reservation_id=reservation_id, selected_files=selected_files,
                         budget_bytes=exact_bytes, capacity=capacity,
                         expires_at=datetime.now(UTC) + timedelta(minutes=30),
+                        reported_seeders=release_seeders(release),
                     )
                 except PermissionError as error:
                     if str(error) == "waiting_space":

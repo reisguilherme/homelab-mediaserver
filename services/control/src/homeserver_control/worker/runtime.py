@@ -34,6 +34,10 @@ class UncertainSourceReconciliation(Protocol):
     async def reconcile(self) -> int: ...
 
 
+class MoviePriority(Protocol):
+    async def prioritize(self) -> str: ...
+
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -67,6 +71,7 @@ class WorkerCycle:
         series_finalizer: MovieFinalization | None = None,
         cancellation: Cancellation | None = None,
         source_reconciler: UncertainSourceReconciliation | None = None,
+        movie_prioritizer: MoviePriority | None = None,
         page_size: int = 20,
     ) -> None:
         if not 1 <= page_size <= 100:
@@ -79,6 +84,7 @@ class WorkerCycle:
         self.series_finalizer = series_finalizer
         self.cancellation = cancellation
         self.source_reconciler = source_reconciler
+        self.movie_prioritizer = movie_prioritizer
         self.page_size = page_size
 
     @classmethod
@@ -103,10 +109,12 @@ class WorkerCycle:
         )
 
     async def run_once(self) -> CycleReport:
+        can_prioritize = True
         if self.source_reconciler is not None:
             try:
                 await self.source_reconciler.reconcile()
             except Exception:
+                can_prioritize = False
                 LOGGER.exception("uncertain source reconciliation failed")
         processed = accepted = deferred = malformed = grabbed = 0
         approved_source_ids: set[str] = set()
@@ -121,6 +129,7 @@ class WorkerCycle:
                     candidate = self._candidate(raw)
                 except ValueError:
                     malformed += 1
+                    can_prioritize = False
                     continue
                 processed += 1
                 approved_source_ids.add(candidate.source_id)
@@ -131,6 +140,8 @@ class WorkerCycle:
                         admitted.append((candidate, result.reservation_id))
                 else:
                     deferred += 1
+                    if candidate.media_key.startswith("season:tmdb:"):
+                        can_prioritize = False
             page += 1
 
         for candidate, reservation_id in admitted:
@@ -166,12 +177,20 @@ class WorkerCycle:
                         outcome = await self.series_acquirer.acquire(
                             candidate.media_key, reservation_id
                         )
+                        if outcome in {
+                            "reservation_inactive", "unsupported_media",
+                            "import_guard", "series_not_monitored",
+                        }:
+                            can_prioritize = False
                         if outcome in {"grabbed", "replaced"}:
                             grabbed += 1
                     except Exception:
+                        can_prioritize = False
                         LOGGER.exception(
                             "series acquisition failed for %s", candidate.media_key
                         )
+                else:
+                    can_prioritize = False
                 if self.series_finalizer is not None:
                     try:
                         outcome = await self.series_finalizer.finalize(
@@ -190,4 +209,9 @@ class WorkerCycle:
             await self.cancellation.reconcile(approved_source_ids)
             if self.cancellation is not None else 0
         )
+        if can_prioritize and self.movie_prioritizer is not None:
+            try:
+                await self.movie_prioritizer.prioritize()
+            except Exception:
+                LOGGER.exception("movie download prioritization failed")
         return CycleReport(processed, accepted, deferred, malformed, grabbed, cancelled)

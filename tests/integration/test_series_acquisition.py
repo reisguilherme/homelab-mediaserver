@@ -197,6 +197,70 @@ def test_sonarr_web_label_is_allowed_only_when_arr_classifies_webdl():
     assert _series_rank({**release, "title": "Ted Lasso S04E01 1080p WEBRip CAKES"}) is None
 
 
+def test_series_release_rank_uses_seeds_only_within_same_quality() -> None:
+    base = {
+        "title": "Ted Lasso S04E01 1080p WEB-DL Atmos", "size": 3_000,
+        "quality": {"quality": {
+            "source": "web", "name": "WEBDL-1080p", "resolution": 1080,
+        }},
+    }
+    assert _series_rank({**base, "seeders": 50, "size": 1_000}) > _series_rank(
+        {**base, "seeders": 1, "size": 3_000}
+    )
+
+
+@pytest.mark.asyncio
+async def test_series_chooses_more_seeded_source_for_first_missing_episode(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path)
+    low = _torrent(video_bytes=3_100_000_000, root_suffix=b".Low")
+    high = _torrent(video_bytes=3_000_000_000, root_suffix=b".High")
+    torrents = {"low": low, "high": high}
+    searched = []
+    grabbed = []
+
+    def handler(request):
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/series":
+            return httpx.Response(200, json=[{"id": 1, "tmdbId": 97546, "monitored": True}])
+        if request.url.path == "/api/v3/episode":
+            return httpx.Response(200, json=[*_completed_earlier_seasons(4), *(
+                {"id": 40 + number, "seasonNumber": 4, "episodeNumber": number,
+                 "airDateUtc": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+                 "monitored": True, "hasFile": False}
+                for number in (1, 2)
+            )])
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            searched.append(request.url.params["episodeId"])
+            assert request.url.params["episodeId"] == "41"
+            return httpx.Response(200, json=[{
+                "guid": name, "title": "Ted Lasso S04E01 1080p WEB-DL Atmos",
+                "size": inspect_torrent(torrent).total_bytes,
+                "seeders": 2 if name == "low" else 40,
+                "downloadUrl": f"http://prowlarr:9696/2/download?id={name}",
+                "infoHash": inspect_torrent(torrent).infohash, "rejected": False,
+                "quality": {"quality": {
+                    "source": "web", "name": "WEBDL-1080p", "resolution": 1080,
+                }}, "episodeIds": [41],
+            } for name, torrent in torrents.items()])
+        if request.url.path == "/2/download":
+            return httpx.Response(200, content=torrents[request.url.params["id"]])
+        if request.url.path == "/api/v3/release" and request.method == "POST":
+            grabbed.append(json.loads(request.content)["guid"])
+            return httpx.Response(200, json={"accepted": True})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        acquirer = SeriesAcquirer(
+            repository=repo, permits=permits, sonarr_url="http://sonarr:8989",
+            sonarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
+        )
+        assert await acquirer.acquire("season:tmdb:97546:4", reservation_id) == "grabbed"
+    assert searched == ["41"]
+    assert grabbed == ["high"]
+    assert permits.get_for_reservation(reservation_id, scope_key="S04E01").reported_seeders == 40
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("subtitle_available", [True, False])
 async def test_series_grab_uses_persisted_exact_release_subdl_sidecar(tmp_path, subtitle_available):

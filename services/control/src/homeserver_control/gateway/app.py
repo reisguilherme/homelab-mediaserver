@@ -33,6 +33,8 @@ class QbitClient(Protocol):
 
     def set_running(self, infohash: str, *, running: bool) -> None: ...
 
+    def top_priority(self, infohash: str) -> None: ...
+
 
 class UnconfiguredQbitClient:
     def add_torrent(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -42,6 +44,9 @@ class UnconfiguredQbitClient:
         raise RuntimeError("qBittorrent upstream is not configured")
 
     def set_running(self, infohash: str, *, running: bool) -> None:
+        raise RuntimeError("qBittorrent upstream is not configured")
+
+    def top_priority(self, infohash: str) -> None:
         raise RuntimeError("qBittorrent upstream is not configured")
 
 
@@ -404,6 +409,197 @@ def create_app(
             }
             for entry in result
         ]
+
+    @app.post("/internal/prioritize-movies")
+    async def prioritize_movies(
+        x_arr_token: str | None = Header(default=None),
+    ) -> dict[str, str | int]:
+        if arr_token == "unconfigured" or not token_matches(x_arr_token, arr_token):
+            raise HTTPException(status_code=403, detail="worker credential required")
+        require_admission()
+        preferences = upstream.read("/api/v2/app/preferences")
+        if not isinstance(preferences, dict) or not isinstance(
+            preferences.get("queueing_enabled"), bool
+        ):
+            raise HTTPException(status_code=502, detail="invalid qBittorrent preferences")
+        if not preferences["queueing_enabled"]:
+            raise HTTPException(status_code=409, detail="qBittorrent queue is disabled")
+
+        def active_movie_permits() -> dict[str, Permit]:
+            result: dict[str, Permit] = {}
+            for permit in permits.list_active_confirmed_movies():
+                if (
+                    permit.state != "confirmed" or permit.category != "radarr"
+                    or permit.reservation_id is None or permit.scope_key is not None
+                    or permit.destination != "/data/torrents"
+                    or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
+                ):
+                    continue
+                if permit.infohash in result:
+                    raise HTTPException(status_code=409, detail="ambiguous movie permit")
+                result[permit.infohash] = permit
+            return result
+
+        movie_permits = active_movie_permits()
+
+        def first_episode_per_series() -> dict[str, Permit]:
+            groups: dict[str, list[tuple[tuple[int, int], Permit]]] = {}
+            for series_key, permit in permits.list_active_confirmed_episodes():
+                scope = permit.scope_key
+                match = re.fullmatch(r"S([0-9]{2,})E([0-9]{2,})", scope or "")
+                if (
+                    not isinstance(series_key, str)
+                    or not series_key
+                    or match is None or permit.state != "confirmed"
+                    or permit.category != "sonarr" or permit.reservation_id is None
+                    or permit.destination != "/data/torrents"
+                    or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
+                ):
+                    continue
+                groups.setdefault(series_key, []).append((
+                    (int(match[1]), int(match[2])), permit,
+                ))
+            first: dict[str, Permit] = {}
+            hashes: set[str] = set(movie_permits)
+            for series_key, episodes in groups.items():
+                episodes.sort(key=lambda item: item[0])
+                if len(episodes) > 1 and episodes[0][0] == episodes[1][0]:
+                    raise HTTPException(status_code=409, detail="ambiguous episode permit")
+                permit = episodes[0][1]
+                if permit.infohash in hashes:
+                    raise HTTPException(status_code=409, detail="ambiguous torrent permit")
+                hashes.add(permit.infohash)
+                first[series_key] = permit
+            return first
+
+        first_episodes = first_episode_per_series()
+
+        def torrent_list() -> list[dict[str, Any]]:
+            result = upstream.read("/api/v2/torrents/info")
+            if not isinstance(result, list) or any(
+                not isinstance(item, dict) for item in result
+            ):
+                raise HTTPException(status_code=502, detail="invalid torrent list")
+            return result
+
+        def eligible(item: dict[str, Any], infohash: str, category: str) -> bool:
+            progress = item.get("progress")
+            left = item.get("amount_left")
+            priority = item.get("priority")
+            return (
+                item.get("category") == category
+                and item.get("save_path") == "/data/torrents"
+                and item.get("state") in {"downloading", "stalledDL", "queuedDL"}
+                and item.get("force_start") is False
+                and isinstance(progress, (int, float)) and not isinstance(progress, bool)
+                and 0 <= progress < 1
+                and isinstance(left, int) and not isinstance(left, bool) and left > 0
+                and isinstance(priority, int) and not isinstance(priority, bool)
+                and priority > 0
+                and isinstance(item.get("hash"), str)
+                and item["hash"].lower() == infohash
+            )
+
+        snapshot = torrent_list()
+        candidates: list[tuple[int, int, int, str]] = []
+        movie_hashes: set[str] = set()
+        for index, item in enumerate(snapshot):
+            infohash = item.get("hash")
+            if not isinstance(infohash, str):
+                continue
+            infohash = infohash.lower()
+            permit = movie_permits.get(infohash)
+            if permit is None or not eligible(item, infohash, "radarr"):
+                continue
+            if infohash in movie_hashes:
+                raise HTTPException(status_code=409, detail="duplicate movie torrent")
+            movie_hashes.add(infohash)
+            observed = [
+                item[field] for field in ("num_complete", "num_seeds")
+                if isinstance(item.get(field), int) and not isinstance(item[field], bool)
+                and item[field] >= 0
+            ]
+            score = max(observed, default=-1)
+            if item["state"] == "queuedDL" and score <= 0:
+                reported = permit.reported_seeders
+                if isinstance(reported, int) and not isinstance(reported, bool):
+                    score = max(score, reported)
+            if score < 0:
+                continue
+            candidates.append((item["priority"], index, score, infohash))
+
+        episode_candidates: list[tuple[int, int, str, str]] = []
+        for series_key, permit in first_episodes.items():
+            matches = [
+                (index, item) for index, item in enumerate(snapshot)
+                if isinstance(item.get("hash"), str)
+                and item["hash"].lower() == permit.infohash
+            ]
+            if len(matches) != 1:
+                continue
+            index, item = matches[0]
+            if eligible(item, permit.infohash, "sonarr"):
+                episode_candidates.append((
+                    item["priority"], index, permit.infohash, series_key,
+                ))
+
+        current = sorted(candidates)
+        desired = sorted(current, key=lambda item: (-item[2], item[0], item[1]))
+        current_hashes = [item[3] for item in current]
+        desired_hashes = [item[3] for item in desired]
+        episode_candidates.sort()
+        episode_hashes = [item[2] for item in episode_candidates]
+        current_global = [
+            item[2] for item in sorted(
+                [(item[0], item[1], item[3]) for item in current]
+                + [(item[0], item[1], item[2]) for item in episode_candidates]
+            )
+        ]
+        desired_global = episode_hashes + desired_hashes
+        if current_global == desired_global:
+            return {"state": "unchanged", "count": 0}
+
+        if current_hashes != desired_hashes:
+            for infohash in reversed(desired_hashes):
+                upstream.top_priority(infohash)
+        for infohash in reversed(episode_hashes):
+            upstream.top_priority(infohash)
+
+        expected = set(desired_global)
+        for attempt in range(5):
+            active_permits = {
+                infohash: permit.permit_id
+                for infohash, permit in active_movie_permits().items()
+            }
+            if any(
+                active_permits.get(infohash) != movie_permits[infohash].permit_id
+                for infohash in desired_hashes
+            ):
+                raise HTTPException(status_code=409, detail="movie permit changed")
+            active_episodes = first_episode_per_series()
+            if any(
+                active_episodes.get(series_key) is None
+                or active_episodes[series_key].permit_id != first_episodes[series_key].permit_id
+                for _, _, _, series_key in episode_candidates
+            ):
+                raise HTTPException(status_code=409, detail="episode permit changed")
+            updated = [
+                (item["priority"], index, item["hash"].lower())
+                for index, item in enumerate(torrent_list())
+                if isinstance(item.get("hash"), str)
+                and item["hash"].lower() in expected
+                and eligible(
+                    item, item["hash"].lower(),
+                    "radarr" if item["hash"].lower() in movie_hashes else "sonarr",
+                )
+            ]
+            if len(updated) != len(expected):
+                raise HTTPException(status_code=409, detail="prioritized torrent changed")
+            if [item[2] for item in sorted(updated)] == desired_global:
+                return {"state": "reordered", "count": len(desired_global)}
+            if attempt < 4:
+                await asyncio.sleep(0.2)
+        raise HTTPException(status_code=409, detail="movie queue order not confirmed")
 
     @app.get("/health/live")
     def health_live() -> dict[str, str]:

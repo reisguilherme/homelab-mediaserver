@@ -523,6 +523,47 @@ async def test_acquirer_grabs_best_admissible_quality(tmp_path, releases, chosen
 
 
 @pytest.mark.asyncio
+async def test_movie_grabs_more_seeded_same_quality_and_records_report(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path)
+    low = _torrent(subtitle=True, video_bytes=1_600_000_000, root_name=b"Film.Low")
+    high = _torrent(subtitle=True, video_bytes=1_500_000_000, root_name=b"Film.High")
+    torrents = {"low": low, "high": high}
+    grabbed = []
+
+    def handler(request):
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/movie":
+            return httpx.Response(200, json=[{"id": 2, "tmdbId": 1101383, "hasFile": False}])
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            return httpx.Response(200, json=[{
+                "guid": name, "title": "Film 2160p BluRay REMUX DV Atmos",
+                "size": inspect_torrent(torrent).total_bytes,
+                "seeders": 2 if name == "low" else 40,
+                "downloadUrl": f"http://prowlarr:9696/2/download?id={name}",
+                "infoHash": inspect_torrent(torrent).infohash, "rejected": False,
+                "quality": {"quality": {
+                    "source": "bluray", "modifier": "remux", "resolution": 2160,
+                }},
+            } for name, torrent in torrents.items()])
+        if request.url.path == "/2/download":
+            return httpx.Response(200, content=torrents[request.url.params["id"]])
+        if request.url.path == "/api/v3/release" and request.method == "POST":
+            grabbed.append(json.loads(request.content)["guid"])
+            return httpx.Response(200, json={"accepted": True})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
+        )
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "grabbed"
+    assert grabbed == ["high"]
+    assert permits.get_for_reservation(reservation_id).reported_seeders == 40
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("subtitle_name", [b"movie.por.srt", b"movie.pt.srt", b"movie.pt-PT.srt"])
 async def test_acquirer_rejects_ambiguous_or_portugal_subtitle(tmp_path, subtitle_name):
     repo, permits, reservation_id = _reserve(tmp_path)
@@ -795,6 +836,7 @@ async def test_movie_replaces_persistently_stalled_source_with_verified_seeded_r
     replacement = permits.get_for_reservation(reservation_id)
     assert replacement is not None and replacement.infohash == new_metadata.infohash
     assert replacement.state == "confirmed"
+    assert replacement.reported_seeders == 42
     assert permits.is_admitted(old.infohash) is False
     assert events.index("stop") < events.index("capacity") < events.index("add")
 

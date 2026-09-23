@@ -27,7 +27,7 @@ from .acquisition import (
     _replacement_has_peers,
 )
 from .capacity_evidence import CapacityEvidence
-from .release_quality import release_rank
+from .release_quality import release_rank, release_seeders
 from .source_health import SourceHealthStore
 from .subdl import SubDLSource
 from .subtitle_language import is_brazilian_portuguese_subtitle, is_english_subtitle
@@ -48,7 +48,7 @@ def _single_episode_name(value: str, season: int, episode: int) -> bool:
     return bool(re.search(rf"(?<![a-z0-9]){tag}(?![a-z0-9]|[-_. ]?e[0-9])", value, re.I))
 
 
-def _series_rank(release: dict[str, object]) -> tuple[int, int, int, int, int] | None:
+def _series_rank(release: dict[str, object]) -> tuple[int, int, int, int, int, int] | None:
     quality = release.get("quality")
     detail = quality.get("quality") if isinstance(quality, dict) else None
     title = release.get("title")
@@ -236,7 +236,7 @@ class SeriesAcquirer(MovieAcquirer):
             raise ValueError("Sonarr release response is invalid")
         ranked = sorted(
             (item for item in releases if isinstance(item, dict)),
-            key=lambda item: _series_rank(item) or (0, 0, 0, 0, 0),
+            key=lambda item: _series_rank(item) or (0, 0, 0, 0, 0, 0),
             reverse=True,
         )
         for release in ranked:
@@ -455,6 +455,7 @@ class SeriesAcquirer(MovieAcquirer):
                             old=existing, infohash=infohash,
                             metadata_sha256=digest, selected_files=files,
                             exact_bytes=bytes_total, torrent=torrent,
+                            reported_seeders=release_seeders(release),
                         )
                     except PermissionError as error:
                         if str(error) == "waiting_space":
@@ -482,6 +483,7 @@ class SeriesAcquirer(MovieAcquirer):
                             selected_files=files, budget_bytes=bytes_total,
                             capacity=capacity,
                             expires_at=datetime.now(UTC) + timedelta(minutes=30),
+                            reported_seeders=release_seeders(release),
                         )
                     except PermissionError as error:
                         if str(error) == "waiting_space":

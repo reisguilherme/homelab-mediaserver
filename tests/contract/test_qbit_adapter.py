@@ -178,3 +178,27 @@ def test_adapter_starts_or_stops_only_one_exact_torrent_hash() -> None:
     with pytest.raises(ValueError, match="invalid infohash"):
         adapter.set_running("all", running=False)
     assert len(commands) == 2
+
+
+def test_adapter_promotes_only_one_validated_torrent_hash() -> None:
+    infohash = "b" * 40
+    commands: list[tuple[str, bytes]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return httpx.Response(200, text="Ok.")
+        commands.append((request.url.path, request.content))
+        return httpx.Response(200, text="")
+
+    adapter = QBittorrentAdapter(
+        base_url="http://qbittorrent:8080", username="admin", password="secret",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    adapter.top_priority(infohash.upper())
+    assert commands == [
+        ("/api/v2/torrents/topPrio", f"hashes={infohash}".encode()),
+    ]
+    for invalid in ("all", f"{infohash}|{'c' * 40}", "not-a-hash"):
+        with pytest.raises(ValueError, match="invalid infohash"):
+            adapter.top_priority(invalid)
+    assert len(commands) == 1

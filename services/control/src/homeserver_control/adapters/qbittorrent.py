@@ -165,3 +165,13 @@ class QBittorrentAdapter:
         )
         if response.text.strip().lower() not in {"", "ok", "ok."}:
             raise ContractError("qBittorrent queue response is incompatible")
+
+    def top_priority(self, infohash: str) -> None:
+        if not isinstance(infohash, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", infohash):
+            raise ValueError("invalid infohash")
+        self._ensure_login()
+        response = self._request(
+            "POST", "/api/v2/torrents/topPrio", data={"hashes": infohash.lower()},
+        )
+        if response.text.strip().lower() not in {"", "ok", "ok."}:
+            raise ContractError("qBittorrent queue response is incompatible")

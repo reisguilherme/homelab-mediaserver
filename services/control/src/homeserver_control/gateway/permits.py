@@ -32,6 +32,7 @@ class Permit:
     selected_files: tuple[str, ...] = ()
     budget_bytes: int | None = None
     state: str = "authorized"
+    reported_seeders: int | None = None
 
 
 class PermitRegistry:
@@ -71,6 +72,10 @@ class PermitRegistry:
 
     def _initialize_db(self) -> None:
         with self._session() as connection:
+            # Serialize schema inspection and ALTER across worker/gateway processes.
+            # A second initializer must observe the committed schema, not a stale
+            # PRAGMA result followed by a duplicate-column ALTER.
+            connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS gateway_permits (
@@ -85,6 +90,7 @@ class PermitRegistry:
                   category TEXT NOT NULL DEFAULT '',
                   selected_files_json TEXT NOT NULL,
                   budget_bytes INTEGER,
+                  reported_seeders INTEGER,
                   expires_at TEXT NOT NULL,
                   state TEXT NOT NULL,
                   result_json TEXT
@@ -100,6 +106,10 @@ class PermitRegistry:
                 )
             if "scope_key" not in columns:
                 connection.execute("ALTER TABLE gateway_permits ADD COLUMN scope_key TEXT")
+            if "reported_seeders" not in columns:
+                connection.execute(
+                    "ALTER TABLE gateway_permits ADD COLUMN reported_seeders INTEGER"
+                )
             connection.execute("DROP INDEX IF EXISTS idx_gateway_permit_reservation")
             connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_permit_reservation "
@@ -114,6 +124,7 @@ class PermitRegistry:
                 "WHERE reservation_id IS NOT NULL AND scope_key IS NOT NULL "
                 "AND state IN ('authorized', 'dispatching', 'unknown', 'confirmed')"
             )
+            connection.commit()
 
     @staticmethod
     def _pending_bytes(
@@ -165,6 +176,14 @@ class PermitRegistry:
         return value.lower()
 
     @staticmethod
+    def _validate_reported_seeders(value: int | None) -> int | None:
+        if value is not None and (
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+        ):
+            raise ValueError("invalid reported seeders")
+        return value
+
+    @staticmethod
     def _permit_from_row(row: sqlite3.Row) -> Permit:
         return Permit(
             permit_id=row["permit_id"],
@@ -178,6 +197,7 @@ class PermitRegistry:
             category=row["category"],
             selected_files=tuple(json.loads(row["selected_files_json"])),
             budget_bytes=row["budget_bytes"],
+            reported_seeders=row["reported_seeders"],
             expires_at=PermitRegistry._expires(row["expires_at"]),
             state=row["state"],
             result=json.loads(row["result_json"]) if row["result_json"] is not None else None,
@@ -196,6 +216,7 @@ class PermitRegistry:
         selected_files: tuple[str, ...] = (),
         budget_bytes: int | None = None,
         capacity: CapacityEvidence | None = None,
+        reported_seeders: int | None = None,
     ) -> Permit:
         permit = Permit(
             permit_id=str(uuid4()),
@@ -209,6 +230,7 @@ class PermitRegistry:
             metadata_sha256=self._validate_metadata_digest(metadata_sha256),
             selected_files=selected_files,
             budget_bytes=budget_bytes,
+            reported_seeders=self._validate_reported_seeders(reported_seeders),
         )
         if capacity is not None and (self._db_path is None or reservation_id is None or
                                      isinstance(budget_bytes, bool) or
@@ -293,8 +315,8 @@ class PermitRegistry:
                     INSERT INTO gateway_permits(
                       permit_id, token, operation_id, reservation_id, scope_key, infohash,
                       metadata_sha256, destination, category, selected_files_json,
-                      budget_bytes, expires_at, state, result_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                      budget_bytes, reported_seeders, expires_at, state, result_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
                     """,
                     (
                         permit.permit_id,
@@ -308,6 +330,7 @@ class PermitRegistry:
                         permit.category,
                         json.dumps(permit.selected_files),
                         permit.budget_bytes,
+                        permit.reported_seeders,
                         permit.expires_at.isoformat(),
                         permit.state,
                     ),
@@ -440,6 +463,57 @@ class PermitRegistry:
                 (reservation_id, scope_key),
             ).fetchone()
         return self._permit_from_row(row) if row is not None else None
+
+    def list_active_confirmed_movies(self) -> list[Permit]:
+        """Return admitted movie sources whose reservations are still active."""
+        if self._db_path is None:
+            with self._lock:
+                return [
+                    permit for permit in self._permits.values()
+                    if permit.state == "confirmed" and permit.category == "radarr"
+                    and permit.scope_key is None and permit.reservation_id is not None
+                ]
+        with self._session() as connection:
+            rows = connection.execute(
+                "SELECT p.* FROM gateway_permits p "
+                "JOIN reservations r ON r.id = p.reservation_id "
+                "WHERE p.state = 'confirmed' AND p.category = 'radarr' "
+                "AND p.scope_key IS NULL AND r.media_key LIKE 'movie:tmdb:%' "
+                "AND r.state IN ('reserved', 'downloading', 'waiting_episodes') "
+                "ORDER BY p.permit_id"
+            ).fetchall()
+        return [self._permit_from_row(row) for row in rows]
+
+    def list_active_confirmed_episodes(self) -> list[tuple[str, Permit]]:
+        """Return pending Sonarr episodes grouped across seasons of each series."""
+        if self._db_path is None:
+            # In-memory permits have no reservation media key; grouping by the
+            # reservation is conservative for contract tests.
+            with self._lock:
+                return [
+                    (permit.reservation_id, permit)
+                    for permit in self._permits.values()
+                    if permit.state == "confirmed" and permit.category == "sonarr"
+                    and permit.scope_key is not None and permit.reservation_id is not None
+                ]
+        with self._session() as connection:
+            rows = connection.execute(
+                "SELECT p.*, r.media_key FROM gateway_permits p "
+                "JOIN reservations r ON r.id = p.reservation_id "
+                "WHERE p.state = 'confirmed' AND p.category = 'sonarr' "
+                "AND p.scope_key IS NOT NULL "
+                "AND r.state IN ('reserved', 'downloading', 'waiting_episodes') "
+                "AND r.media_key LIKE 'season:tmdb:%' "
+                "AND NOT EXISTS (SELECT 1 FROM episode_imports e "
+                "WHERE e.permit_id = p.permit_id AND e.state = 'complete') "
+                "ORDER BY p.permit_id"
+            ).fetchall()
+        episodes: list[tuple[str, Permit]] = []
+        for row in rows:
+            match = re.fullmatch(r"season:tmdb:([1-9][0-9]*):[0-9]+", row["media_key"])
+            if match is not None:
+                episodes.append((f"season:tmdb:{match.group(1)}", self._permit_from_row(row)))
+        return episodes
 
     def had_superseded(self, reservation_id: str, *, scope_key: str | None = None) -> bool:
         """Report whether this exact movie or episode slot has used its one failover."""
@@ -643,6 +717,7 @@ class PermitRegistry:
         self, old_token: str, *, infohash: str, metadata_sha256: str,
         selected_files: tuple[str, ...], budget_bytes: int,
         capacity: CapacityEvidence, expires_at: datetime,
+        reported_seeders: int | None = None,
     ) -> Permit:
         """Atomically replace one stopped source while retaining its bytes and audit row."""
         if not isinstance(infohash, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", infohash):
@@ -650,6 +725,7 @@ class PermitRegistry:
         digest = self._validate_metadata_digest(metadata_sha256)
         if digest is None:
             raise ValueError("replacement metadata is required")
+        reported_seeders = self._validate_reported_seeders(reported_seeders)
         if (
             not isinstance(selected_files, tuple) or not selected_files
             or any(not isinstance(name, str) or not name for name in selected_files)
@@ -669,6 +745,7 @@ class PermitRegistry:
                 reservation_id=old.reservation_id, scope_key=old.scope_key,
                 selected_files=selected_files, budget_bytes=budget_bytes,
                 expires_at=expires_at,
+                reported_seeders=reported_seeders,
             )
 
         if self._db_path is None:
@@ -761,11 +838,12 @@ class PermitRegistry:
                 """INSERT INTO gateway_permits(
                     permit_id, token, operation_id, reservation_id, scope_key, infohash,
                     metadata_sha256, destination, category, selected_files_json,
-                    budget_bytes, expires_at, state, result_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'authorized', NULL)""",
+                    budget_bytes, reported_seeders, expires_at, state, result_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'authorized', NULL)""",
                 (new.permit_id, new.token, new.operation_id, new.reservation_id,
                  new.scope_key, new.infohash, new.metadata_sha256, new.destination,
                  new.category, json.dumps(new.selected_files), new.budget_bytes,
+                 new.reported_seeders,
                  new.expires_at.isoformat()),
             )
             connection.execute(

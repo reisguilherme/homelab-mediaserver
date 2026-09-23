@@ -68,6 +68,374 @@ def test_worker_capacity_view_includes_unmanaged_queue_without_names() -> None:
                                 "amount_left": 2000, "state": "stoppedDL", "admitted": False}]
 
 
+def _confirmed_queue_permit(
+    permits: PermitRegistry, infohash: str, *, category: str = "radarr",
+    reported_seeders: int = 0, reservation_suffix: str = "",
+):
+    permit = permits.issue(
+        infohash=infohash, destination="/data/torrents", category=category,
+        reservation_id=f"reservation-{infohash}{reservation_suffix}",
+        scope_key="S01E01" if category == "sonarr" else None,
+        metadata_sha256="a" * 64, selected_files=("media.mkv",),
+        budget_bytes=123, reported_seeders=reported_seeders,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    permits.authorize(
+        token=permit.token, infohash=permit.infohash,
+        destination=permit.destination, metadata_sha256=permit.metadata_sha256,
+        effect=lambda _: {"accepted": True},
+    )
+    return permit
+
+
+class QueueUpstream(Upstream):
+    def __init__(self, ordered_hashes: list[str], seeders: dict[str, int]) -> None:
+        super().__init__()
+        self.ordered_hashes = ordered_hashes
+        self.seeders = seeders
+        self.calls: list[str] = []
+        self.queueing_enabled = True
+        self.categories: dict[str, str] = {}
+        self.paths: dict[str, str] = {}
+        self.states: dict[str, str] = {}
+
+    def read(self, path: str, params: dict | None = None) -> object:
+        if path == "/api/v2/app/preferences":
+            return {"queueing_enabled": self.queueing_enabled}
+        if path == "/api/v2/torrents/info":
+            return [
+                {
+                    "hash": infohash,
+                    "category": self.categories.get(infohash, "radarr"),
+                    "save_path": self.paths.get(infohash, "/data/torrents"),
+                    "state": self.states.get(infohash, "queuedDL"),
+                    "progress": 0.1, "amount_left": 100,
+                    "priority": index + 1,
+                    "num_seeds": 0, "num_complete": self.seeders.get(infohash, -1),
+                    "force_start": False,
+                }
+                for index, infohash in enumerate(self.ordered_hashes)
+            ]
+        return super().read(path, params)
+
+    def top_priority(self, infohash: str) -> None:
+        self.calls.append(infohash)
+        self.ordered_hashes.remove(infohash)
+        self.ordered_hashes.insert(0, infohash)
+
+
+def test_movie_queue_prioritizes_more_seeds_without_reordering_series() -> None:
+    movies = ["a" * 40, "b" * 40, "c" * 40]
+    episode = "d" * 40
+    permits = PermitRegistry()
+    for infohash, reported in zip(movies, (2, 30, 10), strict=True):
+        _confirmed_queue_permit(permits, infohash, reported_seeders=reported)
+    _confirmed_queue_permit(permits, episode, category="sonarr", reported_seeders=100)
+    upstream = QueueUpstream([movies[0], episode, movies[1], movies[2]], {
+        movies[0]: 2, movies[1]: 30, movies[2]: 10, episode: 100,
+    })
+    upstream.categories[episode] = "sonarr"
+    upstream.states[episode] = "stoppedDL"
+    client = TestClient(create_app(permits=permits, upstream=upstream, arr_token="secret"))
+
+    response = client.post("/internal/prioritize-movies", headers={"X-Arr-Token": "secret"})
+    assert response.status_code == 200
+    assert response.json() == {"state": "reordered", "count": 3}
+    assert upstream.ordered_hashes == [movies[1], movies[2], movies[0], episode]
+    assert upstream.calls == [movies[0], movies[2], movies[1]]
+
+    second = client.post("/internal/prioritize-movies", headers={"X-Arr-Token": "secret"})
+    assert second.json() == {"state": "unchanged", "count": 0}
+    assert len(upstream.calls) == 3
+
+
+def test_running_first_episode_stays_ahead_of_seed_ranked_movies() -> None:
+    low, high, first = "a" * 40, "b" * 40, "c" * 40
+    permits = PermitRegistry()
+    _confirmed_queue_permit(permits, low, reported_seeders=1)
+    _confirmed_queue_permit(permits, high, reported_seeders=50)
+    episode = _confirmed_queue_permit(
+        permits, first, category="sonarr", reported_seeders=0,
+    )
+    permits.list_active_confirmed_episodes = lambda: [("season:tmdb:123", episode)]
+    upstream = QueueUpstream([first, low, high], {low: 1, high: 50, first: 1})
+    upstream.categories[first] = "sonarr"
+    upstream.states[first] = "downloading"
+    client = TestClient(create_app(permits=permits, upstream=upstream, arr_token="secret"))
+
+    response = client.post(
+        "/internal/prioritize-movies", headers={"X-Arr-Token": "secret"},
+    )
+    assert response.json() == {"state": "reordered", "count": 3}
+    assert upstream.ordered_hashes == [first, high, low]
+    assert first in upstream.calls
+
+
+def test_running_episode_moves_ahead_even_when_movies_are_already_seed_ranked() -> None:
+    low, high, first = "a" * 40, "b" * 40, "c" * 40
+    permits = PermitRegistry()
+    _confirmed_queue_permit(permits, low, reported_seeders=1)
+    _confirmed_queue_permit(permits, high, reported_seeders=50)
+    episode = _confirmed_queue_permit(permits, first, category="sonarr")
+    permits.list_active_confirmed_episodes = lambda: [("season:tmdb:123", episode)]
+    upstream = QueueUpstream([high, low, first], {low: 1, high: 50, first: 1})
+    upstream.categories[first] = "sonarr"
+    upstream.states[first] = "downloading"
+    client = TestClient(create_app(permits=permits, upstream=upstream, arr_token="secret"))
+
+    assert client.post(
+        "/internal/prioritize-movies", headers={"X-Arr-Token": "secret"},
+    ).json() == {"state": "reordered", "count": 3}
+    assert upstream.ordered_hashes == [first, high, low]
+    assert upstream.calls == [first]
+
+
+def test_movie_queue_uses_in_memory_registry_episode_grouping() -> None:
+    movie, first = "a" * 40, "b" * 40
+    permits = PermitRegistry()
+    _confirmed_queue_permit(permits, movie, reported_seeders=10)
+    _confirmed_queue_permit(permits, first, category="sonarr")
+    upstream = QueueUpstream([movie, first], {movie: 10, first: 1})
+    upstream.categories[first] = "sonarr"
+    upstream.states[first] = "downloading"
+    client = TestClient(create_app(permits=permits, upstream=upstream, arr_token="secret"))
+
+    assert client.post(
+        "/internal/prioritize-movies", headers={"X-Arr-Token": "secret"},
+    ).json() == {"state": "reordered", "count": 2}
+    assert upstream.ordered_hashes == [first, movie]
+
+
+def test_first_episodes_of_two_series_keep_their_relative_queue_order() -> None:
+    low, high, first_a, first_b = "a" * 40, "b" * 40, "c" * 40, "d" * 40
+    permits = PermitRegistry()
+    _confirmed_queue_permit(permits, low, reported_seeders=1)
+    _confirmed_queue_permit(permits, high, reported_seeders=50)
+    episode_a = _confirmed_queue_permit(permits, first_a, category="sonarr")
+    episode_b = _confirmed_queue_permit(permits, first_b, category="sonarr")
+    permits.list_active_confirmed_episodes = lambda: [
+        ("season:tmdb:111", episode_a), ("season:tmdb:222", episode_b),
+    ]
+    upstream = QueueUpstream([low, first_b, high, first_a], {
+        low: 1, high: 50, first_a: 1, first_b: 1,
+    })
+    upstream.categories[first_a] = upstream.categories[first_b] = "sonarr"
+    upstream.states[first_a] = upstream.states[first_b] = "downloading"
+    client = TestClient(create_app(permits=permits, upstream=upstream, arr_token="secret"))
+
+    assert client.post(
+        "/internal/prioritize-movies", headers={"X-Arr-Token": "secret"},
+    ).json() == {"state": "reordered", "count": 4}
+    assert upstream.ordered_hashes == [first_b, first_a, high, low]
+
+
+def test_episode_scope_comparison_is_numeric() -> None:
+    movie, earlier, later = "a" * 40, "b" * 40, "c" * 40
+    permits = PermitRegistry()
+    _confirmed_queue_permit(permits, movie, reported_seeders=10)
+    first = _confirmed_queue_permit(permits, earlier, category="sonarr")
+    future = _confirmed_queue_permit(permits, later, category="sonarr")
+    first.scope_key = "S01E99"
+    future.scope_key = "S01E100"
+    permits.list_active_confirmed_episodes = lambda: [
+        ("season:tmdb:123", future), ("season:tmdb:123", first),
+    ]
+    upstream = QueueUpstream([later, movie, earlier], {
+        later: 10, movie: 10, earlier: 1,
+    })
+    upstream.categories[earlier] = upstream.categories[later] = "sonarr"
+    upstream.states[earlier] = upstream.states[later] = "downloading"
+    client = TestClient(create_app(permits=permits, upstream=upstream, arr_token="secret"))
+
+    assert client.post(
+        "/internal/prioritize-movies", headers={"X-Arr-Token": "secret"},
+    ).json() == {"state": "reordered", "count": 2}
+    assert upstream.ordered_hashes[0] == earlier
+    assert future.infohash not in upstream.calls
+
+
+def test_future_stopped_episode_is_not_promoted_across_seasons() -> None:
+    low, high, first, later = "a" * 40, "b" * 40, "c" * 40, "d" * 40
+    permits = PermitRegistry()
+    _confirmed_queue_permit(permits, low, reported_seeders=1)
+    _confirmed_queue_permit(permits, high, reported_seeders=50)
+    early = _confirmed_queue_permit(permits, first, category="sonarr")
+    future = _confirmed_queue_permit(permits, later, category="sonarr")
+    early.scope_key = "S01E100"
+    future.scope_key = "S02E01"
+    permits.list_active_confirmed_episodes = lambda: [
+        ("season:tmdb:123", future), ("season:tmdb:123", early),
+    ]
+    upstream = QueueUpstream([later, first, low, high], {
+        low: 1, high: 50, first: 1, later: 100,
+    })
+    upstream.categories[first] = upstream.categories[later] = "sonarr"
+    upstream.states[first] = "downloading"
+    upstream.states[later] = "stoppedDL"
+    client = TestClient(create_app(permits=permits, upstream=upstream, arr_token="secret"))
+
+    assert client.post(
+        "/internal/prioritize-movies", headers={"X-Arr-Token": "secret"},
+    ).json() == {"state": "reordered", "count": 3}
+    assert upstream.ordered_hashes[0] == first
+    assert upstream.ordered_hashes.index(high) < upstream.ordered_hashes.index(low)
+    assert later not in upstream.calls
+
+
+def test_missing_first_episode_does_not_promote_later_episode() -> None:
+    low, high, first, later = "a" * 40, "b" * 40, "c" * 40, "d" * 40
+    permits = PermitRegistry()
+    _confirmed_queue_permit(permits, low, reported_seeders=1)
+    _confirmed_queue_permit(permits, high, reported_seeders=50)
+    early = _confirmed_queue_permit(permits, first, category="sonarr")
+    future = _confirmed_queue_permit(permits, later, category="sonarr")
+    early.scope_key = "S01E01"
+    future.scope_key = "S01E02"
+    permits.list_active_confirmed_episodes = lambda: [
+        ("season:tmdb:123", early), ("season:tmdb:123", future),
+    ]
+    upstream = QueueUpstream([low, high, later], {low: 1, high: 50, later: 100})
+    upstream.categories[later] = "sonarr"
+    upstream.states[later] = "downloading"
+    client = TestClient(create_app(permits=permits, upstream=upstream, arr_token="secret"))
+
+    assert client.post(
+        "/internal/prioritize-movies", headers={"X-Arr-Token": "secret"},
+    ).json() == {"state": "reordered", "count": 2}
+    assert later not in upstream.calls
+
+
+def test_movie_queue_uses_reported_seeds_when_qbit_has_no_queued_observation() -> None:
+    low, high = "a" * 40, "b" * 40
+    permits = PermitRegistry()
+    _confirmed_queue_permit(permits, low, reported_seeders=1)
+    _confirmed_queue_permit(permits, high, reported_seeders=50)
+    upstream = QueueUpstream([low, high], {low: -1, high: -1})
+    client = TestClient(create_app(permits=permits, upstream=upstream, arr_token="secret"))
+
+    assert client.post(
+        "/internal/prioritize-movies", headers={"X-Arr-Token": "secret"},
+    ).json() == {"state": "reordered", "count": 2}
+    assert upstream.ordered_hashes == [high, low]
+
+
+def test_movie_queue_reads_persisted_reported_seeds_for_queued_movies(tmp_path) -> None:
+    database = tmp_path / "control.sqlite"
+    repository = ReservationRepository(database)
+    repository.initialize()
+    permits = PermitRegistry(database)
+    low, high = "a" * 40, "b" * 40
+    for index, (infohash, reported) in enumerate(((low, 1), (high, 50)), start=1):
+        reservation = repository.reserve(
+            request_id=f"seerr:movie:{index}", source_id=f"seer-{index}",
+            media_key=f"movie:tmdb:{index}", filesystem_id="test-uuid",
+            budget_bytes=0, free_bytes=10_000, total_bytes=20_000,
+        )
+        permit = permits.issue(
+            infohash=infohash, destination="/data/torrents", category="radarr",
+            reservation_id=reservation.reservation_id, metadata_sha256="a" * 64,
+            selected_files=("movie.mkv",), budget_bytes=123,
+            reported_seeders=reported,
+            capacity=CapacityEvidence(free_bytes=10_000, remaining_by_hash={}),
+            expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        )
+        permits.authorize(
+            token=permit.token, infohash=permit.infohash,
+            destination=permit.destination, metadata_sha256=permit.metadata_sha256,
+            effect=lambda _: {"accepted": True},
+        )
+    # A fresh registry proves the priority endpoint reads the stored seed reports.
+    upstream = QueueUpstream([low, high], {low: -1, high: -1})
+    client = TestClient(create_app(
+        permits=PermitRegistry(database), upstream=upstream, arr_token="secret",
+    ))
+
+    response = client.post(
+        "/internal/prioritize-movies", headers={"X-Arr-Token": "secret"},
+    )
+    assert response.json() == {"state": "reordered", "count": 2}
+    assert upstream.ordered_hashes == [high, low]
+
+
+def test_movie_queue_requires_worker_and_enabled_qbit_queue() -> None:
+    permits = PermitRegistry()
+    infohash = "a" * 40
+    _confirmed_queue_permit(permits, infohash, reported_seeders=10)
+    upstream = QueueUpstream([infohash], {infohash: 10})
+    client = TestClient(create_app(permits=permits, upstream=upstream, arr_token="secret"))
+
+    assert client.post("/internal/prioritize-movies").status_code == 403
+    client.post("/api/v2/auth/login", data={"username": "arr", "password": "secret"})
+    assert client.post("/internal/prioritize-movies").status_code == 403
+    upstream.queueing_enabled = False
+    assert client.post(
+        "/internal/prioritize-movies", headers={"X-Arr-Token": "secret"},
+    ).status_code == 409
+    assert upstream.calls == []
+
+
+def test_movie_queue_rejects_ambiguous_permits_for_one_torrent() -> None:
+    low, high = "a" * 40, "b" * 40
+    permits = PermitRegistry()
+    _confirmed_queue_permit(permits, low, reported_seeders=1)
+    _confirmed_queue_permit(permits, high, reported_seeders=50)
+    _confirmed_queue_permit(
+        permits, high, reported_seeders=100, reservation_suffix="-duplicate",
+    )
+    upstream = QueueUpstream([low, high], {low: 1, high: 50})
+    client = TestClient(create_app(permits=permits, upstream=upstream, arr_token="secret"))
+
+    response = client.post(
+        "/internal/prioritize-movies", headers={"X-Arr-Token": "secret"},
+    )
+    assert response.status_code == 409
+    assert upstream.calls == []
+
+
+def test_movie_queue_rejects_changed_torrent_identity_after_priority_update() -> None:
+    low, high = "a" * 40, "b" * 40
+    permits = PermitRegistry()
+    _confirmed_queue_permit(permits, low, reported_seeders=1)
+    _confirmed_queue_permit(permits, high, reported_seeders=50)
+
+    class ChangedAfterPromotion(QueueUpstream):
+        def top_priority(self, infohash: str) -> None:
+            super().top_priority(infohash)
+            self.paths[infohash] = "/data/other"
+
+    upstream = ChangedAfterPromotion([low, high], {low: 1, high: 50})
+    client = TestClient(create_app(permits=permits, upstream=upstream, arr_token="secret"))
+
+    response = client.post(
+        "/internal/prioritize-movies", headers={"X-Arr-Token": "secret"},
+    )
+    assert response.status_code == 409
+    assert upstream.calls == [low, high]
+
+
+@pytest.mark.parametrize("changed", ["category", "save_path", "state", "force_start"])
+def test_movie_queue_ignores_torrents_with_changed_identity_or_unsafe_state(changed) -> None:
+    low, high = "a" * 40, "b" * 40
+    permits = PermitRegistry()
+    _confirmed_queue_permit(permits, low, reported_seeders=1)
+    _confirmed_queue_permit(permits, high, reported_seeders=50)
+    upstream = QueueUpstream([low, high], {low: 1, high: 50})
+    if changed == "category":
+        upstream.categories[high] = "sonarr"
+    elif changed == "save_path":
+        upstream.paths[high] = "/other"
+    elif changed == "state":
+        upstream.states[high] = "stoppedDL"
+    else:
+        upstream.states[high] = "forcedDL"
+    client = TestClient(create_app(permits=permits, upstream=upstream, arr_token="secret"))
+
+    assert client.post(
+        "/internal/prioritize-movies", headers={"X-Arr-Token": "secret"},
+    ).json() == {"state": "unchanged", "count": 0}
+    assert upstream.calls == []
+
+
 def test_arr_login_and_read_contract() -> None:
     client, _, _ = _client()
     assert client.get("/api/v2/app/webapiVersion").status_code == 403

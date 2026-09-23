@@ -61,6 +61,15 @@ class FakeSourceReconciler:
         return 2
 
 
+class FakeMoviePrioritizer:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def prioritize(self) -> str:
+        self.calls += 1
+        return "unchanged"
+
+
 @pytest.mark.asyncio
 async def test_worker_reserves_approved_requests_without_dispatching_downloads() -> None:
     source = FakeSource(
@@ -224,6 +233,106 @@ async def test_worker_reconciles_uncertain_sources_before_polling_seerr() -> Non
 
 
 @pytest.mark.asyncio
+async def test_worker_skips_priority_if_seerr_is_unavailable() -> None:
+    prioritizer = FakeMoviePrioritizer()
+
+    class FailingSource:
+        async def list_approved(self, page: int) -> list[dict[str, object]]:
+            assert prioritizer.calls == 0
+            raise RuntimeError("Seerr unavailable")
+
+    cycle = WorkerCycle(
+        source=FailingSource(), scheduler=FakeScheduler([]),
+        movie_prioritizer=prioritizer,
+    )
+
+    with pytest.raises(RuntimeError, match="Seerr unavailable"):
+        await cycle.run_once()
+
+    assert prioritizer.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_worker_prioritizes_only_after_series_queue_reconciliation() -> None:
+    events: list[str] = []
+
+    class ReconciledSeries:
+        async def acquire(self, media_key: str, reservation_id: str) -> str:
+            events.append("series")
+            return "waiting_episodes"
+
+    class Priority:
+        async def prioritize(self) -> str:
+            events.append("priority")
+            return "reordered"
+
+    cycle = WorkerCycle(
+        source=FakeSource(pages=[[
+            {"source_id": "series", "media_key": "season:tmdb:123:1", "kind": "season"},
+        ]]),
+        scheduler=FakeScheduler([ReservationResult(True, reservation_id="r1")]),
+        series_acquirer=ReconciledSeries(), movie_prioritizer=Priority(),
+    )
+    await cycle.run_once()
+    assert events == ["series", "priority"]
+
+
+@pytest.mark.asyncio
+async def test_worker_skips_priority_when_series_reconciliation_fails() -> None:
+    prioritizer = FakeMoviePrioritizer()
+
+    class FailingSeries:
+        async def acquire(self, media_key: str, reservation_id: str) -> str:
+            raise RuntimeError("Sonarr unavailable")
+
+    cycle = WorkerCycle(
+        source=FakeSource(pages=[[
+            {"source_id": "series", "media_key": "season:tmdb:123:1", "kind": "season"},
+        ]]),
+        scheduler=FakeScheduler([ReservationResult(True, reservation_id="r1")]),
+        series_acquirer=FailingSeries(), movie_prioritizer=prioritizer,
+    )
+    await cycle.run_once()
+    assert prioritizer.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_worker_skips_priority_when_a_season_is_deferred() -> None:
+    prioritizer = FakeMoviePrioritizer()
+    cycle = WorkerCycle(
+        source=FakeSource(pages=[[
+            {"source_id": "series", "media_key": "season:tmdb:123:1", "kind": "season"},
+        ]]),
+        scheduler=FakeScheduler([ReservationResult(False, reason="filesystem_unavailable")]),
+        movie_prioritizer=prioritizer,
+    )
+    await cycle.run_once()
+    assert prioritizer.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_priority_failure_does_not_block_approved_requests() -> None:
+    class FailingPrioritizer:
+        async def prioritize(self) -> str:
+            raise RuntimeError("qBittorrent unavailable")
+
+    source = FakeSource(pages=[[
+        {"source_id": "42", "media_key": "movie:tmdb:10", "kind": "movie"},
+    ]])
+    scheduler = FakeScheduler([ReservationResult(True, reservation_id="r1")])
+    acquirer = FakeAcquirer()
+    cycle = WorkerCycle(
+        source=source, scheduler=scheduler, acquirer=acquirer,
+        movie_prioritizer=FailingPrioritizer(),
+    )
+
+    report = await cycle.run_once()
+
+    assert report.grabbed == 1
+    assert acquirer.calls == [("movie:tmdb:10", "r1")]
+
+
+@pytest.mark.asyncio
 async def test_worker_admits_every_page_before_slow_acquisition() -> None:
     source = FakeSource(pages=[
         [{"source_id": "1", "media_key": "movie:tmdb:10", "kind": "movie"}],
@@ -267,3 +376,4 @@ def test_worker_reads_subdl_key_from_private_file(tmp_path, monkeypatch) -> None
     assert cycle.series_acquirer.subtitle_source.api_key == "test-subdl-key"
     assert cycle.series_acquirer.gateway_url == "http://download-gateway:8081"
     assert cycle.series_acquirer.arr_token == "gateway-test"
+    assert cycle.movie_prioritizer.gateway_url == "http://download-gateway:8081"

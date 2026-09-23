@@ -24,6 +24,7 @@ from .acquisition import MovieAcquirer
 from .cancellation import CancellationReconciler
 from .capacity_evidence import read_capacity_evidence
 from .finalization import MovieFinalizer
+from .movie_priority import MoviePrioritizer
 from .runtime import WorkerCycle
 from .scheduler import AdmissionScheduler, FilesystemSnapshot
 from .series_acquisition import SeriesAcquirer
@@ -180,6 +181,12 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 arr_token=arr_token, client=httpx.AsyncClient(timeout=httpx.Timeout(15.0)),
             ) if permits is not None and arr_token else None
         ),
+        movie_prioritizer=(
+            MoviePrioritizer(
+                gateway_url="http://download-gateway:8081", arr_token=arr_token,
+                client=httpx.AsyncClient(timeout=httpx.Timeout(10.0)),
+            ) if permits is not None and arr_token else None
+        ),
     )
 
 
@@ -219,6 +226,10 @@ async def _run_forever(
             getattr(cycle, "source_reconciler", None), SourceReconciler
         ):
             await cycle.source_reconciler.client.aclose()
+        if cycle is not None and isinstance(
+            getattr(cycle, "movie_prioritizer", None), MoviePrioritizer
+        ):
+            await cycle.movie_prioritizer.client.aclose()
 
 
 def main() -> None:
