@@ -19,3 +19,16 @@ def valid_srt(data: bytes) -> bool:
     except UnicodeDecodeError:
         return False
     return bool(_CUE.search(text[:16384])) and "\x00" not in text
+
+
+def normalize_srt(data: bytes) -> bytes | None:
+    """Return a structurally valid UTF-8 SRT, including legacy Windows-1252 files."""
+    if valid_srt(data):
+        return data
+    if not 30 <= len(data) <= MAX_SRT_BYTES:
+        return None
+    try:
+        normalized = data.decode("cp1252").encode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return normalized if valid_srt(normalized) else None

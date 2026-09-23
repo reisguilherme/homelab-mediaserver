@@ -6,6 +6,7 @@ import pytest
 from homeserver_control.worker.subdl import SubDLSource
 
 _SRT = b"1\n00:00:01,000 --> 00:00:02,000\nOla!\n"
+_SRT_CP1252 = "1\r\n00:00:01,000 --> 00:00:02,000\r\nAção!\r\n".encode("cp1252")
 
 
 @pytest.mark.asyncio
@@ -49,6 +50,35 @@ async def test_subdl_fetches_only_exact_release_brazilian_episode():
         ("api.subdl.com", "/api/v1/subtitles"),
         ("dl.subdl.com", "/subtitle/123/abc"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_subdl_normalizes_exact_release_cp1252_subtitle_to_utf8():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.subdl.com":
+            return httpx.Response(200, json={
+                "status": True,
+                "results": [{"tmdb_id": 97546, "type": "tv"}],
+                "subtitles": [{
+                    "language": "BR_PT", "season": 4, "episode": 1,
+                    "unpack_files": [{
+                        "language": "BR_PT", "season": 4, "episode": 1,
+                        "release_name": "Ted.Lasso.S04E01.1080p.WEB.H264-CAKES",
+                        "format": "srt", "size": len(_SRT_CP1252),
+                        "url": "/subtitle/123/abc",
+                    }],
+                }],
+            })
+        return httpx.Response(200, content=_SRT_CP1252)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = SubDLSource(api_key="test-key", client=client)
+        result = await source.fetch(
+            tmdb_id=97546, release_title="Ted Lasso S04E01 1080p WEB H264 CAKES",
+            season=4, episode=1,
+        )
+
+    assert result == "1\r\n00:00:01,000 --> 00:00:02,000\r\nAção!\r\n".encode()
 
 
 @pytest.mark.asyncio

@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from homeserver_control.domain.subtitle_content import MAX_SRT_BYTES, valid_srt
+from homeserver_control.domain.subtitle_content import MAX_SRT_BYTES, normalize_srt
 
 _DOWNLOAD_PATH = re.compile(r"/subtitle/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+")
 
@@ -124,8 +124,10 @@ class SubDLSource:
                                 break
                             chunks.append(chunk)
                     content = b"".join(chunks)
-                    if total == size and valid_srt(content):
-                        return content
+                    if total == size:
+                        normalized = normalize_srt(content)
+                        if normalized is not None:
+                            return normalized
                 except (httpx.HTTPError, ValueError):
                     continue
         return None
