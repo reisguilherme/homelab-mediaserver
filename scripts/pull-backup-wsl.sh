@@ -7,7 +7,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 repo="$root/backup/restic"
 key="$HOME/.ssh/homeserver_backup_ed25519"
 password_file="$HOME/.config/homeserver/restic-password"
-host=${HOMESERVER_BACKUP_HOST:-192.168.1.19}
+host=${HOMESERVER_BACKUP_HOST:-192.168.1.20}
 [[ -f "$key" && -f "$password_file" && -f "$repo/config" ]] || {
   echo 'backup key, password, or local repository is unavailable' >&2
   exit 1
