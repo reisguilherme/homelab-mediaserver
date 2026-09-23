@@ -304,3 +304,119 @@ async def test_acquirer_rejects_ambiguous_or_portugal_subtitle(tmp_path, subtitl
         )
         assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "no_eligible_release"
     assert permits.get_for_reservation(reservation_id) is None
+
+
+@pytest.mark.asyncio
+async def test_acquirer_resolves_magnet_to_verified_cached_torrent(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path)
+    torrent = _torrent(subtitle=True)
+    inspected = inspect_torrent(torrent)
+    cache_url = f"https://itorrents.net/torrent/{inspected.infohash.upper()}.torrent"
+    grabbed = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/movie":
+            return httpx.Response(200, json=[{"id": 2, "tmdbId": 1101383, "hasFile": False}])
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            return httpx.Response(200, json=[{
+                "guid": "magnet-release", "indexerId": 2,
+                "title": "Film 2160p BluRay REMUX DV Atmos",
+                "size": 1_500_100_000,
+                "downloadUrl": "http://prowlarr:9696/2/download?id=1",
+                "infoHash": inspected.infohash.upper(), "rejected": False,
+                "quality": {"quality": {
+                    "source": "bluray", "modifier": "remux", "resolution": 2160,
+                }},
+            }])
+        if request.url.path == "/2/download":
+            return httpx.Response(302, headers={
+                "location": f"magnet:?xt=urn:btih:{inspected.infohash.upper()}&dn=Film",
+            })
+        if str(request.url) == cache_url:
+            return httpx.Response(200, content=torrent)
+        if request.url.path == "/api/v3/release" and request.method == "POST":
+            grabbed.append(request.read())
+            return httpx.Response(200, json={"ok": True})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
+        )
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "grabbed"
+    assert len(grabbed) == 1
+    assert b'"downloadUrl":"http://prowlarr:9696/2/download?id=1"' in grabbed[0]
+    assert permits.get_for_reservation(reservation_id).infohash == inspected.infohash
+
+
+@pytest.mark.asyncio
+async def test_acquirer_rejects_magnet_cache_with_different_infohash(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path)
+    torrent = _torrent(subtitle=True)
+    inspected = inspect_torrent(torrent)
+    wrong_hash = "a" * 40 if inspected.infohash != "a" * 40 else "b" * 40
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/movie":
+            return httpx.Response(200, json=[{"id": 2, "tmdbId": 1101383, "hasFile": False}])
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            return httpx.Response(200, json=[{
+                "guid": "magnet-release", "title": "Film 1080p WEB-DL",
+                "size": 1_500_100_000,
+                "downloadUrl": "http://prowlarr:9696/2/download?id=1",
+                "rejected": False, "quality": {"quality": {
+                    "source": "webdl", "modifier": "none", "resolution": 1080,
+                }},
+            }])
+        if request.url.path == "/2/download":
+            return httpx.Response(301, headers={"location": f"magnet:?xt=urn:btih:{wrong_hash}"})
+        if request.url.host == "itorrents.net":
+            return httpx.Response(200, content=torrent)
+        raise AssertionError("grab must not occur")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
+        )
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "no_eligible_release"
+    assert permits.get_for_reservation(reservation_id) is None
+
+
+@pytest.mark.asyncio
+async def test_acquirer_rejects_redirecting_torrent_cache(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path)
+    inspected = inspect_torrent(_torrent(subtitle=True))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/movie":
+            return httpx.Response(200, json=[{"id": 2, "tmdbId": 1101383, "hasFile": False}])
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            return httpx.Response(200, json=[{
+                "guid": "loop", "title": "Film 1080p BluRay",
+                "size": 1_500_100_000,
+                "downloadUrl": "http://prowlarr:9696/2/download?id=1",
+                "rejected": False, "quality": {"quality": {
+                    "source": "bluray", "modifier": "none", "resolution": 1080,
+                }},
+            }])
+        if request.url.path in {"/2/download", f"/torrent/{inspected.infohash.upper()}.torrent"}:
+            return httpx.Response(301, headers={
+                "location": f"magnet:?xt=urn:btih:{inspected.infohash}",
+            })
+        raise AssertionError("grab must not occur")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
+        )
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "no_eligible_release"
+    assert permits.get_for_reservation(reservation_id) is None

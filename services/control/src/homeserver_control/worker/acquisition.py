@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from homeserver_control.domain.magnet import magnet_infohash
 from homeserver_control.domain.policy import MOVIE_LIMIT_BYTES
 from homeserver_control.domain.torrent_bytes import TorrentBytesError, inspect_torrent
 from homeserver_control.gateway.permits import PermitRegistry
@@ -24,6 +25,7 @@ LOGGER = logging.getLogger(__name__)
 _VIDEO_SUFFIXES = {".mkv", ".mp4", ".m4v", ".avi", ".mov"}
 _SUBTITLE_SUFFIXES = {".srt", ".ass", ".ssa", ".vtt"}
 _MAX_METADATA = 16 * 1024 * 1024
+_TORRENT_CACHE = "https://itorrents.net/torrent"
 
 
 class MovieAcquirer:
@@ -87,9 +89,27 @@ class MovieAcquirer:
             item.path for item in (*videos, *subtitles)
         )
 
-    async def _metadata(self, url: str) -> bytes | None:
+    async def _metadata(
+        self, url: str, *, allow_magnet: bool = True
+    ) -> bytes | None:
         try:
             async with self.client.stream("GET", url, follow_redirects=False) as response:
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    if not allow_magnet:
+                        return None
+                    infohash = magnet_infohash(response.headers.get("location"))
+                    if infohash is None:
+                        return None
+                    cache_url = f"{_TORRENT_CACHE}/{infohash.upper()}.torrent"
+                    cached = await self._metadata(cache_url, allow_magnet=False)
+                    if cached is None:
+                        return None
+                    try:
+                        if inspect_torrent(cached).infohash != infohash:
+                            return None
+                    except TorrentBytesError:
+                        return None
+                    return cached
                 if response.status_code != 200:
                     return None
                 content_length = response.headers.get("content-length")

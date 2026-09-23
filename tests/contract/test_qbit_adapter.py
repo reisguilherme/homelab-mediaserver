@@ -36,3 +36,30 @@ def test_adapter_forwards_only_verified_torrent_bytes() -> None:
     )
     assert result["accepted"] is True
     assert paths == ["/api/v2/auth/login", "/api/v2/torrents/add", "/api/v2/torrents/info"]
+
+
+def test_adapter_forwards_permitted_magnet() -> None:
+    infohash = "a" * 40
+    magnet = f"magnet:?xt=urn:btih:{infohash}&dn=Film"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return httpx.Response(200, text="Ok.", headers={"set-cookie": "SID=session"})
+        if request.url.path == "/api/v2/torrents/add":
+            assert b'name="urls"' in request.content
+            assert magnet.encode() in request.content
+            assert b'name="torrents"' not in request.content
+            return httpx.Response(200, text="Ok.")
+        if request.url.path == "/api/v2/torrents/info":
+            assert request.url.params["hashes"] == infohash
+            return httpx.Response(200, json=[{"hash": infohash}])
+        raise AssertionError(request.url.path)
+
+    adapter = QBittorrentAdapter(
+        base_url="http://qbittorrent:8080", username="admin", password="secret",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert adapter.add_torrent({
+        "infohash": infohash, "savepath": "/data/torrents",
+        "category": "radarr", "magnet_url": magnet,
+    })["accepted"] is True

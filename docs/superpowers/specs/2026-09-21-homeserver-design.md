@@ -279,6 +279,8 @@ Nome de release e tamanho informado pelo indexador não comprovam áudio, legend
 
 Para pacotes de temporada, inspecionar a lista de arquivos e os tamanhos antes de liberar o conteúdo principal. Se os metadados necessários não puderem ser obtidos, deixar o candidato pendente em vez de presumir conformidade. Releases compactados que impeçam a inspeção prévia ficam fora da seleção automática inicial.
 
+Quando o Prowlarr redirecionar para um magnet v1, o controlador pode buscar o `.torrent` em um cache de metadados, limitado em tamanho, desde que o hash do pacote corresponda ao hash do magnet e o manifesto passe nas mesmas regras de tamanho e idioma. O gateway só encaminha esse magnet com uma permissão persistida para o hash, os arquivos selecionados e uma reserva ativa. Cache indisponível, hash divergente ou metadados não verificáveis mantêm o candidato pendente.
+
 Após o download, validar resolução e faixas com ferramenta de inspeção de mídia. Conteúdo somente com áudio original deve ter legenda em português brasileiro confirmada antes de ser anunciado como atendendo ao pedido. Se a legenda estiver indisponível, apresentar estado específico e continuar a busca, evitando notificações de conclusão incorretas.
 
 ## 9. Solicitações, fila e reservas

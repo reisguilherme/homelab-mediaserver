@@ -226,6 +226,51 @@ class PermitRegistry:
             raise PermissionError("permit_required_or_ambiguous")
         return matches[0]
 
+    def find_for_magnet(
+        self, *, infohash: str, destination: str, category: str
+    ) -> Permit:
+        """Resolve a magnet only after metadata and reservation were verified.
+
+        The v1 infohash identifies the inspected torrent info dictionary. A
+        headerless Arr request cannot choose a permit token or bypass its
+        reserved budget.
+        """
+        if self._db_path is None:
+            with self._lock:
+                matches = [
+                    item for item in self._permits.values()
+                    if item.infohash == infohash.lower()
+                    and item.destination == destination
+                    and item.category == category
+                    and item.metadata_sha256 is not None
+                    and item.budget_bytes is not None and item.budget_bytes > 0
+                    and item.selected_files
+                    and item.state in {"authorized", "confirmed"}
+                    and datetime.now(UTC) < item.expires_at
+                ]
+        else:
+            with self._session() as connection:
+                rows = connection.execute(
+                    """
+                    SELECT p.* FROM gateway_permits p
+                    JOIN reservations r ON r.id = p.reservation_id
+                    WHERE p.infohash = ? AND p.destination = ? AND p.category = ?
+                      AND p.state IN ('authorized', 'confirmed')
+                      AND p.metadata_sha256 IS NOT NULL
+                      AND p.budget_bytes > 0 AND p.budget_bytes <= r.budget_bytes
+                      AND p.selected_files_json != '[]'
+                      AND r.state IN ('reserved', 'downloading', 'waiting_episodes')
+                    """,
+                    (infohash.lower(), destination, category),
+                ).fetchall()
+            matches = [
+                self._permit_from_row(row) for row in rows
+                if datetime.now(UTC) < self._expires(row["expires_at"])
+            ]
+        if len(matches) != 1:
+            raise PermissionError("permit_required_or_ambiguous")
+        return matches[0]
+
     def is_admitted(self, infohash: str) -> bool:
         if self._db_path is None:
             with self._lock:

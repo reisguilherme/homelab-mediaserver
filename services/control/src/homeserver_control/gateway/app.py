@@ -14,6 +14,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
 
 from homeserver_control.adapters.qbittorrent import QBittorrentAdapter
+from homeserver_control.domain.magnet import magnet_infohash
 from homeserver_control.domain.torrent_bytes import TorrentBytesError, inspect_torrent
 from homeserver_control.recovery import recovery_mode_blocks
 
@@ -179,66 +180,95 @@ def create_app(
             metadata_sha256 = payload.get("metadata_sha256")
             if metadata_sha256 is not None and not isinstance(metadata_sha256, str):
                 raise HTTPException(status_code=422, detail="invalid metadata digest")
-        elif content_type.startswith("multipart/form-data"):
+        elif content_type.startswith(("multipart/form-data", "application/x-www-form-urlencoded")):
             if internal and not permit_token:
                 raise HTTPException(status_code=403, detail="admission permit required")
             try:
                 form = await request.form()
             except (AssertionError, ValueError) as error:
                 raise HTTPException(status_code=422, detail="invalid multipart body") from error
-            if set(form) - {"torrents", "category", "savepath", "stopped"}:
-                raise HTTPException(status_code=422, detail="unsupported torrent options")
             stopped = form.get("stopped", "false")
             if (
-                len(form.getlist("torrents")) != 1
-                or not isinstance(stopped, str)
+                not isinstance(stopped, str)
                 or stopped.lower() != "false"
             ):
                 raise HTTPException(status_code=422, detail="unsupported torrent state")
-            upload = form.get("torrents")
             destination = form.get("savepath", "/data/torrents")
             category = form.get("category", "")
-            if not hasattr(upload, "read") or not isinstance(destination, str):
-                raise HTTPException(
-                    status_code=422, detail="torrent file and destination are required"
-                )
-            torrent_bytes = await upload.read(16 * 1024 * 1024 + 1)
-            if len(torrent_bytes) > 16 * 1024 * 1024:
-                raise HTTPException(status_code=413, detail="torrent metadata is too large")
-            if internal and x_infohash and permit_token:
-                # Compatibility with the internal token API. The real Arr path
-                # always parses the torrent and resolves a persisted permit.
-                infohash = x_infohash
-                metadata_sha256 = sha256(torrent_bytes).hexdigest()
-            else:
+            if "urls" in form:
+                if set(form) - {"urls", "category", "savepath", "stopped"}:
+                    raise HTTPException(status_code=422, detail="unsupported torrent options")
+                urls = form.getlist("urls")
+                magnet = urls[0] if len(urls) == 1 else None
+                infohash = magnet_infohash(magnet)
+                if infohash is None or not isinstance(category, str) or not category:
+                    raise HTTPException(
+                        status_code=422, detail="single v1 magnet and category required"
+                    )
+                if not isinstance(destination, str):
+                    raise HTTPException(status_code=422, detail="invalid destination")
                 try:
-                    inspected = inspect_torrent(torrent_bytes)
-                except TorrentBytesError as error:
-                    raise HTTPException(status_code=422, detail=str(error)) from error
-                infohash = inspected.infohash
-                metadata_sha256 = inspected.metadata_sha256
-                total_bytes = inspected.total_bytes
-                if not isinstance(category, str) or not category:
-                    raise HTTPException(status_code=422, detail="category is required")
-                try:
-                    matched = permits.find_for_metadata(
-                        infohash=infohash,
-                        metadata_sha256=metadata_sha256,
-                        destination=destination,
-                        category=category,
+                    matched = permits.find_for_magnet(
+                        infohash=infohash, destination=destination, category=category,
                     )
                 except PermissionError as error:
                     raise HTTPException(status_code=403, detail=str(error)) from error
                 permit_token = matched.token
-            payload = {
-                "infohash": infohash,
-                "savepath": destination,
-                "torrent_bytes": torrent_bytes,
-                "category": category,
-            }
+                metadata_sha256 = matched.metadata_sha256
+                payload = {
+                    "infohash": infohash, "savepath": destination,
+                    "magnet_url": magnet, "category": category,
+                }
+            else:
+                if not content_type.startswith("multipart/form-data"):
+                    raise HTTPException(status_code=403, detail="verified torrent required")
+                if set(form) - {"torrents", "category", "savepath", "stopped"}:
+                    raise HTTPException(status_code=422, detail="unsupported torrent options")
+                upload = form.get("torrents")
+                if (
+                    len(form.getlist("torrents")) != 1
+                    or not hasattr(upload, "read")
+                    or not isinstance(destination, str)
+                ):
+                    raise HTTPException(
+                        status_code=422, detail="torrent file and destination are required"
+                    )
+                torrent_bytes = await upload.read(16 * 1024 * 1024 + 1)
+                if len(torrent_bytes) > 16 * 1024 * 1024:
+                    raise HTTPException(status_code=413, detail="torrent metadata is too large")
+                if internal and x_infohash and permit_token:
+                    # Compatibility with the internal token API. The real Arr path
+                    # always parses the torrent and resolves a persisted permit.
+                    infohash = x_infohash
+                    metadata_sha256 = sha256(torrent_bytes).hexdigest()
+                else:
+                    try:
+                        inspected = inspect_torrent(torrent_bytes)
+                    except TorrentBytesError as error:
+                        raise HTTPException(status_code=422, detail=str(error)) from error
+                    infohash = inspected.infohash
+                    metadata_sha256 = inspected.metadata_sha256
+                    total_bytes = inspected.total_bytes
+                    if not isinstance(category, str) or not category:
+                        raise HTTPException(status_code=422, detail="category is required")
+                    try:
+                        matched = permits.find_for_metadata(
+                            infohash=infohash,
+                            metadata_sha256=metadata_sha256,
+                            destination=destination,
+                            category=category,
+                        )
+                    except PermissionError as error:
+                        raise HTTPException(status_code=403, detail=str(error)) from error
+                    permit_token = matched.token
+                payload = {
+                    "infohash": infohash,
+                    "savepath": destination,
+                    "torrent_bytes": torrent_bytes,
+                    "category": category,
+                }
         else:
-            # Arr URL/magnet adds cannot reveal file sizes before payload.
-            raise HTTPException(status_code=403, detail="verified torrent file required")
+            raise HTTPException(status_code=403, detail="verified torrent required")
         infohash = _validate_infohash(payload.get("infohash"))
         destination = payload.get("savepath")
         if not isinstance(destination, str) or not (

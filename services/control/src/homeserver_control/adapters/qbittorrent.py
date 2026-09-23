@@ -5,6 +5,8 @@ from typing import Any
 
 import httpx
 
+from homeserver_control.domain.magnet import magnet_infohash
+
 from .http import ContractError, CredentialError, EffectUncertain, UpstreamError, endpoint
 
 
@@ -63,8 +65,13 @@ class QBittorrentAdapter:
         if not destination.startswith("/data/"):
             raise ContractError("qBittorrent destination is outside /data")
         torrent_bytes = payload.get("torrent_bytes")
-        if not isinstance(torrent_bytes, bytes) or not torrent_bytes:
-            raise ContractError("verified torrent bytes are required")
+        magnet = payload.get("magnet_url")
+        if isinstance(torrent_bytes, bytes) and torrent_bytes and magnet is None:
+            files = {"torrents": ("approved.torrent", torrent_bytes, "application/x-bittorrent")}
+        elif torrent_bytes is None and magnet_infohash(magnet) == infohash.lower():
+            files = {"urls": (None, magnet)}
+        else:
+            raise ContractError("verified torrent bytes or permitted magnet are required")
         category = payload.get("category")
         if not isinstance(category, str) or category not in {"sonarr", "radarr"}:
             raise ContractError("unsupported torrent category")
@@ -76,7 +83,7 @@ class QBittorrentAdapter:
                 "category": category,
                 "stopped": "false",
             },
-            files={"torrents": ("approved.torrent", torrent_bytes, "application/x-bittorrent")},
+            files=files,
         )
         text = response.text.strip()
         if text.lower() not in {"ok.", "ok", ""}:
