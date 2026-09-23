@@ -12,14 +12,17 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from homeserver_control.domain.policy import MOVIE_LIMIT_BYTES
 from homeserver_control.domain.torrent_bytes import TorrentBytesError, inspect_torrent
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 
+from .release_quality import release_rank
+from .subtitle_language import is_brazilian_portuguese_subtitle
+
 LOGGER = logging.getLogger(__name__)
 _VIDEO_SUFFIXES = {".mkv", ".mp4", ".m4v", ".avi", ".mov"}
 _SUBTITLE_SUFFIXES = {".srt", ".ass", ".ssa", ".vtt"}
-_PORTUGUESE = re.compile(r"(?:^|[. _-])(?:pt|por|ptbr|pt-br|brazilian)(?:$|[. _-])", re.I)
 _MAX_METADATA = 16 * 1024 * 1024
 
 
@@ -76,9 +79,9 @@ class MovieAcquirer:
         subtitles = [
             item for item in inspected.files
             if PurePosixPath(item.path).suffix.lower() in _SUBTITLE_SUFFIXES
-            and _PORTUGUESE.search(PurePosixPath(item.path).stem)
+            and is_brazilian_portuguese_subtitle(item.path)
         ]
-        if len(videos) != 1 or videos[0].length > 50_000_000_000 or not subtitles:
+        if len(videos) != 1 or videos[0].length > MOVIE_LIMIT_BYTES or not subtitles:
             return None
         return inspected.infohash, inspected.metadata_sha256, tuple(
             item.path for item in (*videos, *subtitles)
@@ -157,25 +160,13 @@ class MovieAcquirer:
             raise ValueError("Radarr release response is invalid")
         budget = reservation["budget_bytes"]
         assert isinstance(budget, int)
-        # Indexers that returned inspectable .torrent files in this deployment
-        # are checked first; a magnet redirect still fails closed below.
-        def priority(item: object) -> tuple[int, int]:
-            if not isinstance(item, dict):
-                return (2, 0)
-            quality = item.get("quality")
-            detail = quality.get("quality") if isinstance(quality, dict) else None
-            resolution = detail.get("resolution") if isinstance(detail, dict) else None
-            rank = -resolution if isinstance(resolution, int) else 0
-            return (0 if "YTS" in str(item.get("indexer", "")) else 1, rank)
-
-        ordered = sorted(items, key=priority)
+        ordered = sorted(
+            (item for item in items if isinstance(item, dict)),
+            key=lambda item: release_rank(item) or (0, 0, 0, 0, 0),
+            reverse=True,
+        )
         for release in ordered:
-            if not isinstance(release, dict) or release.get("rejected") is not False:
-                continue
-            quality = release.get("quality")
-            details = quality.get("quality") if isinstance(quality, dict) else None
-            resolution = details.get("resolution") if isinstance(details, dict) else None
-            if not isinstance(resolution, int) or resolution < 1080:
+            if release.get("rejected") is not False or release_rank(release) is None:
                 continue
             reported = release.get("size")
             if not isinstance(reported, int) or not 0 < reported <= budget:

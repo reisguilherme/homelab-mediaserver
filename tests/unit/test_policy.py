@@ -2,8 +2,8 @@ from homeserver_control.domain.policy import within_limits
 
 
 def test_movie_upper_boundary() -> None:
-    assert within_limits(50_000_000_000, [])
-    assert not within_limits(50_000_000_001, [])
+    assert within_limits(80_000_000_000, [])
+    assert not within_limits(80_000_000_001, [])
 
 
 def test_episode_limit_is_independent_from_season_total() -> None:

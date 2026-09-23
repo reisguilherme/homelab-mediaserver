@@ -23,10 +23,13 @@ def _bencode(value):
     ) + b"e"
 
 
-def _torrent(*, subtitle: bool) -> bytes:
-    files = [{b"length": 1_500_000_000, b"path": [b"movie.mkv"]}]
+def _torrent(
+    *, subtitle: bool, subtitle_name: bytes = b"movie.pt-BR.srt",
+    video_bytes: int = 1_500_000_000,
+) -> bytes:
+    files = [{b"length": video_bytes, b"path": [b"movie.mkv"]}]
     if subtitle:
-        files.append({b"length": 1000, b"path": [b"movie.por.srt"]})
+        files.append({b"length": 1000, b"path": [subtitle_name]})
     total = sum(item[b"length"] for item in files)
     info = {
         b"files": files,
@@ -43,11 +46,18 @@ def _reserve(tmp_path):
     repo.initialize()
     result = repo.reserve(
         request_id="seerr:2", source_id="2", media_key="movie:tmdb:1101383",
-        filesystem_id="fixture-fs", budget_bytes=50_000_000_000,
+        filesystem_id="fixture-fs", budget_bytes=81_000_000_000,
         free_bytes=500_000_000_000, total_bytes=600_000_000_000,
     )
     assert result.accepted and result.reservation_id
     return repo, PermitRegistry(db), result.reservation_id
+
+
+def test_manifest_allows_video_up_to_80_gb_within_reservation():
+    maximum = _torrent(subtitle=True, video_bytes=80_000_000_000)
+    oversized = _torrent(subtitle=True, video_bytes=80_000_000_001)
+    assert MovieAcquirer._eligible_manifest(maximum, 81_000_000_000) is not None
+    assert MovieAcquirer._eligible_manifest(oversized, 81_000_000_000) is None
 
 
 @pytest.mark.asyncio
@@ -69,7 +79,9 @@ async def test_acquirer_verifies_metadata_and_grabs_once(tmp_path):
                 "guid": "release-one", "indexerId": 2, "title": "Film 1080p",
                 "size": 1_500_100_000, "downloadUrl": "http://prowlarr:9696/2/download?id=1",
                 "infoHash": inspected.infohash, "rejected": False,
-                "quality": {"quality": {"resolution": 1080}},
+                "quality": {"quality": {
+                    "source": "bluray", "modifier": "remux", "resolution": 1080,
+                }},
                 "protocol": "torrent",
             }])
         if request.url.path == "/2/download":
@@ -96,7 +108,7 @@ async def test_acquirer_verifies_metadata_and_grabs_once(tmp_path):
     assert permit.metadata_sha256 == inspected.metadata_sha256
     assert permit.destination == "/data/torrents"
     assert permit.category == "radarr"
-    assert permit.budget_bytes == 50_000_000_000
+    assert permit.budget_bytes == 81_000_000_000
 
 
 @pytest.mark.asyncio
@@ -115,7 +127,9 @@ async def test_acquirer_rejects_ineligible_release(tmp_path, subtitle):
                 "guid": "bad-release", "indexerId": 2, "title": "Film 1080p",
                 "size": 1_500_100_000,
                 "downloadUrl": "magnet:?xt=urn:btih:abc" if subtitle else "http://prowlarr:9696/2/download?id=1",
-                "rejected": False, "quality": {"quality": {"resolution": 1080}},
+                "rejected": False, "quality": {"quality": {
+                    "source": "bluray", "modifier": "remux", "resolution": 1080,
+                }},
                 "protocol": "torrent",
             }])
         if request.url.path == "/2/download":
@@ -156,8 +170,8 @@ async def test_acquirer_retries_authorized_permit_after_restart(tmp_path):
     original = permits.issue(
         infohash=inspected.infohash, metadata_sha256=inspected.metadata_sha256,
         destination="/data/torrents", category="radarr", reservation_id=reservation_id,
-        selected_files=("Film/movie.mkv", "Film/movie.por.srt"),
-        budget_bytes=50_000_000_000, expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        selected_files=("Film/movie.mkv", "Film/movie.pt-BR.srt"),
+        budget_bytes=81_000_000_000, expires_at=datetime.now(UTC) + timedelta(minutes=30),
     )
     posts = []
 
@@ -171,7 +185,9 @@ async def test_acquirer_retries_authorized_permit_after_restart(tmp_path):
                 "guid": "release-one", "indexerId": 2, "title": "Film 1080p",
                 "size": 1_500_100_000, "downloadUrl": "http://prowlarr:9696/2/download?id=1",
                 "infoHash": inspected.infohash, "rejected": False,
-                "quality": {"quality": {"resolution": 1080}},
+                "quality": {"quality": {
+                    "source": "bluray", "modifier": "remux", "resolution": 1080,
+                }},
             }])
         if request.url.path == "/2/download":
             return httpx.Response(200, content=torrent)
@@ -189,3 +205,102 @@ async def test_acquirer_retries_authorized_permit_after_restart(tmp_path):
         assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "already_permitted"
     assert len(posts) == 1
     assert permits.get_for_reservation(reservation_id).permit_id == original.permit_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("releases", "chosen"),
+    [
+        (
+            [
+                ("yts", "Film 2160p WEB-DL DV Atmos", "webdl", "none", 2160, "YTS"),
+                ("bluray", "Film 2160p BluRay", "bluray", "none", 2160, "1337x"),
+                ("remux", "Film 1080p BluRay REMUX", "bluray", "remux", 1080, "1337x"),
+            ],
+            "remux",
+        ),
+        (
+            [
+                ("sdr", "Film 2160p BluRay REMUX", "bluray", "remux", 2160, "1337x"),
+                ("dv", "Film 2160p BluRay REMUX DV", "bluray", "remux", 2160, "1337x"),
+                ("atmos", "Film 2160p BluRay REMUX DV Atmos", "bluray", "remux", 2160, "1337x"),
+            ],
+            "atmos",
+        ),
+        (
+            [
+                ("webrip", "Film 2160p WEBRip", "webrip", "none", 2160, "YTS"),
+                ("webdl", "Film 1080p WEB-DL", "webdl", "none", 1080, "1337x"),
+            ],
+            "webdl",
+        ),
+    ],
+)
+async def test_acquirer_grabs_best_admissible_quality(tmp_path, releases, chosen):
+    repo, permits, reservation_id = _reserve(tmp_path)
+    torrent = _torrent(subtitle=True)
+    inspected = inspect_torrent(torrent)
+    grabbed = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/movie":
+            return httpx.Response(200, json=[{"id": 2, "tmdbId": 1101383, "hasFile": False}])
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            return httpx.Response(200, json=[{
+                "guid": guid, "title": title, "indexer": indexer,
+                "size": 1_500_100_000, "downloadUrl": f"http://prowlarr:9696/2/download?id={guid}",
+                "infoHash": inspected.infohash, "rejected": False,
+                "quality": {"quality": {
+                    "name": "Remux-1080p", "source": source,
+                    "modifier": modifier, "resolution": resolution,
+                }},
+            } for guid, title, source, modifier, resolution, indexer in releases])
+        if request.url.path == "/2/download":
+            return httpx.Response(200, content=torrent)
+        if request.url.path == "/api/v3/release" and request.method == "POST":
+            grabbed.append(request.read().decode())
+            return httpx.Response(200, json={"ok": True})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
+        )
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "grabbed"
+    assert len(grabbed) == 1
+    assert f'"guid":"{chosen}"' in grabbed[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("subtitle_name", [b"movie.por.srt", b"movie.pt.srt", b"movie.pt-PT.srt"])
+async def test_acquirer_rejects_ambiguous_or_portugal_subtitle(tmp_path, subtitle_name):
+    repo, permits, reservation_id = _reserve(tmp_path)
+    torrent = _torrent(subtitle=True, subtitle_name=subtitle_name)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/movie":
+            return httpx.Response(200, json=[{"id": 2, "tmdbId": 1101383, "hasFile": False}])
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            return httpx.Response(200, json=[{
+                "guid": "ambiguous", "title": "Film 1080p BluRay REMUX",
+                "size": 1_500_100_000, "downloadUrl": "http://prowlarr:9696/2/download?id=1",
+                "rejected": False, "quality": {"quality": {
+                    "source": "bluray", "modifier": "remux", "resolution": 1080,
+                }},
+            }])
+        if request.url.path == "/2/download":
+            return httpx.Response(200, content=torrent)
+        raise AssertionError("grab must not occur")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
+        )
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "no_eligible_release"
+    assert permits.get_for_reservation(reservation_id) is None

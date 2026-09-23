@@ -7,10 +7,12 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
+from homeserver_control.domain.policy import MOVIE_LIMIT_BYTES
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 
 from .imports import import_hardlink
+from .subtitle_language import is_brazilian_portuguese_subtitle
 from .validation import ValidationError, validate_media
 
 _VIDEO = {".mkv", ".mp4", ".m4v", ".avi", ".mov"}
@@ -116,11 +118,12 @@ class MovieFinalizer:
         subtitles = [
             self._local_path(f"/data/torrents/{name}") for name in selected_files
             if PurePosixPath(name).suffix.lower() in _SUBTITLE
+            and is_brazilian_portuguese_subtitle(name)
         ]
         source = next((path for path in subtitles if _subtitle_has_content(path)), None)
         if source is None:
-            raise ValidationError("Portuguese subtitle vanished after import")
-        target = video.with_name(f"{video.stem}.pt{source.suffix.lower()}")
+            raise ValidationError("Brazilian Portuguese subtitle vanished after import")
+        target = video.with_name(f"{video.stem}.pt-BR{source.suffix.lower()}")
         if target.exists():
             if target.is_symlink() or not _subtitle_has_content(target):
                 raise ValidationError("existing library subtitle is invalid")
@@ -195,14 +198,18 @@ class MovieFinalizer:
                 raise ValidationError("selected file is outside torrent content")
             selected.append(path)
         videos = [path for path in selected if path.suffix.lower() in _VIDEO]
-        subtitles = [path for path in selected if path.suffix.lower() in _SUBTITLE]
+        subtitles = [
+            path for path in selected
+            if path.suffix.lower() in _SUBTITLE
+            and is_brazilian_portuguese_subtitle(str(path))
+        ]
         if len(videos) != 1 or not subtitles:
-            raise ValidationError("movie video or Portuguese subtitle is missing")
-        validated = validate_media(videos[0], maximum_bytes=50_000_000_000)
+            raise ValidationError("movie video or Brazilian Portuguese subtitle is missing")
+        validated = validate_media(videos[0], maximum_bytes=MOVIE_LIMIT_BYTES)
         if not validated.probe.audio_languages:
             raise ValidationError("movie has no audio stream")
         if not any(_subtitle_has_content(path) for path in subtitles):
-            raise ValidationError("Portuguese subtitle content is not valid")
+            raise ValidationError("Brazilian Portuguese subtitle content is not valid")
         if not self.repository.claim_movie_import(reservation_id):
             return "import_pending"
         response = await self.client.post(

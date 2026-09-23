@@ -78,7 +78,7 @@ async def test_worker_reserves_approved_requests_without_dispatching_downloads()
         "seerr:42",
         "seerr:43",
     ]
-    assert scheduler.candidates[0].budget_bytes == 50_000_000_000
+    assert scheduler.candidates[0].budget_bytes == 81_000_000_000
     assert scheduler.candidates[1].budget_bytes == 100_000_000_000
 
 

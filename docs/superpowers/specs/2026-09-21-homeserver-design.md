@@ -91,9 +91,9 @@ O plano começará por inventariar versão do Ubuntu, UUID, tipo de sistema de a
 | D02 | Até duas reproduções simultâneas |
 | D03 | Priorizar 4K em casa e fora; aceitar redução de reprodução para 1080p |
 | D04 | Downloads em 4K preferencialmente, com 1080p como resolução mínima |
-| D05 | Preferir dual áudio, original + português, com legendas em português quando disponíveis |
-| D06 | Na ausência de dual áudio, aceitar áudio original com legenda em português |
-| D07 | Filmes com até 50 GB por arquivo |
+| D05 | Dentro da mesma classe de qualidade, preferir dual áudio original + português brasileiro quando confirmado |
+| D06 | Na ausência de dual áudio, aceitar áudio original somente com legenda em português brasileiro confirmada |
+| D07 | Filmes com até 80 GB por arquivo |
 | D08 | Séries com até 5 GB por episódio e 100 GB por temporada |
 | D09 | Solicitar todas as temporadas disponíveis de uma série e acompanhar futuros episódios |
 | D10 | Temporadas completas só começam a baixar quando houver espaço para a temporada inteira |
@@ -249,13 +249,13 @@ Validar importação e exclusão inclusive próximo à margem de capacidade. Fal
 
 ### 8.1 Seleção de versões
 
-1. Filtrar candidatos que violem limites de tamanho, resolução mínima ou compatibilidade definida nos testes.
-2. Priorizar dual áudio, original + português, conforme D05.
-3. Dentro do conjunto elegível, preferir 4K a 1080p e a melhor qualidade disponível, incluindo remux quando couber.
-4. Usar áudio original com legenda em português quando não houver dual áudio elegível.
+1. Filtrar candidatos que violem limites de tamanho, resolução mínima ou compatibilidade definida nos testes. A legenda exigida é português brasileiro; códigos genéricos `pt` e `por` não comprovam a variante.
+2. Entre os candidatos elegíveis, priorizar remux Blu-ray, depois encode Blu-ray, depois WEB-DL. Não admitir WEBRip, HDTV ou fontes inferiores como fallback automático.
+3. Dentro de cada classe, preferir 2160p a 1080p e então Dolby Vision e Dolby Atmos quando identificáveis. Tamanho maior só desempata candidatos equivalentes e continua sujeito ao teto e à reserva.
+4. Preferir dual áudio original + português brasileiro quando for comprovado entre candidatos equivalentes; usar áudio original com legenda pt-BR confirmada caso contrário.
 5. Manter o pedido pendente se nenhuma opção atender ao conjunto de regras.
 
-**Interpretação proposta:** preferência por dual áudio tem precedência sobre resolução; um dual áudio 1080p pode ser preferido a um 4K somente com áudio original. Português brasileiro será o alvo inicial de áudio/legenda. Essas duas interpretações deverão ser revisadas pelo usuário, pois ele ainda não comparou explicitamente essas combinações nem especificou a variante do português.
+A ordem acima substitui a antiga precedência de dual áudio sobre classe de qualidade. Na aquisição atual, a fonte é classificada pelos campos de qualidade do Radarr e Dolby Vision/Atmos são preferências derivadas do nome da release, não garantias de codec. A automação exige legenda externa identificada explicitamente como pt-BR no torrent antes de iniciar; legendas embutidas ou de proveniência genérica exigem outro fluxo de verificação. Essas restrições podem deixar um pedido pendente mesmo quando o indexador mostra uma release visualmente melhor.
 
 Não haverá uma espera indefinida por uma versão ideal: selecionar entre os candidatos elegíveis na busca atual. A primeira versão que passar na validação será mantida, com upgrades desativados. Corrigir download corrompido ou versão que não atende aos requisitos não constitui upgrade de um conteúdo válido.
 
@@ -263,7 +263,7 @@ Não haverá uma espera indefinida por uma versão ideal: selecionar entre os ca
 
 | Objeto | Regra |
 |---|---|
-| Filme | Arquivo principal de vídeo com no máximo 50 GB |
+| Filme | Arquivo principal de vídeo com no máximo 80 GB |
 | Episódio | Arquivo com no máximo 5 GB |
 | Temporada | Soma dos arquivos de episódios com no máximo 100 GB |
 | Resolução | 2160p preferencial; 1080p mínimo |
@@ -279,7 +279,7 @@ Nome de release e tamanho informado pelo indexador não comprovam áudio, legend
 
 Para pacotes de temporada, inspecionar a lista de arquivos e os tamanhos antes de liberar o conteúdo principal. Se os metadados necessários não puderem ser obtidos, deixar o candidato pendente em vez de presumir conformidade. Releases compactados que impeçam a inspeção prévia ficam fora da seleção automática inicial.
 
-Após o download, validar resolução e faixas com ferramenta de inspeção de mídia. Conteúdo somente com áudio original deve ter legenda em português confirmada, embutida ou externa, antes de ser anunciado como atendendo ao pedido. Se a legenda estiver indisponível, apresentar estado específico e continuar a busca, evitando notificações de conclusão incorretas.
+Após o download, validar resolução e faixas com ferramenta de inspeção de mídia. Conteúdo somente com áudio original deve ter legenda em português brasileiro confirmada antes de ser anunciado como atendendo ao pedido. Se a legenda estiver indisponível, apresentar estado específico e continuar a busca, evitando notificações de conclusão incorretas.
 
 ## 9. Solicitações, fila e reservas
 
@@ -304,7 +304,7 @@ Seerr poderá ter menos estados nativos. O controlador e a área de status compl
 
 ### 9.2 Filmes
 
-Reservar o tamanho do candidato mais margem antes de iniciar. Usar 50 GB como reserva conservadora quando o tamanho ainda não estiver confirmado, sem admitir automaticamente um arquivo cujo limite não possa ser verificado. Após conhecer o tamanho, ajustar a reserva sem exceder o orçamento.
+Reservar o tamanho do candidato mais margem antes de iniciar. Usar 81 GB como reserva conservadora quando o tamanho ainda não estiver confirmado: até 80 GB para o vídeo e 1 GB para legendas, metadados e outros arquivos do pacote. Não admitir automaticamente um arquivo cujo limite não possa ser verificado. Após conhecer o tamanho, ajustar a reserva sem exceder o orçamento.
 
 ### 9.3 Temporadas completas
 
@@ -405,7 +405,7 @@ O projeto terá uma biblioteca única. Reduzir a reprodução para 1080p signifi
 
 ### 12.2 Orçamento de banda
 
-O tamanho máximo de 50 GB não garante bitrate baixo. Um arquivo de 50 GB e duas horas tem bitrate médio aproximado de **55,6 Mbps**, sem considerar picos e sobrecarga. Duas transmissões desse exemplo superariam os 100 Mbps de upload medidos.
+O tamanho máximo de 80 GB não garante bitrate baixo. Um arquivo de 80 GB e duas horas tem bitrate médio aproximado de **88,9 Mbps**, sem considerar picos e sobrecarga. Duas transmissões desse exemplo superariam os 100 Mbps de upload medidos.
 
 Proposta inicial: trabalhar com orçamento de até 70–80 Mbps para a soma dos streams remotos em condições favoráveis, preservando espaço para seeding e outros usos. A capacidade real será medida via Tailscale e conexões móveis. A resolução 1080p também precisa de limite de bitrate compatível; reduzir apenas o número de pixels não é uma política suficiente.
 
@@ -544,9 +544,9 @@ Os testes usarão arquivos de teste adequados e conteúdo disponível para valid
 | A05 | Acesso externo | Solicitar e assistir via rede móvel nos celulares e por rede externa no Book3 |
 | A06 | TV | Validar caminho de reprodução na Samsung local e Book3 por HDMI em TV, registrando resolução/áudio |
 | A07 | Filme | Pedido chega a disponível sem intervenção quando há fonte elegível e capacidade |
-| A08 | Idioma | Preferência dual áudio aplicada; alternativa somente com legenda em português confirmada |
+| A08 | Idioma | Preferência dual áudio aplicada entre candidatos equivalentes; alternativa somente com legenda pt-BR confirmada |
 | A09 | Sem upgrades | Nova versão melhor não substitui uma versão válida já importada |
-| A10 | Tetos | Rejeitar filme acima de 50 GB, episódio acima de 5 GB e temporada acima de 100 GB, com testes de fronteira em bytes |
+| A10 | Tetos | Rejeitar filme acima de 80 GB, episódio acima de 5 GB e temporada acima de 100 GB, com testes de fronteira em bytes |
 | A11 | Pacote | Temporada abaixo de 100 GB contendo episódio acima de 5 GB não é admitida automaticamente |
 | A12 | Temporada completa | Não iniciar antes de reservar capacidade para todos os episódios selecionados |
 | A13 | Temporada em lançamento | Baixar novos episódios dentro da reserva; alteração do total não viola orçamento |
@@ -746,7 +746,7 @@ Estas verificações não alteram os requisitos confirmados. Resolvem dependênc
 |---|---|---|
 | TV Samsung | Obter código completo antes de configurar o cliente | Modelo e método de reprodução funcional |
 | CYD | Inspecionar revisão, display e touch antes do firmware | Identificação e teste básico da tela/toque |
-| Idioma | Revisar precedência entre dual áudio 1080p e original 4K; confirmar português brasileiro | Política explícita antes dos perfis |
+| Idioma | Verificar a origem pt-BR das faixas de áudio e das legendas embutidas, além do nome dos arquivos externos | Não classificar `por` ou `pt` genérico como pt-BR |
 | Discos | Inventariar capacidade/saúde e conferir o SSD montado em `/srv/data` | UUID, sistema de arquivos, margem e hardlinks nos containers validados |
 | Intel UHD | Testar QSV/VA-API e HDR conforme os clientes | Registro de versão e transcodificação funcional |
 | Rede | Verificar porta Ethernet, Tailscale direto/relay e upload sustentado | Medições no caminho real de reprodução |
