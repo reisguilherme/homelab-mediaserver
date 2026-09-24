@@ -407,7 +407,7 @@ async def test_movie_subtitle_priority_and_original_audio(
         assert (destination / f"movie.{suffix}.srt").read_bytes() == expected_subtitle
 
 
-def test_import_claims_wait_for_another_pending_import(tmp_path):
+def test_hardlink_import_claims_wait_only_for_dispatching_imports(tmp_path):
     repo = ReservationRepository(tmp_path / "control.sqlite")
     repo.initialize()
     first = repo.reserve(
@@ -425,9 +425,56 @@ def test_import_claims_wait_for_another_pending_import(tmp_path):
     assert not repo.claim_episode_import("another-episode-permit")
     assert not repo.claim_movie_import(second.reservation_id)
     repo.record_movie_import(first.reservation_id, "command-1")
-    repo.complete_movie_import(first.reservation_id)
     assert repo.claim_episode_import("another-episode-permit")
     assert not repo.claim_movie_import(second.reservation_id)
     repo.record_episode_import("another-episode-permit", "command-2")
-    repo.complete_episode_import("another-episode-permit")
     assert repo.claim_movie_import(second.reservation_id)
+
+
+def test_copy_import_claims_remain_exclusive(tmp_path):
+    repo = ReservationRepository(tmp_path / "control.sqlite")
+    repo.initialize()
+    first = repo.reserve(
+        request_id="seerr:copy-1", source_id="copy-1", media_key="movie:tmdb:1",
+        filesystem_id="fixture", budget_bytes=0,
+        free_bytes=100, total_bytes=200,
+    )
+    second = repo.reserve(
+        request_id="seerr:copy-2", source_id="copy-2", media_key="movie:tmdb:2",
+        filesystem_id="fixture", budget_bytes=0,
+        free_bytes=100, total_bytes=200,
+    )
+    assert first.reservation_id and second.reservation_id
+    assert repo.claim_movie_import(first.reservation_id, copy_allowed=True)
+    repo.record_movie_import(first.reservation_id, "command-copy")
+    assert not repo.claim_episode_import("other-hardlink")
+    assert not repo.claim_movie_import(second.reservation_id, copy_allowed=True)
+    repo.complete_movie_import(first.reservation_id)
+    assert repo.claim_episode_import("other-hardlink")
+    repo.record_episode_import("other-hardlink", "command-hardlink")
+    assert not repo.claim_movie_import(second.reservation_id, copy_allowed=True)
+
+
+def test_copy_waits_for_every_accepted_hardlink(tmp_path):
+    repo = ReservationRepository(tmp_path / "control.sqlite")
+    repo.initialize()
+    first = repo.reserve(
+        request_id="seerr:hardlink", source_id="hardlink", media_key="movie:tmdb:1",
+        filesystem_id="fixture", budget_bytes=0,
+        free_bytes=100, total_bytes=200,
+    )
+    copy = repo.reserve(
+        request_id="seerr:copy", source_id="copy", media_key="movie:tmdb:2",
+        filesystem_id="fixture", budget_bytes=0,
+        free_bytes=100, total_bytes=200,
+    )
+    assert first.reservation_id and copy.reservation_id
+    assert repo.claim_movie_import(first.reservation_id)
+    repo.record_movie_import(first.reservation_id, "command-hardlink")
+    assert repo.claim_episode_import("episode-hardlink")
+    repo.record_episode_import("episode-hardlink", "command-episode")
+    assert not repo.claim_movie_import(copy.reservation_id, copy_allowed=True)
+    repo.complete_movie_import(first.reservation_id)
+    assert not repo.claim_movie_import(copy.reservation_id, copy_allowed=True)
+    repo.complete_episode_import("episode-hardlink")
+    assert repo.claim_movie_import(copy.reservation_id, copy_allowed=True)

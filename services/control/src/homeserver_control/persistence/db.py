@@ -212,13 +212,21 @@ class ReservationRepository:
         return row["state"] if row is not None else None
 
     @staticmethod
-    def _import_pending(connection: sqlite3.Connection) -> bool:
+    def _import_pending(
+        connection: sqlite3.Connection, *, copy_allowed: bool
+    ) -> bool:
+        # A submitted hardlink import consumes no extra media space. Keep
+        # dispatching and all copy imports exclusive; a new copy import also
+        # waits for accepted hardlinks to preserve the conservative space guard.
         return bool(connection.execute(
             """SELECT EXISTS(
-                SELECT 1 FROM movie_imports WHERE state != 'complete'
+                SELECT 1 FROM movie_imports
+                WHERE state != 'complete' AND (? OR state != 'accepted')
                 UNION ALL
-                SELECT 1 FROM episode_imports WHERE state != 'complete'
-            )"""
+                SELECT 1 FROM episode_imports
+                WHERE state != 'complete' AND (? OR state != 'accepted')
+            )""",
+            (copy_allowed, copy_allowed),
         ).fetchone()[0])
 
     def claim_movie_import(self, reservation_id: str, *, copy_allowed: bool = False) -> bool:
@@ -231,7 +239,7 @@ class ReservationRepository:
             if row is None or row["state"] not in {"reserved", "downloading"}:
                 connection.rollback()
                 return False
-            if self._import_pending(connection):
+            if self._import_pending(connection, copy_allowed=copy_allowed):
                 connection.rollback()
                 return False
             cursor = connection.execute(
@@ -286,7 +294,7 @@ class ReservationRepository:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            if self._import_pending(connection):
+            if self._import_pending(connection, copy_allowed=copy_allowed):
                 connection.rollback()
                 return False
             cursor = connection.execute(

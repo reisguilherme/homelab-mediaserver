@@ -328,6 +328,8 @@ O espaço livre real já reflete arquivos baixados e blocos pré-alocados; esses
 
 Como a admissão não separa espaço para uma segunda cópia na importação, Radarr e Sonarr precisam manter a importação por hardlink habilitada antes de cada grab. Downloads e biblioteca compartilham `/srv/data`; o modo sem hardlink bloqueia novas aquisições.
 
+Na finalização, uma importação por hardlink já aceita pelo Arr pode aguardar a confirmação do arquivo sem bloquear hardlinks de outros pedidos. O despacho do comando permanece serializado. Importações por cópia mantêm exclusividade até a conclusão, inclusive quando há hardlinks aceitos pendentes, porque a capacidade da cópia é verificada antes do despacho e não é reservada na transação.
+
 A permissão e seu compromisso exato são inseridos numa transação SQLite de escrita. Outra admissão concorrente vê a permissão recém-criada mesmo que seu retrato da fila ainda esteja desatualizado. Permissões autorizadas que expiraram sem despacho podem ser retiradas; efeitos iniciados ou incertos não são liberados automaticamente.
 
 Requisitos adicionais:
