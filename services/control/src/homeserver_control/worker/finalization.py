@@ -365,18 +365,34 @@ class MovieFinalizer:
             raise ValidationError("movie has no audio stream")
         if subtitle_files and any(not _subtitle_has_content(path) for path in subtitle_files):
             raise ValidationError("selected subtitle content is not valid")
+        release_titles = list(dict.fromkeys(
+            title for title in (
+                videos[0].stem,
+                content.name if content.is_dir() else None,
+                torrent.get("name"),
+            ) if isinstance(title, str) and title
+        ))
+
+        async def fetch_subtitle(language: str) -> bytes | None:
+            if self.subtitle_source is None:
+                return None
+            for title in release_titles:
+                found = await self.subtitle_source.fetch(
+                    tmdb_id=int(media_key.rsplit(":", 1)[-1]),
+                    release_title=title, language=language,
+                )
+                if found is not None:
+                    return found
+            return None
+
         original_ptbr = audio_is_brazilian_portuguese(validated.probe)
         has_brazilian = bool(brazilian_subtitles) or self.subtitle_store.get(
             reservation_id, None, permit.infohash, language="BR_PT"
         ) is not None
         if not original_ptbr and not has_brazilian:
-            title = torrent.get("name")
-            if self.subtitle_source is not None and isinstance(title, str) and title:
-                found = await self.subtitle_source.fetch(
-                    tmdb_id=int(media_key.rsplit(":", 1)[-1]), release_title=title
-                )
-                if found is not None:
-                    self.subtitle_store.put(reservation_id, None, permit.infohash, found)
+            found = await fetch_subtitle("BR_PT")
+            if found is not None:
+                self.subtitle_store.put(reservation_id, None, permit.infohash, found)
             has_brazilian = self.subtitle_store.get(
                 reservation_id, None, permit.infohash, language="BR_PT"
             ) is not None
@@ -388,17 +404,12 @@ class MovieFinalizer:
                 reservation_id, None, permit.infohash, language="EN"
             ) is not None
             if not has_english:
-                title = torrent.get("name")
-                if self.subtitle_source is not None and isinstance(title, str) and title:
-                    found = await self.subtitle_source.fetch(
-                        tmdb_id=int(media_key.rsplit(":", 1)[-1]), release_title=title,
-                        language="EN",
+                found = await fetch_subtitle("EN")
+                if found is not None:
+                    self.subtitle_store.put(
+                        reservation_id, None, permit.infohash, found, language="EN"
                     )
-                    if found is not None:
-                        self.subtitle_store.put(
-                            reservation_id, None, permit.infohash, found, language="EN"
-                        )
-                        has_english = True
+                    has_english = True
             if not has_english:
                 return "waiting_subtitles"
         if not await self._hardlink_import_enabled():

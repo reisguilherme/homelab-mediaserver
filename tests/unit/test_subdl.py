@@ -243,6 +243,65 @@ async def test_subdl_rejects_wrong_language_file_in_english_search():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("language, suffix", [("EN", "en"), ("BR_PT", "pt-BR")])
+async def test_subdl_movie_accepts_exact_release_with_language_suffix(language, suffix):
+    release = "Dallas.Buyers.Club.2013.REPACK.1080p.BluRay.DD.5.1.X265-Ralphy"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "api.subdl.com":
+            assert request.url.params["languages"] == language
+            return httpx.Response(200, json={
+                "status": True,
+                "results": [{"tmdb_id": 152532, "type": "movie"}],
+                "subtitles": [{"language": language, "unpack_files": [{
+                    "language": language, "format": "srt", "size": len(_SRT),
+                    "release_name": f"{release}.{suffix}",
+                    "url": "/subtitle/123/abc",
+                }]}],
+            })
+        assert request.url.host == "dl.subdl.com"
+        return httpx.Response(200, content=_SRT)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = SubDLSource(api_key="test-key", client=client)
+        result = await source.fetch(
+            tmdb_id=152532,
+            release_title="Dallas Buyers Club 2013 REPACK 1080p BluRay DD  5 1 X265-Ralphy",
+            language=language,
+        )
+    assert result == _SRT
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("candidate", [
+    "Dallas.Buyers.Club.2013.REPACK.1080p.BluRay.DD.5.1.X264-Ralphy.en",
+    "Dallas.Buyers.Club.2013.REPACK.1080p.BluRay.DD.5.1.X265-Other.en",
+    "Dallas.Buyers.Club.2013.REPACK.1080p.BluRay.DD.5.1.X265-Ralphy.pt-BR",
+])
+async def test_subdl_movie_suffix_does_not_accept_different_release_or_language(candidate):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "api.subdl.com", "mismatched release must not download"
+        return httpx.Response(200, json={
+            "status": True,
+            "results": [{"tmdb_id": 152532, "type": "movie"}],
+            "subtitles": [{"language": "EN", "unpack_files": [{
+                "language": "EN", "format": "srt", "size": len(_SRT),
+                "release_name": candidate,
+                "url": "/subtitle/123/abc",
+            }]}],
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        source = SubDLSource(api_key="test-key", client=client)
+        result = await source.fetch(
+            tmdb_id=152532,
+            release_title="Dallas Buyers Club 2013 REPACK 1080p BluRay DD  5 1 X265-Ralphy",
+            language="EN",
+        )
+    assert result is None
+
+
+@pytest.mark.asyncio
 async def test_subdl_rejects_unsupported_language():
     source = SubDLSource(api_key="test-key")
     with pytest.raises(ValueError, match="language"):

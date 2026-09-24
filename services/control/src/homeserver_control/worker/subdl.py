@@ -12,6 +12,10 @@ from homeserver_control.domain.subtitle_content import MAX_SRT_BYTES, normalize_
 
 _DOWNLOAD_PATH = re.compile(r"/subtitle/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+")
 _EPISODE_TAG = re.compile(r"(?<![a-z0-9])s(\d{1,2})e(\d{1,3})(?![a-z0-9])", re.I)
+_MOVIE_LANGUAGE_SUFFIX = {
+    "BR_PT": re.compile(r"[._ -]+(?:pt[._ -]?br|br[._ -]?pt)$", re.I),
+    "EN": re.compile(r"[._ -]+(?:en|eng|english)$", re.I),
+}
 
 
 def _release_key(value: str) -> str:
@@ -153,7 +157,12 @@ class SubDLSource:
                     or not _DOWNLOAD_PATH.fullmatch(parsed.path)
                 ):
                     continue
-                exact = _release_key(name) == wanted
+                bare_name = (
+                    _MOVIE_LANGUAGE_SUFFIX[language].sub("", name) if not is_tv else name
+                )
+                exact = _release_key(name) == wanted or (
+                    not is_tv and bare_name != name and _release_key(bare_name) == wanted
+                )
                 if exact or (is_tv and _compatible_episode_release(
                     name, release_title, season, episode
                 )):

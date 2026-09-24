@@ -274,9 +274,13 @@ async def test_incomplete_torrent_cannot_be_imported(tmp_path):
 @pytest.mark.parametrize("subtitle_case", [
     "brazilian", "english", "embedded_english", "original_ptbr",
 ])
+@pytest.mark.parametrize("generic_video", [False, True])
 async def test_movie_subtitle_priority_and_original_audio(
-    tmp_path, monkeypatch, subtitle_case
+    tmp_path, monkeypatch, subtitle_case, generic_video
 ):
+    release_title = "Film.1080p.BluRay"
+    video_stem = "movie" if generic_video else release_title
+    folder_name = release_title if generic_video else "Film"
     database = tmp_path / "control.sqlite"
     repo = ReservationRepository(database)
     repo.initialize()
@@ -291,7 +295,8 @@ async def test_movie_subtitle_priority_and_original_audio(
         infohash="a" * 40, metadata_sha256="b" * 64,
         destination="/data/torrents", category="radarr",
         reservation_id=reserved.reservation_id,
-        selected_files=("Film/movie.mkv",), budget_bytes=81_000_000_000,
+        selected_files=(f"{folder_name}/{video_stem}.mkv",),
+        budget_bytes=81_000_000_000,
         expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
     permits.authorize(
@@ -299,9 +304,9 @@ async def test_movie_subtitle_priority_and_original_audio(
         metadata_sha256=permit.metadata_sha256,
         effect=lambda _permit: {"accepted": True},
     )
-    torrent_folder = tmp_path / "torrents" / "Film"
+    torrent_folder = tmp_path / "torrents" / folder_name
     torrent_folder.mkdir(parents=True)
-    (torrent_folder / "movie.mkv").write_bytes(b"video")
+    (torrent_folder / f"{video_stem}.mkv").write_bytes(b"video")
     brazilian_srt = b"1\n00:00:01,000 --> 00:00:02,000\nLegenda brasileira\n"
     english_srt = b"1\n00:00:01,000 --> 00:00:02,000\nEnglish subtitle\n"
     raw = {"streams": [{
@@ -327,8 +332,10 @@ async def test_movie_subtitle_priority_and_original_audio(
             self.calls = []
 
         async def fetch(self, *, tmdb_id, release_title, language="BR_PT"):
-            assert (tmdb_id, release_title) == (152532, "Film.1080p.BluRay")
-            self.calls.append(language)
+            assert tmdb_id == 152532
+            self.calls.append((language, release_title))
+            if release_title != "Film.1080p.BluRay":
+                return None
             if language == "BR_PT" and subtitle_case == "brazilian":
                 return brazilian_srt
             if language == "EN":
@@ -343,10 +350,13 @@ async def test_movie_subtitle_priority_and_original_audio(
         if request.url.path == "/api/v2/torrents/info":
             return httpx.Response(200, json=[{
                 "hash": permit.infohash, "progress": 1, "amount_left": 0,
-                "content_path": "/data/torrents/Film", "name": "Film.1080p.BluRay",
+                "content_path": f"/data/torrents/{folder_name}",
+                "name": "www.UIndex.org    -    Film.1080p.BluRay",
             }])
         if request.url.path == "/api/v2/torrents/files":
-            return httpx.Response(200, json=[{"name": "Film/movie.mkv", "size": 5}])
+            return httpx.Response(200, json=[{
+                "name": f"{folder_name}/{video_stem}.mkv", "size": 5,
+            }])
         if request.url.path == "/api/v3/command" and request.method == "POST":
             posts.append(request)
             return httpx.Response(201, json={"id": 12})
@@ -354,7 +364,7 @@ async def test_movie_subtitle_priority_and_original_audio(
             return httpx.Response(200, json=[{
                 "id": 7, "tmdbId": 152532, "hasFile": imported,
                 "path": "/data/media/movies/Film",
-                "movieFile": {"relativePath": "movie.mkv"} if imported else None,
+                "movieFile": {"relativePath": f"{video_stem}.mkv"} if imported else None,
             }])
         raise AssertionError(f"unexpected request {request.method} {request.url}")
 
@@ -375,12 +385,19 @@ async def test_movie_subtitle_priority_and_original_audio(
         assert await finalizer.finalize(
             "movie:tmdb:152532", reserved.reservation_id
         ) == "import_requested"
-        expected_calls = {
-            "brazilian": ["BR_PT"],
-            "english": ["BR_PT", "EN"],
-            "embedded_english": ["BR_PT"],
-            "original_ptbr": [],
-        }[subtitle_case]
+        titles = list(dict.fromkeys([
+            video_stem, folder_name, "www.UIndex.org    -    Film.1080p.BluRay",
+        ]))
+        before_match = titles[:titles.index(release_title) + 1]
+        expected_calls = []
+        if subtitle_case != "original_ptbr":
+            expected_calls.extend(
+                ("BR_PT", title) for title in (
+                    before_match if subtitle_case == "brazilian" else titles
+                )
+            )
+        if subtitle_case == "english":
+            expected_calls.extend(("EN", title) for title in before_match)
         assert source.calls == expected_calls
         expected_subtitle = {
             "brazilian": brazilian_srt,
@@ -394,7 +411,7 @@ async def test_movie_subtitle_priority_and_original_audio(
         ) == expected_subtitle
         destination = library / "Film"
         destination.mkdir(parents=True)
-        (destination / "movie.mkv").write_bytes(b"video")
+        (destination / f"{video_stem}.mkv").write_bytes(b"video")
         imported = True
         assert await finalizer.finalize(
             "movie:tmdb:152532", reserved.reservation_id
@@ -404,7 +421,7 @@ async def test_movie_subtitle_priority_and_original_audio(
         assert not list(destination.glob("*.srt"))
     else:
         suffix = "pt-BR" if subtitle_case == "brazilian" else "en"
-        assert (destination / f"movie.{suffix}.srt").read_bytes() == expected_subtitle
+        assert (destination / f"{video_stem}.{suffix}.srt").read_bytes() == expected_subtitle
 
 
 def test_hardlink_import_claims_wait_only_for_dispatching_imports(tmp_path):
