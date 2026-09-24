@@ -20,6 +20,7 @@ from .imports import import_hardlink, probe_hardlink_as
 from .subdl import SubDLSource
 from .subtitle_language import (
     audio_is_brazilian_portuguese,
+    has_embedded_english_subtitle,
     is_brazilian_portuguese_subtitle,
     is_english_subtitle,
 )
@@ -252,7 +253,10 @@ class MovieFinalizer:
                 )
                 return
         validated = validate_media(video, maximum_bytes=permit.budget_bytes)
-        if not audio_is_brazilian_portuguese(validated.probe):
+        if not (
+            audio_is_brazilian_portuguese(validated.probe)
+            or has_embedded_english_subtitle(validated.probe)
+        ):
             raise ValidationError("subtitle vanished after import")
 
     def _install_subtitle_file(self, video: Path, source: Path, label: str) -> None:
@@ -376,7 +380,10 @@ class MovieFinalizer:
             has_brazilian = self.subtitle_store.get(
                 reservation_id, None, permit.infohash, language="BR_PT"
             ) is not None
-        if not original_ptbr and not has_brazilian and not english_subtitles:
+        if (
+            not original_ptbr and not has_brazilian and not english_subtitles
+            and not has_embedded_english_subtitle(validated.probe)
+        ):
             has_english = self.subtitle_store.get(
                 reservation_id, None, permit.infohash, language="EN"
             ) is not None

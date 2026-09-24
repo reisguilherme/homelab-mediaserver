@@ -22,6 +22,7 @@ from .series_acquisition import _episode_tag, _single_episode_name
 from .subdl import SubDLSource
 from .subtitle_language import (
     audio_is_brazilian_portuguese,
+    has_embedded_english_subtitle,
     is_brazilian_portuguese_subtitle,
     is_english_subtitle,
 )
@@ -229,7 +230,7 @@ class SeriesFinalizer(MovieFinalizer):
         ) is not None
         english_ready = bool(english_subtitles) or self.subtitle_store.get(
             permit.reservation_id, permit.scope_key, permit.infohash, language="EN"
-        ) is not None
+        ) is not None or has_embedded_english_subtitle(validated.probe)
         original_ptbr = audio_is_brazilian_portuguese(validated.probe)
         name = torrent.get("name")
         return (

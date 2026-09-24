@@ -41,6 +41,44 @@ def is_english_subtitle(path: str) -> bool:
     return bool(tokens) and tokens[-1] in {"en", "eng", "english"}
 
 
+def has_embedded_english_subtitle(probe: MediaProbe) -> bool:
+    """Accept only a clearly labeled, full text track in the media itself."""
+    streams = probe.raw.get("streams")
+    if not isinstance(streams, list):
+        return False
+    for stream in streams:
+        if not isinstance(stream, dict) or stream.get("codec_type") != "subtitle":
+            continue
+        if stream.get("codec_name") not in {"subrip", "ass", "ssa", "webvtt", "mov_text"}:
+            continue
+        disposition = stream.get("disposition")
+        if isinstance(disposition, dict) and disposition.get("forced") == 1:
+            continue
+        tags = stream.get("tags")
+        if not isinstance(tags, dict):
+            continue
+        language = next(
+            (value for key, value in tags.items()
+             if str(key).lower() == "language" and isinstance(value, str)),
+            "",
+        ).strip().lower().replace("_", "-")
+        if language not in {
+            "en", "eng", "english", "en-us", "en-gb", "en-uk", "en-au", "en-ca"
+        }:
+            continue
+        title = " ".join(
+            value for key, value in tags.items()
+            if str(key).lower() in {"title", "handler_name"} and isinstance(value, str)
+        )
+        if set(_tokens(title)) & {
+            "forced", "sign", "signs", "song", "songs", "foreign", "partial",
+            "commentary",
+        }:
+            continue
+        return True
+    return False
+
+
 def _explicit_ptbr(value: str) -> bool:
     tokens = _tokens(value)
     if any(token in {"pob", "ptbr"} for token in tokens):

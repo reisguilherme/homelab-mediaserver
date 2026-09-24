@@ -173,7 +173,10 @@ def test_legacy_episode_permit_cannot_import_another_episodes_subtitle(tmp_path)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("subtitle_case", ["brazilian", "english", "original_ptbr"])
+@pytest.mark.parametrize("subtitle_case", [
+    "brazilian", "english", "embedded_english", "embedded_with_brazilian",
+    "original_ptbr",
+])
 async def test_episode_subtitle_priority_and_original_audio(
     tmp_path, monkeypatch, subtitle_case
 ):
@@ -207,17 +210,30 @@ async def test_episode_subtitle_priority_and_original_audio(
     english_srt = b"1\n00:00:01,000 --> 00:00:02,000\nEnglish subtitle\n"
     raw = {"streams": [{
         "codec_type": "audio", "tags": {"language": "pt-BR", "title": "Original"},
-    }]} if subtitle_case == "original_ptbr" else {}
+    }]} if subtitle_case == "original_ptbr" else {"streams": [{
+        "codec_type": "subtitle", "codec_name": "subrip",
+        "tags": {"language": "eng"}, "disposition": {"forced": 0},
+    }]} if subtitle_case in {"embedded_english", "embedded_with_brazilian"} else {}
     monkeypatch.setattr(
         "homeserver_control.worker.series_finalization.validate_media",
         lambda path, **_kwargs: ValidationResult(
-            Path(path), 5, MediaProbe(1920, 1080, ("por",) if raw else ("eng",), (), raw),
+            Path(path), 5, MediaProbe(
+                1920, 1080, ("por",) if subtitle_case == "original_ptbr" else ("eng",),
+                ("eng",) if subtitle_case in {
+                    "embedded_english", "embedded_with_brazilian"
+                } else (), raw,
+            ),
         ),
     )
     monkeypatch.setattr(
         "homeserver_control.worker.finalization.validate_media",
         lambda path, **_kwargs: ValidationResult(
-            Path(path), 5, MediaProbe(1920, 1080, ("por",) if raw else ("eng",), (), raw),
+            Path(path), 5, MediaProbe(
+                1920, 1080, ("por",) if subtitle_case == "original_ptbr" else ("eng",),
+                ("eng",) if subtitle_case in {
+                    "embedded_english", "embedded_with_brazilian"
+                } else (), raw,
+            ),
         ),
     )
     imported = False
@@ -234,7 +250,9 @@ async def test_episode_subtitle_priority_and_original_audio(
                 97546, "Ted.Lasso.S04E01.1080p.WEB-DL", 4, 1
             )
             self.calls.append(language)
-            if language == "BR_PT" and subtitle_case == "brazilian":
+            if language == "BR_PT" and subtitle_case in {
+                "brazilian", "embedded_with_brazilian"
+            }:
                 return brazilian_srt
             if language == "EN":
                 return english_srt
@@ -291,12 +309,16 @@ async def test_episode_subtitle_priority_and_original_audio(
         expected_calls = {
             "brazilian": ["BR_PT"],
             "english": ["BR_PT", "EN"],
+            "embedded_english": ["BR_PT"],
+            "embedded_with_brazilian": ["BR_PT"],
             "original_ptbr": [],
         }[subtitle_case]
         assert source.calls == expected_calls
         expected_subtitle = {
             "brazilian": brazilian_srt,
             "english": english_srt,
+            "embedded_english": None,
+            "embedded_with_brazilian": brazilian_srt,
             "original_ptbr": None,
         }[subtitle_case]
         assert SubtitleArtifactStore(database).get(
@@ -314,7 +336,9 @@ async def test_episode_subtitle_priority_and_original_audio(
     if expected_subtitle is None:
         assert not list(destination.glob("*.srt"))
     else:
-        suffix = "pt-BR" if subtitle_case == "brazilian" else "en"
+        suffix = "pt-BR" if subtitle_case in {
+            "brazilian", "embedded_with_brazilian"
+        } else "en"
         assert (
             destination / f"Ted.Lasso.S04E01.{suffix}.srt"
         ).read_bytes() == expected_subtitle

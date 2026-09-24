@@ -5,6 +5,7 @@ import pytest
 from homeserver_control.domain.media_probe import MediaProbe
 from homeserver_control.worker.subtitle_language import (
     audio_is_brazilian_portuguese,
+    has_embedded_english_subtitle,
     is_english_subtitle,
 )
 
@@ -67,3 +68,35 @@ def test_ptbr_audio_exemption_requires_original_track_evidence(audio, expected):
         raw={"streams": [{"codec_type": "video", "width": 1920, "height": 1080}, *audio]},
     )
     assert audio_is_brazilian_portuguese(probe) is expected
+
+
+@pytest.mark.parametrize(
+    ("stream", "expected"),
+    [
+        ({"codec_type": "subtitle", "codec_name": "subrip",
+          "tags": {"language": "eng"}, "disposition": {"forced": 0}}, True),
+        ({"codec_type": "subtitle", "codec_name": "ass",
+          "tags": {"language": "en", "title": "SDH"}}, True),
+        ({"codec_type": "subtitle", "codec_name": "subrip",
+          "tags": {"language": "eng"}, "disposition": {"forced": 1}}, False),
+        ({"codec_type": "subtitle", "codec_name": "subrip",
+          "tags": {"language": "eng", "title": "Forced"}}, False),
+        ({"codec_type": "subtitle", "codec_name": "subrip",
+          "tags": {"language": "eng", "title": "Signs & Songs"}}, False),
+        ({"codec_type": "subtitle", "codec_name": "subrip",
+          "tags": {"language": "eng", "title": "Foreign Parts"}}, False),
+        ({"codec_type": "subtitle", "codec_name": "subrip",
+          "tags": {"language": "por"}}, False),
+        ({"codec_type": "subtitle", "codec_name": "subrip",
+          "tags": {"language": "und", "title": "English"}}, False),
+        ({"codec_type": "subtitle", "codec_name": "hdmv_pgs_subtitle",
+          "tags": {"language": "eng"}}, False),
+    ],
+)
+def test_embedded_english_fallback_requires_usable_full_text_track(stream, expected):
+    probe = MediaProbe(
+        width=1920, height=1080, audio_languages=("eng",),
+        subtitle_languages=(str(stream.get("tags", {}).get("language", "und")),),
+        raw={"streams": [{"codec_type": "video", "width": 1920, "height": 1080}, stream]},
+    )
+    assert has_embedded_english_subtitle(probe) is expected

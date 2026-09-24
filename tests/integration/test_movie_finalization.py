@@ -271,7 +271,9 @@ async def test_incomplete_torrent_cannot_be_imported(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("subtitle_case", ["brazilian", "english", "original_ptbr"])
+@pytest.mark.parametrize("subtitle_case", [
+    "brazilian", "english", "embedded_english", "original_ptbr",
+])
 async def test_movie_subtitle_priority_and_original_audio(
     tmp_path, monkeypatch, subtitle_case
 ):
@@ -305,6 +307,12 @@ async def test_movie_subtitle_priority_and_original_audio(
     raw = {"streams": [{
         "codec_type": "audio", "tags": {"language": "pt-BR", "title": "Original"},
     }]} if subtitle_case == "original_ptbr" else {}
+    if subtitle_case == "embedded_english":
+        raw = {"streams": [{
+            "codec_type": "subtitle", "codec_name": "subrip",
+            "tags": {"language": "eng", "title": "English"},
+            "disposition": {"forced": 0},
+        }]}
     monkeypatch.setattr(
         "homeserver_control.worker.finalization.validate_media",
         lambda path, **_kwargs: ValidationResult(
@@ -370,12 +378,14 @@ async def test_movie_subtitle_priority_and_original_audio(
         expected_calls = {
             "brazilian": ["BR_PT"],
             "english": ["BR_PT", "EN"],
+            "embedded_english": ["BR_PT"],
             "original_ptbr": [],
         }[subtitle_case]
         assert source.calls == expected_calls
         expected_subtitle = {
             "brazilian": brazilian_srt,
             "english": english_srt,
+            "embedded_english": None,
             "original_ptbr": None,
         }[subtitle_case]
         assert SubtitleArtifactStore(database).get(
