@@ -16,16 +16,26 @@
   restantes dos torrents na fila e das permissões ainda não iniciadas. Não há
   reserva fixa por filme, episódio ou temporada. A busca prefere remux Blu-ray,
   Blu-ray e só então WEB-DL. WEBRip e HDTV ficam fora da aquisição automática.
-- Um filme sem legenda externa explicitamente pt-BR no torrent exige uma
-  legenda verificada pelo SubDL antes da admissão; sem ela, permanece pendente.
-  `pt`, `por` e `pt-PT` não comprovam português brasileiro. A preferência por
-  Dolby Vision e Atmos usa o nome da release; conferir os codecs e a legenda
-  na reprodução quando esses recursos forem decisivos.
+- Um filme sem legenda externa explicitamente pt-BR no torrent pode ser
+  admitido sem consulta prévia ao SubDL. O finalizador mantém o vídeo fora da
+  biblioteca até validar uma legenda ou confirmar áudio original pt-BR; sem
+  isso, o pedido fica em `waiting_subtitles`. `pt`, `por` e `pt-PT` não
+  comprovam português brasileiro. A preferência por Dolby Vision e Atmos usa
+  o nome da release;
+  conferir os codecs e a legenda na reprodução quando esses recursos forem
+  decisivos. Séries sem sidecar continuam exigindo SRT no preflight.
 - Para magnets v1, a busca tenta obter o `.torrent` de `itorrents.net` e
   confere o hash antes de emitir a permissão. O gateway só encaminha um
   magnet cuja permissão tenha metadados inspecionados e reserva ativa; caso o
   cache não responda ou não traga os arquivos requeridos, o pedido aguarda.
 - O Bazarr está ligado a Radarr/Sonarr com perfil exclusivo `pb` e provedor
-  público Podnapisi para busca após a importação. Para releases só com vídeo,
-  o controlador consulta o SubDL antes de admitir o download e guarda a
-  legenda pt-BR vinculada ao torrent inspecionado.
+  público Podnapisi para busca após a importação. Para filmes só com vídeo,
+  o finalizador busca pelo ID TMDb verificado: pt-BR da mesma release, pt-BR
+  de outra release com duração compatível, inglês da mesma release e inglês
+  de outra release com duração compatível, nessa ordem. Releases diferentes
+  exigem edição/corte compatível e cobertura dos tempos do SRT próxima à
+  duração do vídeo, com margem para créditos finais. Conferir o sincronismo
+  no Jellyfin. O SubDL V1 usa `EN` e não garante a variante en-US.
+- Novas importações de filmes ignoram artefatos de legenda criados pelo
+  preflight anterior. A auditoria de produção desta mudança encontrou quatro
+  desses artefatos, todos de pedidos já concluídos.

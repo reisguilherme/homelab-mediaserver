@@ -48,9 +48,10 @@ série. Só procura outra fonte após 30 minutos sem avanço, sem seeds conectad
 e com velocidade zero, ou após uma hora com média abaixo de 1 MiB/s. Um
 episódio pausado por ordem cronológica não entra nessa avaliação. A alternativa
 precisa ter seeds reportados, qualidade permitida, metadados verificáveis,
-legenda elegível, caminho de arquivo distinto e espaço livre suficiente para
-seu tamanho exato. O gateway para a fonte anterior, verifica a parada e só
+caminho de arquivo distinto e espaço livre suficiente para seu tamanho exato.
+O gateway para a fonte anterior, verifica a parada e só
 então autoriza a nova. Os arquivos parciais antigos permanecem no disco.
+Para episódios sem sidecar, a nova fonte também exige SRT elegível no preflight.
 
 Há no máximo uma troca automática por filme ou episódio para evitar que várias
 fontes parciais consumam o armazenamento. Se a segunda fonte também parar ou
@@ -68,12 +69,12 @@ Validar a versão real das imagens e preencher digests no manifesto de release.
 Tags do arquivo `config/versions.env` são referências de desenvolvimento, não
 prova de compatibilidade ou de segurança da produção.
 
-## Legenda pt-BR antes da aquisição
+## Legendas e importação
 
 No Bazarr, manter o perfil `pb` (Português Brasil) e habilitar provedores
 testados. O SubDL exige uma chave de API; o OpenSubtitles.com exige conta válida.
-O Bazarr procura legendas depois que a mídia está na biblioteca e não substitui
-a verificação anterior ao download.
+O Bazarr procura legendas depois que a mídia está na biblioteca. A ausência de
+legenda obtida antes do download não dispensa a validação na importação.
 
 O worker usa a mesma chave SubDL em `/etc/homeserver/subdl.key`, arquivo de uma
 linha criado no servidor com dono `root` e modo `0600`. O Compose monta o arquivo
@@ -81,12 +82,20 @@ somente no `control-worker` em `/run/secrets/subdl.key`; nunca colocar a chave n
 repositório, manifesto ou saída de diagnóstico. Criar o arquivo e executar um
 backup consistente antes de implantar a release que requer essa montagem.
 
-O worker só aceita uma legenda SRT `BR_PT` para o ID TMDb e nome exato da release
-(após normalizar pontuação); para séries, temporada e episódio também devem
-coincidir. Falha de API, legenda inválida ou ausência de correspondência mantém
-o pedido aguardando fonte. A legenda é persistida no SQLite antes do permit e
-instalada na biblioteca somente após a importação validada. A inspeção manual de
-sincronismo e da tradução continua necessária no Jellyfin.
+Para filmes, a aquisição não consulta o SubDL. Após validar o vídeo baixado,
+o finalizador consulta o serviço pelo ID TMDb verificado e escolhe
+SRT válido nesta ordem: pt-BR da mesma release, pt-BR de outra release com
+duração compatível, inglês da mesma release e inglês de outra release com
+duração compatível. Uma release diferente precisa ter edição/corte compatível
+e cobertura temporal do SRT próxima à duração medida do vídeo, com margem
+para créditos finais. O SubDL V1 usa `EN` sem garantir o dialeto en-US.
+Artefatos de filmes criados pelo preflight anterior são ignorados nas novas
+importações. Para séries sem sidecar, permanece o preflight: checar
+temporada e episódio, preferir release exata e, depois, mesmo título, episódio
+e família de fonte; persistir o SRT antes do permit. Para filmes sem legenda
+elegível, o finalizador mantém o vídeo fora da biblioteca até obter uma
+legenda válida ou confirmar áudio original pt-BR. Conferir sincronismo e
+tradução no Jellyfin.
 
 Legendas SRT em Windows-1252 são convertidas para UTF-8 após a validação da
 estrutura; arquivos sem tempos SRT válidos continuam inelegíveis. Clipes em

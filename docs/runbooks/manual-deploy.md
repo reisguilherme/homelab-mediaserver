@@ -16,8 +16,11 @@ publique essa porta no endereço Tailscale; `apps` e `telemetry` continuam
 internas, e o gateway de download não entra nessa bridge. Serviços que
 consultam fontes externas usam `egress`; o qBittorrent usa
 `egress_transfer`. Conferir que o `control-worker` permanece em `egress`
-após recriações, pois ele consulta o cache de metadados e o SubDL antes de
-autorizar torrents.
+após recriações, pois ele consulta o cache de metadados na admissão e o SubDL
+na seleção de legendas. Filmes não fazem prefetch de SRT: o finalizador busca
+a legenda após validar o vídeo baixado e bloqueia a importação até encontrar
+uma opção elegível ou confirmar áudio original pt-BR. Séries sem sidecar
+continuam exigindo SRT persistido antes do permit.
 
 ```bash
 sudo bash -c 'source /etc/homeserver/server.env; export HOMESERVER_HEALTH_URL="http://${TAILSCALE_BIND_IP}:8080"; bash /opt/homeserver/current/scripts/smoke.sh --config /etc/homeserver/server.env --environment prod'

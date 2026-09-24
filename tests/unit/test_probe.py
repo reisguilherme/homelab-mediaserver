@@ -48,3 +48,38 @@ def test_probe_rejects_invalid_ffprobe_output() -> None:
             probe_media(media, ffprobe_binary=[sys.executable, str(binary)])
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+@pytest.mark.parametrize(
+    ("duration", "expected"),
+    [
+        ("6123.5", 6123.5),
+        ("0", None),
+        ("-1", None),
+        ("NaN", None),
+        ("not-a-duration", None),
+        (None, None),
+    ],
+)
+def test_probe_reads_only_positive_finite_container_duration(
+    tmp_path: Path, duration: str | None, expected: float | None
+) -> None:
+    binary = tmp_path / "ffprobe-duration.py"
+    payload = {
+        "streams": [{"codec_type": "video", "width": 1920, "height": 1080}],
+        "format": {"duration": duration},
+    }
+    binary.write_text(
+        "import json, sys\n"
+        f"payload = {payload!r}\n"
+        "if '-show_format' not in sys.argv:\n"
+        "    payload.pop('format')\n"
+        "print(json.dumps(payload))\n",
+        encoding="utf-8",
+    )
+    media = tmp_path / "movie.mkv"
+    media.write_bytes(b"fixture")
+
+    result = probe_media(media, ffprobe_binary=[sys.executable, str(binary)])
+
+    assert result.duration_seconds == expected

@@ -8,7 +8,10 @@ import pytest
 from homeserver_control.domain.media_probe import MediaProbe
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
-from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
+from homeserver_control.persistence.subtitle_artifacts import (
+    MOVIE_FINALIZER_SOURCE,
+    SubtitleArtifactStore,
+)
 from homeserver_control.worker.capacity_evidence import CapacityEvidence
 from homeserver_control.worker.finalization import MovieFinalizer
 from homeserver_control.worker.validation import ValidationError, ValidationResult
@@ -169,6 +172,50 @@ def test_copy_import_must_match_source_bytes(tmp_path):
     assert finalizer._import_matches_source(imported, permit, copy_allowed=True)
 
 
+def test_legacy_artifact_cannot_install_without_new_selection(tmp_path, monkeypatch):
+    database = tmp_path / "control.sqlite"
+    repo = ReservationRepository(database)
+    repo.initialize()
+    reserved = repo.reserve(
+        request_id="seerr:legacy", source_id="legacy",
+        media_key="movie:tmdb:152532", filesystem_id="fixture",
+        budget_bytes=100, free_bytes=1000, total_bytes=2000,
+    )
+    assert reserved.reservation_id
+    permits = PermitRegistry(database)
+    permit = permits.issue(
+        infohash="a" * 40, metadata_sha256="b" * 64,
+        destination="/data/torrents", category="radarr",
+        reservation_id=reserved.reservation_id,
+        selected_files=("Film/movie.mkv",), budget_bytes=100,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    legacy = b"1\n00:00:01,000 --> 00:00:02,000\nLegacy subtitle\n"
+    SubtitleArtifactStore(database).put(
+        reserved.reservation_id, None, permit.infohash, legacy,
+    )
+    library = tmp_path / "media"
+    library.mkdir()
+    video = library / "movie.mkv"
+    video.write_bytes(b"video")
+    finalizer = MovieFinalizer(
+        repository=repo, permits=permits, torrent_root=tmp_path / "torrents",
+        media_root=library, gateway_url="http://gateway", arr_token="secret",
+        radarr_url="http://radarr", radarr_api_key="secret",
+    )
+    monkeypatch.setattr(
+        "homeserver_control.worker.finalization.validate_media",
+        lambda path, **_kwargs: ValidationResult(
+            Path(path), 5, MediaProbe(1920, 1080, ("eng",), (), {}),
+        ),
+    )
+
+    with pytest.raises(ValidationError, match="subtitle vanished"):
+        finalizer._ensure_subtitle_for_video(video, permit, None)
+
+    assert not (library / "movie.pt-BR.srt").exists()
+
+
 @pytest.mark.asyncio
 async def test_finalizer_rejects_legacy_portugal_subtitle_permit(tmp_path, monkeypatch):
     repo = ReservationRepository(tmp_path / "control.sqlite")
@@ -272,7 +319,9 @@ async def test_incomplete_torrent_cannot_be_imported(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("subtitle_case", [
-    "brazilian", "english", "embedded_english", "original_ptbr",
+    "brazilian", "brazilian_other_release", "legacy_artifact",
+    "english", "english_other_release",
+    "embedded_english", "original_ptbr",
 ])
 @pytest.mark.parametrize("generic_video", [False, True])
 async def test_movie_subtitle_priority_and_original_audio(
@@ -309,6 +358,11 @@ async def test_movie_subtitle_priority_and_original_audio(
     (torrent_folder / f"{video_stem}.mkv").write_bytes(b"video")
     brazilian_srt = b"1\n00:00:01,000 --> 00:00:02,000\nLegenda brasileira\n"
     english_srt = b"1\n00:00:01,000 --> 00:00:02,000\nEnglish subtitle\n"
+    if subtitle_case == "legacy_artifact":
+        SubtitleArtifactStore(database).put(
+            reserved.reservation_id, None, permit.infohash,
+            b"1\n00:00:01,000 --> 00:00:02,000\nLegenda de outra edicao\n",
+        )
     raw = {"streams": [{
         "codec_type": "audio", "tags": {"language": "pt-BR", "title": "Original"},
     }]} if subtitle_case == "original_ptbr" else {}
@@ -321,7 +375,10 @@ async def test_movie_subtitle_priority_and_original_audio(
     monkeypatch.setattr(
         "homeserver_control.worker.finalization.validate_media",
         lambda path, **_kwargs: ValidationResult(
-            Path(path), 5, MediaProbe(1920, 1080, ("por",) if raw else ("eng",), (), raw),
+            Path(path), 5, MediaProbe(
+                1920, 1080, ("por",) if raw else ("eng",), (), raw,
+                duration_seconds=7200.0,
+            ),
         ),
     )
     imported = False
@@ -331,14 +388,25 @@ async def test_movie_subtitle_priority_and_original_audio(
         def __init__(self):
             self.calls = []
 
-        async def fetch(self, *, tmdb_id, release_title, language="BR_PT"):
+        async def fetch_movie(
+            self, *, tmdb_id, release_titles, language="BR_PT", match_mode="exact",
+            movie_duration_seconds=None, movie_fps=None,
+        ):
             assert tmdb_id == 152532
-            self.calls.append((language, release_title))
-            if release_title != "Film.1080p.BluRay":
-                return None
-            if language == "BR_PT" and subtitle_case == "brazilian":
+            assert release_title in release_titles
+            assert movie_duration_seconds == 7200.0
+            self.calls.append((language, match_mode))
+            if language == "BR_PT" and (
+                (subtitle_case == "brazilian" and match_mode == "exact")
+                or (subtitle_case in {"brazilian_other_release", "legacy_artifact"}
+                    and match_mode == "same_duration")
+            ):
                 return brazilian_srt
-            if language == "EN":
+            if language == "EN" and (
+                (subtitle_case in {"english", "brazilian_other_release"}
+                 and match_mode == "exact")
+                or (subtitle_case == "english_other_release" and match_mode == "same_duration")
+            ):
                 return english_srt
             return None
 
@@ -385,29 +453,41 @@ async def test_movie_subtitle_priority_and_original_audio(
         assert await finalizer.finalize(
             "movie:tmdb:152532", reserved.reservation_id
         ) == "import_requested"
-        titles = list(dict.fromkeys([
-            video_stem, folder_name, "www.UIndex.org    -    Film.1080p.BluRay",
-        ]))
-        before_match = titles[:titles.index(release_title) + 1]
-        expected_calls = []
-        if subtitle_case != "original_ptbr":
-            expected_calls.extend(
-                ("BR_PT", title) for title in (
-                    before_match if subtitle_case == "brazilian" else titles
-                )
-            )
-        if subtitle_case == "english":
-            expected_calls.extend(("EN", title) for title in before_match)
+        expected_calls = {
+            "brazilian": [("BR_PT", "exact")],
+            "brazilian_other_release": [
+                ("BR_PT", "exact"), ("BR_PT", "same_duration"),
+            ],
+            "legacy_artifact": [
+                ("BR_PT", "exact"), ("BR_PT", "same_duration"),
+            ],
+            "english": [
+                ("BR_PT", "exact"), ("BR_PT", "same_duration"),
+                ("EN", "exact"),
+            ],
+            "english_other_release": [
+                ("BR_PT", "exact"), ("BR_PT", "same_duration"),
+                ("EN", "exact"), ("EN", "same_duration"),
+            ],
+            "embedded_english": [
+                ("BR_PT", "exact"), ("BR_PT", "same_duration"),
+            ],
+            "original_ptbr": [],
+        }[subtitle_case]
         assert source.calls == expected_calls
         expected_subtitle = {
             "brazilian": brazilian_srt,
+            "brazilian_other_release": brazilian_srt,
+            "legacy_artifact": brazilian_srt,
             "english": english_srt,
+            "english_other_release": english_srt,
             "embedded_english": None,
             "original_ptbr": None,
         }[subtitle_case]
         assert SubtitleArtifactStore(database).get(
             reserved.reservation_id, None, permit.infohash,
-            language="EN" if subtitle_case == "english" else "BR_PT",
+            language="EN" if subtitle_case.startswith("english") else "BR_PT",
+            source=MOVIE_FINALIZER_SOURCE,
         ) == expected_subtitle
         destination = library / "Film"
         destination.mkdir(parents=True)
@@ -420,7 +500,8 @@ async def test_movie_subtitle_priority_and_original_audio(
     if expected_subtitle is None:
         assert not list(destination.glob("*.srt"))
     else:
-        suffix = "pt-BR" if subtitle_case == "brazilian" else "en"
+        brazilian_case = subtitle_case.startswith("brazilian") or subtitle_case == "legacy_artifact"
+        suffix = "pt-BR" if brazilian_case else "en"
         assert (destination / f"{video_stem}.{suffix}.srt").read_bytes() == expected_subtitle
 
 

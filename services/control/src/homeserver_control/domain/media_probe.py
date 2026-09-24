@@ -8,6 +8,7 @@ only the metadata needed by admission and deletion workflows.
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ class MediaProbe:
     audio_languages: tuple[str, ...]
     subtitle_languages: tuple[str, ...]
     raw: dict[str, object]
+    duration_seconds: float | None = None
 
 
 def _command(binary: str | Sequence[str]) -> list[str]:
@@ -52,7 +54,7 @@ def probe_media(
     ffprobe_binary: str | Sequence[str] = "ffprobe",
     timeout_seconds: float = 15.0,
 ) -> MediaProbe:
-    """Return validated video dimensions and stream languages for *media_path*.
+    """Return validated video dimensions, stream languages, and duration for *media_path*.
 
     ``ffprobe_binary`` may be a program name/path or an argv prefix, which is
     useful for hermetic tests and wrappers.  The media path remains one argv
@@ -71,6 +73,7 @@ def probe_media(
             "-v",
             "error",
             "-show_streams",
+            "-show_format",
             "-of",
             "json",
             str(path),
@@ -114,10 +117,24 @@ def probe_media(
     subtitle_languages = tuple(
         _language(stream) for stream in streams if stream.get("codec_type") == "subtitle"
     )
+    duration_seconds = None
+    format_metadata = payload.get("format")
+    if isinstance(format_metadata, dict):
+        raw_duration = format_metadata.get("duration")
+        if isinstance(raw_duration, (str, int, float)) and not isinstance(raw_duration, bool):
+            try:
+                parsed_duration = float(raw_duration)
+            except (ValueError, OverflowError):
+                pass
+            else:
+                if math.isfinite(parsed_duration) and parsed_duration > 0:
+                    duration_seconds = parsed_duration
+
     return MediaProbe(
         width=width,
         height=height,
         audio_languages=audio_languages,
         subtitle_languages=subtitle_languages,
         raw=payload,
+        duration_seconds=duration_seconds,
     )

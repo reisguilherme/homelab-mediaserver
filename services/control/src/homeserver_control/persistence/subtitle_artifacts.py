@@ -9,6 +9,9 @@ from pathlib import Path
 
 from homeserver_control.domain.subtitle_content import valid_srt
 
+MOVIE_FINALIZER_SOURCE = "subdl_movie_finalizer"
+_SOURCES = {"subdl", MOVIE_FINALIZER_SOURCE}
+
 
 class SubtitleArtifactStore:
     def __init__(self, database: str | Path) -> None:
@@ -22,10 +25,12 @@ class SubtitleArtifactStore:
 
     def put(
         self, reservation_id: str, scope_key: str | None, infohash: str, content: bytes,
-        *, language: str = "BR_PT",
+        *, language: str = "BR_PT", source: str = "subdl",
     ) -> None:
         if language not in {"BR_PT", "EN"}:
             raise ValueError("unsupported subtitle language")
+        if source not in _SOURCES:
+            raise ValueError("unsupported subtitle source")
         if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", infohash):
             raise ValueError("invalid subtitle torrent hash")
         if not valid_srt(content):
@@ -33,7 +38,7 @@ class SubtitleArtifactStore:
         digest = hashlib.sha256(content).hexdigest()
         with self._connect() as connection:
             row = connection.execute(
-                """SELECT language, sha256, content FROM subtitle_artifacts
+                """SELECT source, language, sha256, content FROM subtitle_artifacts
                 WHERE reservation_id = ? AND scope_key = ? AND infohash = ?""",
                 (reservation_id, scope_key or "", infohash.lower()),
             ).fetchone()
@@ -41,32 +46,45 @@ class SubtitleArtifactStore:
                 connection.execute(
                     """INSERT INTO subtitle_artifacts
                     (reservation_id, scope_key, infohash, source, language, sha256, content)
-                    VALUES (?, ?, ?, 'subdl', ?, ?, ?)""",
-                    (reservation_id, scope_key or "", infohash.lower(), language, digest, content),
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (reservation_id, scope_key or "", infohash.lower(), source, language,
+                     digest, content),
                 )
-            elif row[0] == "EN" and language == "BR_PT":
+            elif row[0] == "subdl" and source == MOVIE_FINALIZER_SOURCE:
+                connection.execute(
+                    """UPDATE subtitle_artifacts
+                    SET source = ?, language = ?, sha256 = ?, content = ?
+                    WHERE reservation_id = ? AND scope_key = ? AND infohash = ?""",
+                    (source, language, digest, content, reservation_id,
+                     scope_key or "", infohash.lower()),
+                )
+            elif row[0] != source:
+                raise ValueError("subtitle artifact source conflicts with an existing permit")
+            elif row[1] == "EN" and language == "BR_PT":
                 connection.execute(
                     """UPDATE subtitle_artifacts SET language = ?, sha256 = ?, content = ?
                     WHERE reservation_id = ? AND scope_key = ? AND infohash = ?""",
                     (language, digest, content, reservation_id, scope_key or "", infohash.lower()),
                 )
-            elif row[0] == "BR_PT" and language == "EN":
+            elif row[1] == "BR_PT" and language == "EN":
                 return
-            elif row[0] != language or row[1] != digest or row[2] != content:
+            elif row[1] != language or row[2] != digest or row[3] != content:
                 raise ValueError("subtitle artifact conflicts with an existing permit")
 
     def get(
         self, reservation_id: str, scope_key: str | None, infohash: str,
-        *, language: str = "BR_PT",
+        *, language: str = "BR_PT", source: str = "subdl",
     ) -> bytes | None:
         if language not in {"BR_PT", "EN"}:
             raise ValueError("unsupported subtitle language")
+        if source not in _SOURCES:
+            raise ValueError("unsupported subtitle source")
         with self._connect() as connection:
             row = connection.execute(
                 """SELECT sha256, content FROM subtitle_artifacts
                 WHERE reservation_id = ? AND scope_key = ? AND infohash = ?
-                AND source = 'subdl' AND language = ?""",
-                (reservation_id, scope_key or "", infohash.lower(), language),
+                AND source = ? AND language = ?""",
+                (reservation_id, scope_key or "", infohash.lower(), source, language),
             ).fetchone()
         if row is None:
             return None

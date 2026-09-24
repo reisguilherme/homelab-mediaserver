@@ -492,23 +492,6 @@ class MovieAcquirer:
                 not isinstance(claimed_hash, str) or claimed_hash.lower() != infohash
             ):
                 continue
-            has_ptbr_sidecar = any(
-                PurePosixPath(name).suffix.lower() in _SUBTITLE_SUFFIXES
-                and is_brazilian_portuguese_subtitle(name)
-                for name in selected_files
-            )
-            if not has_ptbr_sidecar and self.subtitle_source is not None:
-                assert self.subtitle_store is not None
-                title = release.get("title")
-                if not isinstance(title, str):
-                    if len(selected_files) == 1:
-                        continue
-                else:
-                    content = await self.subtitle_source.fetch(
-                        tmdb_id=int(match.group(1)), release_title=title
-                    )
-                    if content is not None:
-                        self.subtitle_store.put(reservation_id, None, infohash, content)
             if replacement_reason is not None:
                 assert existing is not None
                 if infohash == existing.infohash:
