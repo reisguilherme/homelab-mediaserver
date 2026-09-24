@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,17 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from .models import TelemetrySnapshot
 from .status import StatusProvider
+
+_TAILSCALE_HOSTNAME_PATTERN = re.compile(
+    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){2,}ts\.net"
+)
+
+
+def _service_hostname() -> str | None:
+    hostname = os.environ.get("HOMESERVER_TAILSCALE_HOSTNAME", "").strip().rstrip(".").lower()
+    if len(hostname) <= 253 and _TAILSCALE_HOSTNAME_PATTERN.fullmatch(hostname):
+        return hostname
+    return None
 
 
 def create_app(
@@ -51,8 +63,27 @@ def create_app(
     @app.get("/ui/status", response_class=HTMLResponse)
     def status_page() -> HTMLResponse:
         template = Path(__file__).parent / "templates" / "status.html"
+        page = template.read_text(encoding="utf-8")
+        hostname = _service_hostname()
+        page = page.replace(
+            "{{SERVICE_ACCESS_STATE}}",
+            "Painéis via Tailscale" if hostname else "Hostname Tailscale não configurado",
+        )
+        for name, port in (
+            ("JELLYFIN", 8096),
+            ("SEERR", 5055),
+            ("SONARR", 8989),
+            ("RADARR", 7878),
+            ("QBITTORRENT", 18080),
+        ):
+            attributes = (
+                f'href="http://{hostname}:{port}/" target="_blank" rel="noopener noreferrer"'
+                if hostname
+                else 'aria-disabled="true"'
+            )
+            page = page.replace(f"{{{{SERVICE_{name}_LINK}}}}", attributes)
         return HTMLResponse(
-            template.read_text(encoding="utf-8"),
+            page,
             headers={
                 "Cache-Control": "no-store",
                 "Content-Security-Policy": (

@@ -1,8 +1,26 @@
 from datetime import UTC, datetime
+from html.parser import HTMLParser
 
 from fastapi.testclient import TestClient
 
 from homeserver_telemetry.app import create_app
+
+
+class _ServiceCards(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attributes: dict[str, dict[str, str | None]] = {}
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if tag == "a" and (card_id := attributes.get("id")):
+            self.attributes[card_id] = attributes
+
+
+def _service_cards(page: str) -> dict[str, dict[str, str | None]]:
+    parser = _ServiceCards()
+    parser.feed(page)
+    return parser.attributes
 
 
 def _snapshot() -> dict:
@@ -68,3 +86,64 @@ def test_status_dashboard_serves_read_only_page_and_live_snapshot() -> None:
     assert response.status_code == 200
     assert response.json()["network"]["rx_bps"] == 1200
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_status_dashboard_links_native_services_through_tailscale(monkeypatch) -> None:
+    monkeypatch.setenv("HOMESERVER_TAILSCALE_HOSTNAME", "server.example.ts.net")
+    client = TestClient(create_app(snapshot_provider=lambda: _snapshot()))
+
+    page = client.get("/ui/status")
+    cards = _service_cards(page.text)
+
+    assert page.status_code == 200
+    assert {
+        name: cards[name]["href"]
+        for name in (
+            "service-jellyfin",
+            "service-seerr",
+            "service-sonarr",
+            "service-radarr",
+            "service-qbittorrent",
+        )
+    } == {
+        "service-jellyfin": "http://server.example.ts.net:8096/",
+        "service-seerr": "http://server.example.ts.net:5055/",
+        "service-sonarr": "http://server.example.ts.net:8989/",
+        "service-radarr": "http://server.example.ts.net:7878/",
+        "service-qbittorrent": "http://server.example.ts.net:18080/",
+    }
+    for name in (
+        "service-jellyfin",
+        "service-seerr",
+        "service-sonarr",
+        "service-radarr",
+        "service-qbittorrent",
+    ):
+        assert cards[name]["target"] == "_blank"
+        assert cards[name]["rel"] == "noopener noreferrer"
+
+
+def test_status_dashboard_disables_links_without_valid_tailscale_hostname(monkeypatch) -> None:
+    client = TestClient(create_app(snapshot_provider=lambda: _snapshot()))
+    for hostname in (None, "https://server.example.ts.net/\" onmouseover=\"alert(1)"):
+        if hostname is None:
+            monkeypatch.delenv("HOMESERVER_TAILSCALE_HOSTNAME", raising=False)
+        else:
+            monkeypatch.setenv("HOMESERVER_TAILSCALE_HOSTNAME", hostname)
+
+        page = client.get("/ui/status")
+        cards = _service_cards(page.text)
+
+        assert page.status_code == 200
+        for name in (
+            "service-jellyfin",
+            "service-seerr",
+            "service-sonarr",
+            "service-radarr",
+            "service-qbittorrent",
+        ):
+            assert "href" not in cards[name]
+            assert cards[name]["aria-disabled"] == "true"
+        assert "Hostname Tailscale não configurado" in page.text
+        if hostname is not None:
+            assert hostname not in page.text

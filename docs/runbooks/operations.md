@@ -1,6 +1,8 @@
 # Operação diária
 
-- Consultar a fila e o motivo de espera antes de repetir um pedido.
+- Consultar a fila e o motivo de espera antes de repetir um pedido. Os links
+  dos painéis nativos Sonarr, Radarr e qBittorrent estão em
+  [Preparação dos serviços](service-setup.md#painéis-web-nativos).
 - Tratar `waiting_space`, `waiting_source`, `waiting_subtitles` e estados
   `unknown` como estados operacionais, não como falhas a ignorar.
 - Usar sempre o preview de exclusão e confirmar a mesma versão; a exclusão é

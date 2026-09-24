@@ -52,10 +52,20 @@
     .swatch { width: 8px; height: 8px; border-radius: 3px; flex: none; }
     .legend-item strong { font-weight: 550; font-variant-numeric: tabular-nums; white-space: nowrap; }
     .note { margin: 16px 0 0; color: #748b99; font-size: 12px; line-height: 1.5; }
+    .services { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+    .service-card { display: flex; flex-direction: column; min-height: 155px; color: inherit; text-decoration: none; transition: border-color .2s ease, transform .2s ease, background .2s ease; }
+    .service-card .card-label { margin-bottom: 23px; }
+    .service-name { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 23px; font-weight: 600; letter-spacing: -.035em; }
+    .service-arrow { color: #66d6c7; font-size: 21px; font-weight: 400; }
+    .service-description { margin-top: 10px; color: #8fa5b1; font-size: 13px; }
+    .service-card[href]:hover, .service-card[href]:focus-visible { border-color: #5bbbae; background: #172a31; transform: translateY(-2px); }
+    .service-card[href]:focus-visible { outline: 2px solid #66d6c7; outline-offset: 3px; }
+    .service-card[aria-disabled="true"] { opacity: .55; cursor: default; }
+    .service-card[aria-disabled="true"] .service-arrow { display: none; }
     .footer { display: flex; flex-wrap: wrap; gap: 12px 28px; margin-top: 22px; color: #738997; font-size: 12px; }
     .footer strong { color: #b2c5ce; font-weight: 500; }
-    @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-    @media (max-width: 620px) { main { width: min(100% - 26px, 1180px); padding-top: 26px; } header { flex-direction: column; margin-bottom: 28px; gap: 18px; } .grid { gap: 10px; } .card { padding: 17px; } .card-label { margin-bottom: 18px; } .value { font-size: 30px; } .storage { grid-template-columns: 1fr; gap: 26px; padding: 23px; } .legend { gap: 12px; } .section-heading { margin-top: 33px; } }
+    @media (max-width: 900px) { .grid, .services { grid-template-columns: repeat(2, minmax(0, 1fr)); } .service-card { min-height: 0; } }
+    @media (max-width: 620px) { main { width: min(100% - 26px, 1180px); padding-top: 26px; } header { flex-direction: column; margin-bottom: 28px; gap: 18px; } .grid { gap: 10px; } .services { grid-template-columns: 1fr; gap: 10px; } .card { padding: 17px; } .card-label { margin-bottom: 18px; } .value { font-size: 30px; } .storage { grid-template-columns: 1fr; gap: 26px; padding: 23px; } .legend { gap: 12px; } .section-heading { margin-top: 33px; } }
     @media (max-width: 370px) { .grid { grid-template-columns: 1fr; } }
   </style>
 </head>
@@ -94,6 +104,16 @@
           </div>
           <p class="note">Arquivos com hardlink são contados uma vez. “Outros” inclui dados fora das três pastas e uso do sistema de arquivos.</p>
         </div>
+      </div>
+    </section>
+    <section aria-labelledby="services-title">
+      <div class="section-heading"><h2 id="services-title">Serviços</h2><span class="meta">{{SERVICE_ACCESS_STATE}}</span></div>
+      <div class="services">
+        <a class="card service-card" id="service-jellyfin" {{SERVICE_JELLYFIN_LINK}}><span class="card-label">Biblioteca</span><span class="service-name">Jellyfin <span class="service-arrow" aria-hidden="true">↗</span></span><span class="service-description">Filmes, séries e reprodução</span></a>
+        <a class="card service-card" id="service-seerr" {{SERVICE_SEERR_LINK}}><span class="card-label">Pedidos</span><span class="service-name">Seerr <span class="service-arrow" aria-hidden="true">↗</span></span><span class="service-description">Solicitações e descobertas</span></a>
+        <a class="card service-card" id="service-sonarr" {{SERVICE_SONARR_LINK}}><span class="card-label">Séries</span><span class="service-name">Sonarr <span class="service-arrow" aria-hidden="true">↗</span></span><span class="service-description">Fila, atividade e histórico de episódios</span></a>
+        <a class="card service-card" id="service-radarr" {{SERVICE_RADARR_LINK}}><span class="card-label">Filmes</span><span class="service-name">Radarr <span class="service-arrow" aria-hidden="true">↗</span></span><span class="service-description">Fila, atividade e histórico de filmes</span></a>
+        <a class="card service-card" id="service-qbittorrent" {{SERVICE_QBITTORRENT_LINK}}><span class="card-label">Transferências</span><span class="service-name">qBittorrent <span class="service-arrow" aria-hidden="true">↗</span></span><span class="service-description">Velocidade, progresso e peers</span></a>
       </div>
     </section>
     <div class="footer"><span>Atualização <strong id="updated">—</strong></span><span>Ligado há <strong id="uptime">—</strong></span><span>Temperatura <strong id="temperature">—</strong></span></div>

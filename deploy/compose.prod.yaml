@@ -167,6 +167,7 @@ services:
     ports: ["${TAILSCALE_BIND_IP:-127.0.0.1}:8081:8080"]
     environment:
       HOMESERVER_TELEMETRY_SNAPSHOT: /run/homeserver/snapshot.json
+      HOMESERVER_TAILSCALE_HOSTNAME: ${HOMESERVER_TAILSCALE_HOSTNAME:-}
     volumes:
       - type: bind
         source: /run/homeserver

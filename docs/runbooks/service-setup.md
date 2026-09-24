@@ -8,6 +8,20 @@ Antes da primeira aquisição, configurar uma instância de Sonarr e Radarr,
 desabilitar busca/RSS/grabs autônomos e apontar os Arr apenas para o gateway.
 O qBittorrent permanece na rede `transfer`; não publicar sua API na LAN.
 
+## Painéis web nativos
+
+Com o Tailscale conectado, acessar `http://<tailscale-hostname>:8989/` (Sonarr),
+`http://<tailscale-hostname>:7878/` (Radarr) e
+`http://<tailscale-hostname>:18080/` (qBittorrent). Consultar o hostname e as
+portas ativas no servidor com `sudo tailscale serve status`. O Tailscale Serve
+encaminha as portas para os binds em loopback; esses painéis não são publicados
+na LAN. As credenciais ficam somente na configuração do servidor.
+
+Usar Sonarr/Radarr para acompanhar buscas, fila e importações, e o qBittorrent
+para acompanhar a transferência. Novos downloads continuam passando pelo
+controlador e gateway; não adicionar torrents ou alterar a fila manualmente
+pelo painel do qBittorrent.
+
 ## Porta de peers do qBittorrent
 
 Em produção, o Compose publica somente a porta de transferência P2P do
