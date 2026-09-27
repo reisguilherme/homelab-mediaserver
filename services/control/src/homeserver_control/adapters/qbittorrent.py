@@ -175,3 +175,17 @@ class QBittorrentAdapter:
         )
         if response.text.strip().lower() not in {"", "ok", "ok."}:
             raise ContractError("qBittorrent queue response is incompatible")
+
+    def delete_torrent(self, infohash: str, *, delete_files: bool) -> None:
+        """Delete one exact source; caller must verify ownership and manifest first."""
+        if not isinstance(infohash, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", infohash):
+            raise ValueError("invalid infohash")
+        if delete_files is not True:
+            raise ValueError("delete_files must be true")
+        self._ensure_login()
+        response = self._request(
+            "POST", "/api/v2/torrents/delete",
+            data={"hashes": infohash.lower(), "deleteFiles": "true"},
+        )
+        if response.text.strip().lower() not in {"", "ok", "ok."}:
+            raise ContractError("qBittorrent delete response is incompatible")

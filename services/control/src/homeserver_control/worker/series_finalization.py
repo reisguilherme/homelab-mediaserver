@@ -42,6 +42,7 @@ class SeriesFinalizer(MovieFinalizer):
         capacity_provider: Callable[[], Awaitable[CapacityEvidence]] | None = None,
         import_uid: int | None = None,
         import_gid: int | None = None,
+        is_tombstoned: Callable[[str], bool] | None = None,
     ) -> None:
         super().__init__(
             repository=repository, permits=permits, torrent_root=torrent_root,
@@ -52,6 +53,7 @@ class SeriesFinalizer(MovieFinalizer):
             import_uid=import_uid, import_gid=import_gid,
         )
         self.sonarr_url = sonarr_url.rstrip("/")
+        self.is_tombstoned = is_tombstoned or (lambda _key: False)
 
     async def _episodes(self, tmdb_id: int) -> list[dict[str, object]]:
         response = await self.client.get(
@@ -93,12 +95,17 @@ class SeriesFinalizer(MovieFinalizer):
         return seasons
 
     def _episode_imported(
-        self, episode: dict[str, object], reservations_by_season: dict[int, str]
+        self, episode: dict[str, object], reservations_by_season: dict[int, str],
+        series_tmdb_id: int,
     ) -> bool:
-        if episode.get("hasFile") is not True:
-            return False
         season = episode["seasonNumber"]
         number = episode["episodeNumber"]
+        if self.is_tombstoned(
+            f"episode:tmdb:{series_tmdb_id}:{_episode_tag(season, number)}"
+        ):
+            return True
+        if episode.get("hasFile") is not True:
+            return False
         reservation_id = reservations_by_season.get(season)
         if reservation_id is None:
             return False
@@ -266,7 +273,7 @@ class SeriesFinalizer(MovieFinalizer):
         )
         first_missing = next(
             (item for item in chronological
-             if not self._episode_imported(item, reservations_by_season)), None
+             if not self._episode_imported(item, reservations_by_season, tmdb_id)), None
         )
         seen_complete = False
         for episode in sorted(
@@ -275,6 +282,10 @@ class SeriesFinalizer(MovieFinalizer):
             key=lambda item: item["episodeNumber"],
         ):
             number = episode["episodeNumber"]
+            if self.is_tombstoned(
+                f"episode:tmdb:{tmdb_id}:{_episode_tag(season, number)}"
+            ):
+                continue
             permit = self.permits.get_for_reservation(
                 reservation_id, scope_key=_episode_tag(season, number)
             )

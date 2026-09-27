@@ -41,6 +41,14 @@ services:
       - media:/data/media:ro
       - transcode:/transcode
 
+  jellyfin-proxy:
+    image: ${JELLYFIN_PROXY_IMAGE:-nginx:1.30.5-alpine}
+    restart: "no"
+    networks: [apps, edge_control]
+    depends_on: [jellyfin, control-api]
+    volumes:
+      - ./jellyfin-proxy/nginx.conf:/etc/nginx/nginx.conf:ro
+
   seerr:
     image: ${SEERR_IMAGE:-fallenbagel/jellyseerr:2.7.3}
     restart: "no"

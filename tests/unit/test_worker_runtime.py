@@ -71,6 +71,28 @@ class FakeMoviePrioritizer:
 
 
 @pytest.mark.asyncio
+async def test_worker_handles_deletion_before_admitting_new_requests() -> None:
+    order: list[str] = []
+
+    class Deletion:
+        async def run_once(self) -> str:
+            order.append("delete")
+            return "complete"
+
+    class Source:
+        async def list_approved(self, page: int) -> list[dict[str, object]]:
+            order.append("requests")
+            return []
+
+    cycle = WorkerCycle(
+        source=Source(), scheduler=FakeScheduler([]),
+        deletion_coordinator=Deletion(),
+    )
+    await cycle.run_once()
+    assert order == ["delete", "requests"]
+
+
+@pytest.mark.asyncio
 async def test_worker_reserves_approved_requests_without_dispatching_downloads() -> None:
     source = FakeSource(
         pages=[

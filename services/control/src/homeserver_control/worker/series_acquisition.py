@@ -79,6 +79,7 @@ class SeriesAcquirer(MovieAcquirer):
         capacity_provider: Callable[[], Awaitable[CapacityEvidence]] | None = None,
         gateway_url: str | None = None, arr_token: str | None = None,
         health_store: SourceHealthStore | None = None,
+        is_tombstoned: Callable[[str], bool] | None = None,
     ) -> None:
         super().__init__(
             repository=repository, permits=permits, radarr_url=sonarr_url,
@@ -94,6 +95,7 @@ class SeriesAcquirer(MovieAcquirer):
             raise ValueError("gateway URL and worker token must be configured together")
         self.gateway_url = gateway_url.rstrip("/") if gateway_url else None
         self.arr_token = arr_token
+        self.is_tombstoned = is_tombstoned or (lambda _key: False)
 
     async def _reconcile_existing_queue(
         self, *, episodes: list[dict[str, object]], season: int,
@@ -163,12 +165,17 @@ class SeriesAcquirer(MovieAcquirer):
         return seasons
 
     def _episode_imported(
-        self, item: dict[str, object], reservations_by_season: dict[int, str]
+        self, item: dict[str, object], reservations_by_season: dict[int, str],
+        series_tmdb_id: int,
     ) -> bool:
-        if item.get("hasFile") is not True:
-            return False
         season = item["seasonNumber"]
         episode = item["episodeNumber"]
+        if self.is_tombstoned(
+            f"episode:tmdb:{series_tmdb_id}:{_episode_tag(season, episode)}"
+        ):
+            return True
+        if item.get("hasFile") is not True:
+            return False
         reservation_id = reservations_by_season.get(season)
         if reservation_id is None:
             return False
@@ -332,7 +339,7 @@ class SeriesAcquirer(MovieAcquirer):
         )
         imported_episode_ids = {
             item["id"] for item in chronological
-            if self._episode_imported(item, reservations_by_season)
+            if self._episode_imported(item, reservations_by_season, tmdb_id)
         }
         first_missing = next(
             (item for item in chronological if item["id"] not in imported_episode_ids), None

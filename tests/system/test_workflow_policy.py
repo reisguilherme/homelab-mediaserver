@@ -38,8 +38,10 @@ def test_capacity_snapshot_is_published_and_available_to_control_api() -> None:
     assert "source: /run/homeserver" in api
 
 
-def test_jellyfin_is_bound_to_lan_and_tailscale_only() -> None:
+def test_jellyfin_proxy_is_bound_to_lan_and_tailscale_only() -> None:
     compose = Path("deploy/compose.prod.yaml").read_text(encoding="utf-8")
-    jellyfin = compose.split("  jellyfin:\n", 1)[1].split("  seerr:\n", 1)[0]
-    assert '"${LAN_BIND_IP:-127.0.0.1}:8096:8096"' in jellyfin
-    assert '"${TAILSCALE_BIND_IP:-127.0.0.1}:8096:8096"' in jellyfin
+    jellyfin = compose.split("  jellyfin:\n", 1)[1].split("  jellyfin-proxy:\n", 1)[0]
+    proxy = compose.split("  jellyfin-proxy:\n", 1)[1].split("  seerr:\n", 1)[0]
+    assert "ports:" not in jellyfin
+    assert '"${LAN_BIND_IP:-127.0.0.1}:8096:8096"' in proxy
+    assert '"${TAILSCALE_BIND_IP:-127.0.0.1}:8096:8096"' in proxy

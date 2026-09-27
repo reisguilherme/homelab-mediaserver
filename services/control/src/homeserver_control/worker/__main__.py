@@ -16,6 +16,7 @@ import httpx
 from homeserver_control.adapters.seerr import SeerrAdapter
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
+from homeserver_control.persistence.deletion_jobs import DeletionJobStore
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
 from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 from homeserver_control.recovery import recovery_mode_blocks
@@ -23,6 +24,7 @@ from homeserver_control.recovery import recovery_mode_blocks
 from .acquisition import MovieAcquirer
 from .cancellation import CancellationReconciler
 from .capacity_evidence import read_capacity_evidence
+from .deletion_coordinator import DeletionCoordinator
 from .finalization import MovieFinalizer
 from .movie_priority import MoviePrioritizer
 from .runtime import WorkerCycle
@@ -59,6 +61,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
         return None
     repository = ReservationRepository(database)
     repository.initialize()
+    deletion_jobs = DeletionJobStore(database)
     key_file = os.environ.get("HOMESERVER_SUBDL_API_KEY_FILE")
     subdl_key = Path(key_file).read_text(encoding="utf-8").strip() if key_file else None
     if key_file and not subdl_key:
@@ -154,6 +157,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
             gateway_url="http://download-gateway:8081" if arr_token else None,
             arr_token=arr_token,
             health_store=health_store,
+            is_tombstoned=deletion_jobs.is_tombstoned,
         )
         if arr_token:
             series_finalizer_client = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
@@ -170,7 +174,25 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 ),
                 capacity_provider=capacity_provider,
                 import_uid=arr_uid, import_gid=arr_gid,
+                is_tombstoned=deletion_jobs.is_tombstoned,
             )
+    jellyfin_key = os.environ.get("HOMESERVER_JELLYFIN_API_KEY")
+    media_uuid = os.environ.get("HOMESERVER_MEDIA_UUID")
+    deletion_coordinator = None
+    if all((
+        media_uuid, jellyfin_key, radarr_url, radarr_key, sonarr_url, sonarr_key,
+        seerr_url, seerr_key, arr_token,
+    )):
+        deletion_coordinator = DeletionCoordinator(
+            jobs=deletion_jobs, media_root="/data/media", data_root="/data",
+            snapshot_path=snapshot_path, filesystem_id=media_uuid,
+            radarr_url=radarr_url, radarr_api_key=radarr_key,
+            sonarr_url=sonarr_url, sonarr_api_key=sonarr_key,
+            seerr_url=seerr_url, seerr_api_key=seerr_key,
+            gateway_url="http://download-gateway:8081", arr_token=arr_token,
+            jellyfin_url=os.environ.get("HOMESERVER_JELLYFIN_URL", "http://jellyfin:8096"),
+            jellyfin_api_key=jellyfin_key,
+        )
     return WorkerCycle(
         source=source, scheduler=scheduler, acquirer=acquirer, finalizer=finalizer,
         series_acquirer=series_acquirer, series_finalizer=series_finalizer,
@@ -187,6 +209,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 client=httpx.AsyncClient(timeout=httpx.Timeout(10.0)),
             ) if permits is not None and arr_token else None
         ),
+        deletion_coordinator=deletion_coordinator,
     )
 
 
@@ -230,6 +253,10 @@ async def _run_forever(
             getattr(cycle, "movie_prioritizer", None), MoviePrioritizer
         ):
             await cycle.movie_prioritizer.client.aclose()
+        if cycle is not None and isinstance(
+            getattr(cycle, "deletion_coordinator", None), DeletionCoordinator
+        ):
+            await cycle.deletion_coordinator.client.aclose()
 
 
 def main() -> None:

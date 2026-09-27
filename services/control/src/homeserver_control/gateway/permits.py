@@ -464,6 +464,61 @@ class PermitRegistry:
             ).fetchone()
         return self._permit_from_row(row) if row is not None else None
 
+    def deletion_source(
+        self, *, token: str, media_key: str, scope_key: str | None
+    ) -> Permit:
+        """Resolve a verified source for an exact media/episode deletion.
+
+        The in-memory registry has no authoritative reservation media key, so
+        deletion is deliberately unavailable without the persistent database.
+        Historical permits for another scope may still share a torrent hash;
+        fail closed if any other live permit can own the same payload.
+        """
+        if self._db_path is None or not isinstance(token, str) or not isinstance(
+            media_key, str
+        ) or (scope_key is not None and not isinstance(scope_key, str)):
+            raise PermissionError("persistent deletion source required")
+        with self._session() as connection:
+            row = connection.execute(
+                "SELECT p.* FROM gateway_permits p "
+                "JOIN reservations r ON r.id = p.reservation_id "
+                "WHERE p.token = ? AND p.state = 'confirmed' "
+                "AND r.media_key = ? AND p.scope_key IS ?",
+                (token, media_key, scope_key),
+            ).fetchone()
+            if row is None:
+                raise PermissionError("confirmed media source required")
+            permit = self._permit_from_row(row)
+            season = re.fullmatch(
+                r"season:tmdb:[1-9][0-9]*:([1-9][0-9]*)", media_key
+            )
+            episode = re.fullmatch(r"S([0-9]{2,})E[0-9]{2,}", scope_key or "")
+            if (
+                permit.destination != "/data/torrents"
+                or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
+                or permit.metadata_sha256 is None
+                or not permit.selected_files
+                or (scope_key is None and (
+                    permit.category != "radarr"
+                    or not re.fullmatch(r"movie:tmdb:[1-9][0-9]*", media_key)
+                ))
+                or (scope_key is not None and (
+                    permit.category != "sonarr"
+                    or season is None or episode is None
+                    or int(season[1]) != int(episode[1])
+                ))
+            ):
+                raise PermissionError("source identity is not deletable")
+            other = connection.execute(
+                "SELECT 1 FROM gateway_permits WHERE infohash = ? "
+                "AND permit_id != ? AND state IN "
+                "('authorized', 'dispatching', 'unknown', 'confirmed') LIMIT 1",
+                (permit.infohash, permit.permit_id),
+            ).fetchone()
+            if other is not None:
+                raise ValueError("torrent is shared by another active permit")
+        return permit
+
     def list_active_confirmed_movies(self) -> list[Permit]:
         """Return admitted movie sources whose reservations are still active."""
         if self._db_path is None:

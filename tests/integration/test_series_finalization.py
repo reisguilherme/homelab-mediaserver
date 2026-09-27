@@ -8,10 +8,28 @@ import pytest
 from homeserver_control.domain.media_probe import MediaProbe
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
+from homeserver_control.persistence.deletion_jobs import DeletionJobStore
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
 from homeserver_control.worker.capacity_evidence import CapacityEvidence
 from homeserver_control.worker.series_finalization import SeriesFinalizer
 from homeserver_control.worker.validation import ValidationError, ValidationResult
+
+
+def test_deleted_episode_does_not_block_finalizer_order(tmp_path):
+    repo = ReservationRepository(tmp_path / "control.sqlite")
+    repo.initialize()
+    jobs = DeletionJobStore(repo.path)
+    jobs.tombstone("episode:tmdb:97546:S01E02", "jellyfin-item")
+    finalizer = SeriesFinalizer(
+        repository=repo, permits=PermitRegistry(repo.path),
+        torrent_root=tmp_path, gateway_url="http://gateway:8081",
+        arr_token="secret", sonarr_url="http://sonarr:8989",
+        sonarr_api_key="secret", is_tombstoned=jobs.is_tombstoned,
+    )
+    assert finalizer._episode_imported(
+        {"seasonNumber": 1, "episodeNumber": 2, "hasFile": False},
+        {}, 97546,
+    )
 
 
 @pytest.mark.asyncio

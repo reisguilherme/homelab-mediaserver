@@ -10,9 +10,6 @@ services:
     shm_size: 512m
 
   jellyfin:
-    ports:
-      - "${LAN_BIND_IP:-127.0.0.1}:8096:8096"
-      - "${TAILSCALE_BIND_IP:-127.0.0.1}:8096:8096"
     volumes:
       - type: bind
         source: /srv/appdata/jellyfin
@@ -29,6 +26,10 @@ services:
         bind: {create_host_path: false}
     devices:
       - "${INTEL_RENDER_DEVICE:-/dev/dri/renderD128}:${INTEL_RENDER_DEVICE:-/dev/dri/renderD128}"
+  jellyfin-proxy:
+    ports:
+      - "${LAN_BIND_IP:-127.0.0.1}:8096:8096"
+      - "${TAILSCALE_BIND_IP:-127.0.0.1}:8096:8096"
   seerr:
     ports:
       - "${TAILSCALE_BIND_IP:-127.0.0.1}:5055:5055"
@@ -93,6 +94,12 @@ services:
       HOMESERVER_ADMIN_TOKEN: ${HOMESERVER_ADMIN_TOKEN:?set in /etc/homeserver/server.env}
       HOMESERVER_CSRF_TOKEN: ${HOMESERVER_CSRF_TOKEN:?set in /etc/homeserver/server.env}
       HOMESERVER_COLLECTOR_TOKEN: ${HOMESERVER_COLLECTOR_TOKEN:?set in /etc/homeserver/server.env}
+      HOMESERVER_MEDIA_UUID: ${HOMESERVER_MEDIA_UUID:?set in /etc/homeserver/server.env}
+      HOMESERVER_JELLYFIN_URL: http://jellyfin:8096
+      HOMESERVER_RADARR_URL: ${HOMESERVER_RADARR_URL:-}
+      HOMESERVER_RADARR_API_KEY: ${HOMESERVER_RADARR_API_KEY:-}
+      HOMESERVER_SONARR_URL: ${HOMESERVER_SONARR_URL:-}
+      HOMESERVER_SONARR_API_KEY: ${HOMESERVER_SONARR_API_KEY:-}
       HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
       HOMESERVER_CAPACITY_SNAPSHOT: /run/homeserver/capacity.json
       HOMESERVER_RECOVERY_MODE: /var/lib/homeserver/RECOVERY_MODE
@@ -116,6 +123,9 @@ services:
       HOMESERVER_ARR_UID: ${HOMESERVER_ARR_UID:-1000}
       HOMESERVER_ARR_GID: ${HOMESERVER_ARR_GID:-1000}
       HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
+      HOMESERVER_MEDIA_UUID: ${HOMESERVER_MEDIA_UUID:?set in /etc/homeserver/server.env}
+      HOMESERVER_JELLYFIN_URL: http://jellyfin:8096
+      HOMESERVER_JELLYFIN_API_KEY: ${HOMESERVER_JELLYFIN_API_KEY:?set in /etc/homeserver/server.env}
       HOMESERVER_SEERR_URL: ${HOMESERVER_SEERR_URL:-}
       HOMESERVER_SEERR_API_KEY: ${HOMESERVER_SEERR_API_KEY:-}
       HOMESERVER_RADARR_URL: ${HOMESERVER_RADARR_URL:-}

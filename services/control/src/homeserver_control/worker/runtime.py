@@ -38,6 +38,10 @@ class MoviePriority(Protocol):
     async def prioritize(self) -> str: ...
 
 
+class CoordinatedDeletion(Protocol):
+    async def run_once(self) -> str: ...
+
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -72,6 +76,7 @@ class WorkerCycle:
         cancellation: Cancellation | None = None,
         source_reconciler: UncertainSourceReconciliation | None = None,
         movie_prioritizer: MoviePriority | None = None,
+        deletion_coordinator: CoordinatedDeletion | None = None,
         page_size: int = 20,
     ) -> None:
         if not 1 <= page_size <= 100:
@@ -85,6 +90,7 @@ class WorkerCycle:
         self.cancellation = cancellation
         self.source_reconciler = source_reconciler
         self.movie_prioritizer = movie_prioritizer
+        self.deletion_coordinator = deletion_coordinator
         self.page_size = page_size
 
     @classmethod
@@ -109,6 +115,12 @@ class WorkerCycle:
         )
 
     async def run_once(self) -> CycleReport:
+        if self.deletion_coordinator is not None:
+            try:
+                await self.deletion_coordinator.run_once()
+            except Exception:
+                LOGGER.exception("coordinated deletion failed; acquisitions paused this cycle")
+                return CycleReport()
         can_prioritize = True
         if self.source_reconciler is not None:
             try:

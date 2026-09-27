@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -12,8 +13,10 @@ from fastapi import FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from homeserver_control.api.deletion_capture import DeletionAdmission, DeletionCaptureError
 from homeserver_control.domain.deletion_plan import DeletionPlanError, DeletionPlanner
 from homeserver_control.persistence.db import ReservationRepository
+from homeserver_control.persistence.deletion_jobs import DeletionJobStore
 from homeserver_control.recovery import recovery_mode_blocks
 
 CapacityProvider = Callable[[], dict[str, Any]]
@@ -82,6 +85,7 @@ class ControlState:
     acknowledged_event_id: int = 0
     seed_limit: dict[str, Any] = field(default_factory=dict)
     repository: ReservationRepository | None = field(init=False, default=None)
+    deletion_admission: DeletionAdmission | None = None
 
     def __post_init__(self) -> None:
         if self.media_roots:
@@ -137,6 +141,23 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
                 )
             ),
         )
+        media_uuid = os.environ.get("HOMESERVER_MEDIA_UUID", "")
+        if media_uuid and state.db_path is not None:
+            deletion_jobs = DeletionJobStore(state.db_path)
+            deletion_jobs.initialize()
+            state.deletion_admission = DeletionAdmission(
+                jobs=deletion_jobs,
+                media_root="/data/media",
+                snapshot_path=os.environ.get(
+                    "HOMESERVER_CAPACITY_SNAPSHOT", "/run/homeserver/capacity.json"
+                ),
+                filesystem_id=media_uuid,
+                jellyfin_url=os.environ.get("HOMESERVER_JELLYFIN_URL", "http://jellyfin:8096"),
+                radarr_url=os.environ.get("HOMESERVER_RADARR_URL", ""),
+                radarr_api_key=os.environ.get("HOMESERVER_RADARR_API_KEY", ""),
+                sonarr_url=os.environ.get("HOMESERVER_SONARR_URL", ""),
+                sonarr_api_key=os.environ.get("HOMESERVER_SONARR_API_KEY", ""),
+            )
 
     app = FastAPI(title="HomeServer control API", version="1")
 
@@ -206,6 +227,46 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         require_admin(x_admin_token)
         return {"items": state.queue[:limit], "next_cursor": None}
+
+    @app.delete("/Items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+    @app.delete("/{prefix:path}/Items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
+    async def jellyfin_delete(
+        item_id: str,
+        prefix: str = "",
+        authorization: str | None = Header(default=None),
+        x_emby_token: str | None = Header(default=None),
+        x_emby_authorization: str | None = Header(default=None),
+    ) -> Response:
+        if prefix and any(part in {"", ".", ".."} for part in prefix.split("/")):
+            raise HTTPException(status_code=404, detail="invalid Jellyfin base path")
+        if not admission_enabled() or state.deletion_admission is None:
+            raise HTTPException(status_code=503, detail="coordinated deletion unavailable")
+        auth = authorization or x_emby_authorization or ""
+        match = re.search(r'(?:^|,)\s*Token="([^"]+)"', auth)
+        user_token = x_emby_token or (match.group(1) if match else "")
+        try:
+            await state.deletion_admission.capture(item_id, user_token)
+        except DeletionCaptureError as error:
+            raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.get("/api/v1/deletions/jobs")
+    def deletion_jobs_status(
+        x_admin_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        require_admin(x_admin_token)
+        if state.deletion_admission is None:
+            raise HTTPException(status_code=503, detail="coordinated deletion unavailable")
+        return {"items": [
+            {
+                "item_id": job["item_id"],
+                "item_type": job["item_type"],
+                "stage": job["stage"],
+                "error": job["error"],
+                "updated_at": job["updated_at"],
+            }
+            for job in state.deletion_admission.jobs.list()
+        ]}
 
     @app.get("/ui/queue", response_class=HTMLResponse)
     def queue_page(x_admin_token: str | None = Header(default=None)) -> Response:

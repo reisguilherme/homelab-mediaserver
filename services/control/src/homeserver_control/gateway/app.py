@@ -35,6 +35,8 @@ class QbitClient(Protocol):
 
     def top_priority(self, infohash: str) -> None: ...
 
+    def delete_torrent(self, infohash: str, *, delete_files: bool) -> None: ...
+
 
 class UnconfiguredQbitClient:
     def add_torrent(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -47,6 +49,9 @@ class UnconfiguredQbitClient:
         raise RuntimeError("qBittorrent upstream is not configured")
 
     def top_priority(self, infohash: str) -> None:
+        raise RuntimeError("qBittorrent upstream is not configured")
+
+    def delete_torrent(self, infohash: str, *, delete_files: bool) -> None:
         raise RuntimeError("qBittorrent upstream is not configured")
 
 
@@ -126,6 +131,110 @@ def create_app(
         ):
             raise HTTPException(status_code=409, detail="torrent identity changed")
         return current
+
+    @app.post("/internal/delete-source")
+    async def delete_source(
+        request: Request, x_arr_token: str | None = Header(default=None)
+    ) -> dict[str, str]:
+        """Remove one explicitly deleted item's exclusive, verified qBit source."""
+        if arr_token == "unconfigured" or not token_matches(x_arr_token, arr_token):
+            raise HTTPException(status_code=403, detail="worker credential required")
+        if torrent_store is None:
+            raise HTTPException(status_code=503, detail="torrent metadata store unavailable")
+        try:
+            body = await request.json()
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="invalid JSON body") from error
+        if not isinstance(body, dict) or set(body) != {
+            "permit_token", "media_key", "scope_key"
+        }:
+            raise HTTPException(status_code=422, detail="exact media source required")
+        if (
+            not isinstance(body["permit_token"], str)
+            or not isinstance(body["media_key"], str)
+            or (body["scope_key"] is not None and not isinstance(body["scope_key"], str))
+        ):
+            raise HTTPException(status_code=422, detail="invalid media source identity")
+        try:
+            permit = permits.deletion_source(
+                token=body["permit_token"], media_key=body["media_key"],
+                scope_key=body["scope_key"],
+            )
+        except PermissionError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        metadata = torrent_store.get(permit)
+        if metadata is None:
+            raise HTTPException(status_code=409, detail="verified torrent metadata unavailable")
+        try:
+            inspected = inspect_torrent(metadata)
+        except TorrentBytesError as error:
+            raise HTTPException(
+                status_code=409, detail="verified torrent metadata changed"
+            ) from error
+        expected_files = {(item.path, item.length) for item in inspected.files}
+        if (
+            len(expected_files) != len(inspected.files)
+            or {item.path for item in inspected.files} != set(permit.selected_files)
+            or inspected.total_bytes != permit.budget_bytes
+        ):
+            raise HTTPException(status_code=409, detail="torrent contains other media")
+
+        entries = upstream.read("/api/v2/torrents/info", {"hashes": permit.infohash})
+        if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
+            raise HTTPException(status_code=502, detail="invalid torrent list")
+        matches = [
+            item for item in entries if isinstance(item.get("hash"), str)
+            and item["hash"].lower() == permit.infohash
+        ]
+        if not matches:
+            return {"state": "missing"}
+        if len(matches) != 1:
+            raise HTTPException(status_code=409, detail="ambiguous torrent identity")
+        current = matches[0]
+        if (
+            current.get("category") != permit.category
+            or not isinstance(current.get("save_path"), str)
+            or current["save_path"].rstrip("/") != permit.destination.rstrip("/")
+        ):
+            raise HTTPException(status_code=409, detail="torrent identity changed")
+        files = upstream.read("/api/v2/torrents/files", {"hash": permit.infohash})
+        if not isinstance(files, list) or any(not isinstance(item, dict) for item in files):
+            raise HTTPException(status_code=502, detail="invalid torrent files")
+        actual_files: set[tuple[str, int]] = set()
+        for item in files:
+            name, size, priority = (item.get(key) for key in ("name", "size", "priority"))
+            if (
+                not isinstance(name, str) or not name
+                or isinstance(size, bool) or not isinstance(size, int) or size <= 0
+                or isinstance(priority, bool) or not isinstance(priority, int) or priority <= 0
+            ):
+                raise HTTPException(status_code=409, detail="torrent files changed")
+            actual_files.add((name, size))
+        if len(files) != len(actual_files) or actual_files != expected_files:
+            raise HTTPException(status_code=409, detail="torrent files changed")
+
+        # Recheck the persistent permit immediately before the destructive call.
+        try:
+            current_permit = permits.deletion_source(
+                token=body["permit_token"], media_key=body["media_key"],
+                scope_key=body["scope_key"],
+            )
+        except (PermissionError, ValueError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        if current_permit.permit_id != permit.permit_id:
+            raise HTTPException(status_code=409, detail="source permit changed")
+        upstream.delete_torrent(permit.infohash, delete_files=True)
+        after = upstream.read("/api/v2/torrents/info", {"hashes": permit.infohash})
+        if not isinstance(after, list) or any(not isinstance(item, dict) for item in after):
+            raise HTTPException(status_code=502, detail="invalid torrent list after deletion")
+        if any(
+            isinstance(item.get("hash"), str) and item["hash"].lower() == permit.infohash
+            for item in after
+        ):
+            raise HTTPException(status_code=503, detail="torrent deletion is still pending")
+        return {"state": "deleted"}
 
     @app.get("/internal/torrent-health")
     def torrent_health(

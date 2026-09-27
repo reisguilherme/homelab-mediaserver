@@ -202,3 +202,27 @@ def test_adapter_promotes_only_one_validated_torrent_hash() -> None:
         with pytest.raises(ValueError, match="invalid infohash"):
             adapter.top_priority(invalid)
     assert len(commands) == 1
+
+
+def test_adapter_deletes_only_one_exact_hash_and_its_data() -> None:
+    infohash = "c" * 40
+    commands: list[tuple[str, bytes]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v2/auth/login":
+            return httpx.Response(200, text="Ok.")
+        commands.append((request.url.path, request.content))
+        return httpx.Response(200, text="Ok.")
+
+    adapter = QBittorrentAdapter(
+        base_url="http://qbittorrent:8080", username="admin", password="secret",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    adapter.delete_torrent(infohash.upper(), delete_files=True)
+    assert commands == [
+        ("/api/v2/torrents/delete", f"hashes={infohash}&deleteFiles=true".encode()),
+    ]
+    for invalid in ("all", f"{infohash}|{'d' * 40}", "not-a-hash"):
+        with pytest.raises(ValueError, match="invalid infohash"):
+            adapter.delete_torrent(invalid, delete_files=True)
+    assert len(commands) == 1

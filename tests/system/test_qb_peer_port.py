@@ -32,6 +32,8 @@ def test_production_publishes_only_qbittorrent_peer_port_on_lan_ip(
         HOMESERVER_CSRF_TOKEN="test-csrf",
         HOMESERVER_COLLECTOR_TOKEN="test-collector",
         HOMESERVER_ARR_TOKEN="test-arr",
+        HOMESERVER_MEDIA_UUID="test-media-uuid",
+        HOMESERVER_JELLYFIN_API_KEY="test-jellyfin-key",
     )
     env.pop("LAN_BIND_IP", None)
     env.pop("QBITTORRENT_PEER_PORT", None)

@@ -2,8 +2,6 @@
 # ../.runtime/dev because Compose resolves relative bind sources from this deploy directory).
 services:
   jellyfin:
-    ports:
-      - "127.0.0.1:18096:8096"
     volumes:
       - type: bind
         source: ${HOMESERVER_APPDATA_ROOT:-../.runtime/dev/appdata}/jellyfin
@@ -18,6 +16,9 @@ services:
         source: ${HOMESERVER_TRANSCODE_ROOT:-../.runtime/dev/transcode}
         target: /transcode
         bind: {create_host_path: false}
+  jellyfin-proxy:
+    ports:
+      - "127.0.0.1:18096:8096"
   seerr:
     ports: ["127.0.0.1:18091:5055"]
   sonarr:
@@ -60,6 +61,12 @@ services:
       HOMESERVER_ADMIN_TOKEN: ${HOMESERVER_ADMIN_TOKEN:-local-dev-only-admin}
       HOMESERVER_CSRF_TOKEN: ${HOMESERVER_CSRF_TOKEN:-local-dev-only-csrf}
       HOMESERVER_COLLECTOR_TOKEN: ${HOMESERVER_COLLECTOR_TOKEN:-local-dev-only-collector}
+      HOMESERVER_MEDIA_UUID: ${HOMESERVER_MEDIA_UUID:-}
+      HOMESERVER_JELLYFIN_URL: http://jellyfin:8096
+      HOMESERVER_RADARR_URL: ${HOMESERVER_RADARR_URL:-http://radarr:7878}
+      HOMESERVER_RADARR_API_KEY: ${HOMESERVER_RADARR_API_KEY:-}
+      HOMESERVER_SONARR_URL: ${HOMESERVER_SONARR_URL:-http://sonarr:8989}
+      HOMESERVER_SONARR_API_KEY: ${HOMESERVER_SONARR_API_KEY:-}
       HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
       HOMESERVER_CAPACITY_SNAPSHOT: /run/homeserver/capacity.json
       HOMESERVER_RECOVERY_MODE: /var/lib/homeserver/RECOVERY_MODE
@@ -83,6 +90,9 @@ services:
   control-worker:
     environment:
       HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
+      HOMESERVER_MEDIA_UUID: ${HOMESERVER_MEDIA_UUID:-}
+      HOMESERVER_JELLYFIN_URL: http://jellyfin:8096
+      HOMESERVER_JELLYFIN_API_KEY: ${HOMESERVER_JELLYFIN_API_KEY:-}
       HOMESERVER_SEERR_URL: ${HOMESERVER_SEERR_URL:-}
       HOMESERVER_SEERR_API_KEY: ${HOMESERVER_SEERR_API_KEY:-}
       HOMESERVER_CAPACITY_SNAPSHOT: ${HOMESERVER_CAPACITY_SNAPSHOT:-/run/homeserver/capacity.json}

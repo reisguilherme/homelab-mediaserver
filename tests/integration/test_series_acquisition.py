@@ -11,6 +11,7 @@ import pytest
 from homeserver_control.domain.torrent_bytes import inspect_torrent
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
+from homeserver_control.persistence.deletion_jobs import DeletionJobStore
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
 from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 from homeserver_control.worker.capacity_evidence import CapacityEvidence
@@ -87,6 +88,22 @@ def _completed_earlier_seasons(season: int):
          "monitored": True, "hasFile": True}
         for number in range(1, season)
     ]
+
+
+def test_explicitly_deleted_episode_is_treated_as_complete_for_ordering(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path, season=1)
+    jobs = DeletionJobStore(repo.path)
+    jobs.tombstone("episode:tmdb:97546:S01E02", "jellyfin-item")
+    acquirer = SeriesAcquirer(
+        repository=repo, permits=permits,
+        sonarr_url="http://sonarr:8989", sonarr_api_key="secret",
+        prowlarr_url="http://prowlarr:9696",
+        is_tombstoned=jobs.is_tombstoned,
+    )
+    assert acquirer._episode_imported(
+        {"id": 2, "seasonNumber": 1, "episodeNumber": 2, "hasFile": False},
+        {1: reservation_id}, 97546,
+    )
 
 
 @pytest.mark.asyncio
