@@ -152,3 +152,6 @@ def test_proxy_preserves_playback_range_and_websocket_headers() -> None:
     assert headers["Authorization"] == "$http_authorization"
     assert headers["X-Emby-Token"] == "$http_x_emby_token"
     assert "proxy_pass_request_headers on;" in config
+    assert "log_format homeserver" in config
+    assert "$request_method $uri $server_protocol" in config
+    assert "$request_method $request_uri" not in config
