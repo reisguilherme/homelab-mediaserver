@@ -130,7 +130,8 @@ async def test_movie_cascade_removes_captured_source_and_completes(tmp_path: Pat
         if request.url.host == "jellyfin":
             assert not video.exists()
             assert request.headers["X-Emby-Token"] == "jellyfin-key"
-            return httpx.Response(204)
+            assert request.method == "GET" and request.url.path == "/Items"
+            return httpx.Response(200, json={"Items": []})
         raise AssertionError(request)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
@@ -148,7 +149,7 @@ async def test_movie_cascade_removes_captured_source_and_completes(tmp_path: Pat
         ("GET", "/api/v3/movie/7"), ("DELETE", "/api/v3/moviefile/9"),
         ("DELETE", "/api/v3/movie/7"),
         ("GET", "/api/v1/request/77"),
-        ("DELETE", "/api/v1/request/77"), ("DELETE", "/Items/" + "a" * 32),
+        ("DELETE", "/api/v1/request/77"), ("GET", "/Items"),
     ]
 
 
@@ -207,7 +208,8 @@ async def test_exact_sidecars_are_removed_without_touching_other_media(tmp_path:
         if request.url.host == "jellyfin":
             assert not any(path.exists() for path in (ptbr, english, forced, sdh))
             assert neighbor.read_text(encoding="utf-8") == "neighbor"
-            return httpx.Response(204)
+            assert request.method == "GET" and request.url.path == "/Items"
+            return httpx.Response(200, json={"Items": []})
         raise AssertionError(request)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
@@ -361,7 +363,8 @@ async def test_episode_hardlink_is_removed_only_after_exact_sonarr_scope(tmp_pat
             return httpx.Response(200, json={})
         if request.url.host == "jellyfin":
             assert not video.exists()
-            return httpx.Response(204)
+            assert request.method == "GET" and request.url.path == "/Items"
+            return httpx.Response(200, json={"Items": []})
         raise AssertionError(request)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
@@ -373,7 +376,7 @@ async def test_episode_hardlink_is_removed_only_after_exact_sonarr_scope(tmp_pat
 
     assert not video.exists() and not torrent.exists()
     assert jobs.is_tombstoned("episode:tmdb:321:S01E02")
-    assert calls[-1] == ("DELETE", "/Items/" + "b" * 32)
+    assert calls[-1] == ("GET", "/Items")
     assert not any(path.startswith("/api/v1/request") for _, path in calls)
 
 
@@ -428,7 +431,8 @@ async def test_lost_radarr_response_retries_without_second_delete(tmp_path: Path
             record_deleted = True
             return httpx.Response(204)
         if request.url.host == "jellyfin":
-            return httpx.Response(204)
+            assert request.method == "GET" and request.url.path == "/Items"
+            return httpx.Response(200, json={"Items": []})
         raise AssertionError(request)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
@@ -477,3 +481,159 @@ async def test_symlinked_sidecar_blocks_without_touching_target(tmp_path: Path) 
     assert jobs.get("a" * 32)["stage"] == "blocked"
     assert sidecar.is_symlink()
     assert outside.read_text(encoding="utf-8") == "protected"
+
+
+@pytest.mark.asyncio
+async def test_jellyfin_catalog_sync_preserves_read_only_movie_folder(tmp_path: Path) -> None:
+    """After Arr removes a file, Jellyfin must prune its catalog without deleting the folder."""
+    jobs, data_root, media_root, snapshot, video = _fixture(tmp_path)
+    video.unlink()
+    jobs.set_stage("a" * 32, "seerr_removed")
+    notified = refreshed = False
+    calls: list[tuple[str, str]] = []
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        nonlocal notified, refreshed
+        calls.append((request.method, request.url.path))
+        if request.url.host != "jellyfin":
+            raise AssertionError(request)
+        if request.method == "GET" and request.url.path == "/Items":
+            assert request.url.params["Ids"] == "a" * 32
+            return httpx.Response(200, json={
+                "Items": [] if refreshed else [{"Id": "a" * 32}],
+            })
+        if request.method == "POST" and request.url.path == "/Library/Media/Updated":
+            assert json.loads(request.content) == {"Updates": [{
+                "Path": str(video), "UpdateType": "Deleted",
+            }]}
+            notified = True
+            return httpx.Response(204)
+        if request.method == "POST" and request.url.path == "/Library/Refresh":
+            assert notified
+            refreshed = True
+            return httpx.Response(204)
+        raise AssertionError(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
+        coordinator = _coordinator(
+            jobs=jobs, data_root=data_root, media_root=media_root,
+            snapshot=snapshot, client=client,
+        )
+        assert await coordinator.run_once() == "retry"
+        assert notified and not refreshed
+        coordinator._jellyfin_notify_at["a" * 32] = time.monotonic() - 91
+        assert await coordinator.run_once() == "complete"
+
+    assert video.parent.is_dir()
+    assert jobs.get("a" * 32)["stage"] == "complete"
+    assert ("DELETE", "/Items/" + "a" * 32) not in calls
+    assert ("POST", "/Library/Refresh") in calls
+
+
+@pytest.mark.asyncio
+async def test_jellyfin_refresh_204_does_not_complete_unpruned_item(tmp_path: Path) -> None:
+    jobs, data_root, media_root, snapshot, video = _fixture(tmp_path)
+    video.unlink()
+    jobs.set_stage("a" * 32, "seerr_removed")
+
+    refreshes = 0
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        nonlocal refreshes
+        if request.url.host != "jellyfin":
+            raise AssertionError(request)
+        if request.method == "GET" and request.url.path == "/Items":
+            return httpx.Response(200, json={"Items": [{"Id": "a" * 32}]})
+        if request.method == "POST" and request.url.path == "/Library/Refresh":
+            refreshes += 1
+            return httpx.Response(204)
+        if request.method == "POST" and request.url.path == "/Library/Media/Updated":
+            return httpx.Response(204)
+        raise AssertionError(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
+        coordinator = _coordinator(
+            jobs=jobs, data_root=data_root, media_root=media_root,
+            snapshot=snapshot, client=client,
+        )
+        assert await coordinator.run_once() == "retry"
+        assert await coordinator.run_once() == "retry"
+        assert refreshes == 0
+        coordinator._jellyfin_notify_at["a" * 32] = time.monotonic() - 91
+        assert await coordinator.run_once() == "retry"
+        assert await coordinator.run_once() == "retry"
+
+    assert jobs.get("a" * 32)["stage"] == "seerr_removed"
+    assert refreshes == 1
+
+
+@pytest.mark.asyncio
+async def test_jellyfin_item_lookup_accepts_case_variant(tmp_path: Path) -> None:
+    jobs, data_root, media_root, snapshot, _video = _fixture(tmp_path)
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/Items"
+        return httpx.Response(200, json={"Items": [{"Id": "a" * 32}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
+        coordinator = _coordinator(
+            jobs=jobs, data_root=data_root, media_root=media_root,
+            snapshot=snapshot, client=client,
+        )
+        assert await coordinator._jellyfin_item_present("A" * 32)
+
+
+@pytest.mark.asyncio
+async def test_jellyfin_episode_sync_keeps_season_folder_and_other_episode(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data"
+    media_root = data_root / "media"
+    season = media_root / "tv" / "Test Series" / "Season 01"
+    season.mkdir(parents=True)
+    video = season / "Test Series S01E02.mkv"
+    video.write_bytes(b"episode fixture")
+    neighbor = season / "Test Series S01E03.mkv"
+    neighbor.write_bytes(b"keep me")
+    snapshot = tmp_path / "capacity.json"
+    snapshot.write_text(json.dumps({
+        "filesystem_id": "media-uuid", "measured_at": time.time(),
+    }), encoding="utf-8")
+    jobs = DeletionJobStore(tmp_path / "control.sqlite")
+    jobs.initialize()
+    jobs.enqueue("b" * 32, "Episode", {
+        "media_key": "episode:tmdb:321:S01E02", "file_path": str(video),
+        "file_identity": _identity(video), "sonarr_series_id": 3,
+        "sonarr_episode_id": 4, "sonarr_episode_file_id": 5,
+        "series_tmdb_id": 321, "season": 1, "episode": 2,
+    })
+    jobs.set_stage("b" * 32, "seerr_removed")
+    video.unlink()
+    notified = False
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        nonlocal notified
+        if request.url.host != "jellyfin":
+            raise AssertionError(request)
+        if request.method == "GET" and request.url.path == "/Items":
+            return httpx.Response(200, json={
+                "Items": [] if notified else [{"Id": "b" * 32}],
+            })
+        if request.method == "POST" and request.url.path == "/Library/Media/Updated":
+            assert json.loads(request.content) == {"Updates": [{
+                "Path": str(video), "UpdateType": "Deleted",
+            }]}
+            notified = True
+            return httpx.Response(204)
+        raise AssertionError(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
+        coordinator = _coordinator(
+            jobs=jobs, data_root=data_root, media_root=media_root,
+            snapshot=snapshot, client=client,
+        )
+        assert await coordinator.run_once() == "complete"
+
+    assert jobs.get("b" * 32)["stage"] == "complete"
+    assert season.is_dir()
+    assert neighbor.read_bytes() == b"keep me"

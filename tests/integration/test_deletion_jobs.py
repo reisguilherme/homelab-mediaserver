@@ -57,6 +57,19 @@ def test_restart_returns_oldest_active_job_with_persisted_stage(tmp_path) -> Non
     assert reopened.next_queued() is None
 
 
+def test_retry_rotates_oldest_job_behind_other_pending_deletions(tmp_path) -> None:
+    from homeserver_control.persistence.deletion_jobs import DeletionJobStore
+
+    store = DeletionJobStore(tmp_path / "control.sqlite3")
+    store.initialize()
+    store.enqueue("first", "Movie", {"media_key": "movie:tmdb:1"})
+    store.enqueue("second", "Movie", {"media_key": "movie:tmdb:2"})
+    assert store.next_queued()["item_id"] == "first"
+
+    store.touch("first")
+    assert store.next_queued()["item_id"] == "second"
+
+
 def test_tombstone_is_idempotent_and_blocks_future_reservation(tmp_path) -> None:
     from homeserver_control.persistence.deletion_jobs import DeletionJobStore
 

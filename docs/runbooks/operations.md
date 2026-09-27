@@ -10,7 +10,8 @@
   Esse comando cria uma operação durável no controlador. Assistir ou marcar
   como assistido não apaga nada. O Jellyfin continua sem escrita direta na
   biblioteca; o worker remove a origem verificada, o registro Arr e o arquivo,
-  depois retira o item do catálogo.
+  depois notifica o Jellyfin e confirma que a varredura retirou o item do
+  catálogo. Não conceda escrita ao contêiner Jellyfin para habilitar esse botão.
 - Consultar o resultado em `GET /api/v1/deletions/jobs` na API de controle
   (porta Tailscale 8080, cabeçalho `X-Admin-Token`). `complete` confirma o
   fim; `blocked` mostra ambiguidade ou arquivo alterado; uma etapa com erro

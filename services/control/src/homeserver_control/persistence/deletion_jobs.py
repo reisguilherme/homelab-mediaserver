@@ -86,14 +86,23 @@ class DeletionJobStore:
         return [self._decode(row) for row in rows]
 
     def next_queued(self) -> dict[str, object] | None:
-        """Return the oldest job whose current stage can be resumed."""
+        """Return the least recently attempted resumable job."""
         with closing(self._connect()) as connection:
             row = connection.execute(
                 """SELECT * FROM deletion_jobs WHERE stage NOT IN (?, ?)
-                ORDER BY created_at, rowid LIMIT 1""",
+                ORDER BY updated_at, created_at, rowid LIMIT 1""",
                 tuple(_TERMINAL_STAGES),
             ).fetchone()
         return self._decode(row) if row is not None else None
+
+    def touch(self, item_id: str) -> None:
+        """Rotate a retrying job behind other pending deletions."""
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE deletion_jobs SET updated_at = ? WHERE item_id = ?",
+                (_now(), item_id),
+            )
 
     def set_stage(
         self, item_id: str, stage: str, error: str | None = None

@@ -70,6 +70,8 @@ class DeletionCoordinator:
         self.jellyfin_headers = {"X-Emby-Token": jellyfin_api_key}
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(15.0))
         self.mount_check = mount_check or os.path.ismount
+        self._jellyfin_notify_at: dict[str, float] = {}
+        self._jellyfin_refresh_at: dict[str, float] = {}
 
     def _guard_mount(self) -> None:
         try:
@@ -439,16 +441,76 @@ class DeletionCoordinator:
         )
         self._status(response, allow_missing=True)
 
-    async def _delete_jellyfin(self, job: dict[str, Any]) -> None:
-        self._guard_mount()
-        _path, remaining = self._file(job, must_exist=False)
-        if remaining is not None:
-            raise DeletionBlocked("media file still exists before Jellyfin cleanup")
-        response = await self.client.delete(
-            f"{self.jellyfin_url}/Items/{job['item_id']}",
+    async def _jellyfin_item_present(self, item_id: str) -> bool:
+        response = await self.client.get(
+            f"{self.jellyfin_url}/Items",
+            params={"Ids": item_id, "Recursive": "true"},
             headers=self.jellyfin_headers,
         )
-        self._status(response, allow_missing=True)
+        result = self._json(response)
+        items = result.get("Items") if isinstance(result, dict) else None
+        if not isinstance(items, list) or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("Id"), str)
+            or item["Id"].lower() != item_id.lower()
+            for item in items
+        ) or len(items) > 1:
+            raise DeletionRetryable("Jellyfin returned an invalid item lookup")
+        return bool(items)
+
+    async def _delete_jellyfin(self, job: dict[str, Any]) -> None:
+        self._guard_mount()
+        path, remaining = self._file(job, must_exist=False)
+        if remaining is not None:
+            raise DeletionBlocked("media file still exists before Jellyfin cleanup")
+        if not await self._jellyfin_item_present(job["item_id"]):
+            self._jellyfin_notify_at.pop(job["item_id"], None)
+            self._jellyfin_refresh_at.pop(job["item_id"], None)
+            return
+
+        now = time.monotonic()
+        last_refresh = self._jellyfin_refresh_at.get(job["item_id"])
+        if last_refresh is not None:
+            if now - last_refresh < 120:
+                raise DeletionRetryable("Jellyfin library scan is still processing")
+            self._jellyfin_refresh_at.pop(job["item_id"], None)
+            self._jellyfin_notify_at.pop(job["item_id"], None)
+
+        # Jellyfin's DELETE /Items may recursively remove a movie directory.
+        # Its media mount is read-only, so ask its scanner to forget the absent
+        # file instead of granting it write access to the library.
+        notified_at = self._jellyfin_notify_at.get(job["item_id"])
+        if notified_at is None:
+            self._guard_mount()
+            self._jellyfin_notify_at[job["item_id"]] = now
+            response = await self.client.post(
+                f"{self.jellyfin_url}/Library/Media/Updated",
+                headers=self.jellyfin_headers,
+                json={"Updates": [{"Path": str(path), "UpdateType": "Deleted"}]},
+            )
+            self._status(response, allow_missing=True)
+            if not await self._jellyfin_item_present(job["item_id"]):
+                self._jellyfin_notify_at.pop(job["item_id"], None)
+                return
+            raise DeletionRetryable("Jellyfin targeted catalog update is still processing")
+        # Jellyfin 10.10.7 defaults to a 60-second filesystem-monitor delay.
+        # Leave room for that debounce and the targeted scan to finish.
+        if now - notified_at < 90:
+            raise DeletionRetryable("Jellyfin targeted catalog update is still processing")
+
+        self._guard_mount()
+        # A timed-out request can still have started a scan. Back off before
+        # issuing another full-library refresh for this item.
+        self._jellyfin_refresh_at[job["item_id"]] = time.monotonic()
+        response = await self.client.post(
+            f"{self.jellyfin_url}/Library/Refresh",
+            headers=self.jellyfin_headers,
+        )
+        self._status(response)
+        if await self._jellyfin_item_present(job["item_id"]):
+            raise DeletionRetryable("Jellyfin library scan has not removed item")
+        self._jellyfin_notify_at.pop(job["item_id"], None)
+        self._jellyfin_refresh_at.pop(job["item_id"], None)
 
     async def _process(self, job: dict[str, Any]) -> None:
         while True:
@@ -496,6 +558,7 @@ class DeletionCoordinator:
             current = self.jobs.get(job["item_id"])
             if current is not None:
                 self.jobs.set_stage(job["item_id"], str(current["stage"]), str(error))
+                self.jobs.touch(job["item_id"])
             LOGGER.warning("Jellyfin deletion %s will retry: %s", job["item_id"], error)
             return "retry"
         return "complete"
