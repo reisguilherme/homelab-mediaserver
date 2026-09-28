@@ -16,6 +16,26 @@ def test_empty_bazarr_providers_explicitly_disables_network_providers(tmp_path):
     assert settings.as_environment()["HOMESERVER_BAZARR_PROVIDERS"] == ""
 
 
+@pytest.mark.parametrize("raw,expected", [("logs,cache", ("logs", "cache")), ("", ())])
+def test_backup_directory_exclusions_accept_names_and_explicit_empty(tmp_path, raw, expected):
+    path = tmp_path / ".env"
+    path.write_text(f"HOMESERVER_BACKUP_EXCLUDE_DIRS={raw}\n")
+    settings = load_settings(path)
+    assert settings.backup_exclude_dirs == expected
+    assert settings.as_environment()["HOMESERVER_BACKUP_EXCLUDE_DIRS"] == raw
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [".", "..", "/srv/appdata", "../logs", "logs/cache", r"logs\cache", "logs,logs", "C:\\logs"],
+)
+def test_backup_directory_exclusions_reject_paths_and_duplicate_names(tmp_path, raw):
+    path = tmp_path / ".env"
+    path.write_text(f"HOMESERVER_BACKUP_EXCLUDE_DIRS={raw}\n")
+    with pytest.raises(ValueError, match="HOMESERVER_BACKUP_EXCLUDE_DIRS"):
+        load_settings(path)
+
+
 def test_optional_jellyfin_deletion_preserves_unset_and_rejects_non_boolean(tmp_path):
     path = tmp_path / ".env"
     path.write_text("")

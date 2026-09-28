@@ -216,6 +216,13 @@ register("LOG_MAX_FILES", 3, "int", minimum=1)
 register("BACKUP_ENABLED ALERTS_ENABLED", False, "bool", "operations")
 register("BACKUP_SCHEDULE", "daily", consumer="backup")
 register(
+    "BACKUP_EXCLUDE_DIRS",
+    (".venv", "__pycache__", "logs", "cache"),
+    "dirnamelist",
+    "backup",
+    unit="directory basenames; empty includes all directories",
+)
+register(
     "BACKUP_REPOSITORY BACKUP_TARGET_REPOSITORY BACKUP_SSH_HOST "
     "BACKUP_SSH_USER BACKUP_SSH_KEY_FILE",
     "",

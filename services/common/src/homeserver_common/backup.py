@@ -220,16 +220,17 @@ def _initialize_local(settings: Settings, *, target=False, copy_parameters=False
     _restic(settings, args, target=target)
 
 
-def _copy_state(source: Path, target: Path):
+def _copy_state(source: Path, target: Path, *, excluded_dirs: tuple[str, ...]):
     """Use SQLite's online backup API; omit WAL/SHM sidecars after materializing."""
     target.mkdir(parents=True, exist_ok=True)
     for item in source.iterdir():
         destination = target / item.name
+        if item.name in excluded_dirs and item.is_dir():
+            continue
         if item.is_symlink():
             raise ValueError("backup state contains a symlink; resolve it before capture")
         if item.is_dir():
-            if item.name not in (".venv", "__pycache__"):
-                _copy_state(item, destination)
+            _copy_state(item, destination, excluded_dirs=excluded_dirs)
         elif item.is_file():
             if item.name.endswith(("-wal", "-shm")):
                 continue
@@ -310,12 +311,16 @@ def create_backup(settings: Settings, env_file: Path, *, _already_locked: bool =
         with tempfile.TemporaryDirectory(prefix="capture-", dir=staging) as temp:
             capture = Path(temp)
             with maintenance(settings, "backup"):
-                _copy_state(source, capture / "appdata")
+                _copy_state(
+                    source, capture / "appdata", excluded_dirs=settings.backup_exclude_dirs
+                )
                 (capture / "config").mkdir()
                 shutil.copy2(env_file, capture / "config/operator.env")
                 releases = Path(env["HOMESERVER_INSTALL_ROOT"]) / "releases"
                 if releases.is_dir():
-                    _copy_state(releases, capture / "releases")
+                    _copy_state(
+                        releases, capture / "releases", excluded_dirs=settings.backup_exclude_dirs
+                    )
                 checksums = _checksums(capture)
                 byte_count = sum(
                     item.stat().st_size for item in capture.rglob("*") if item.is_file()

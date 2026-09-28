@@ -84,7 +84,7 @@ def convert(key, raw, field):
             if raw not in ("", "true", "false"):
                 raise ValueError
             value = raw
-        elif field.kind in ("list", "hashlist", "optionallist"):
+        elif field.kind in ("list", "hashlist", "optionallist", "dirnamelist"):
             value = tuple(part.strip() for part in raw.split(",") if part.strip())
             if (not value and field.kind == "list") or len(set(value)) != len(value):
                 raise ValueError
@@ -94,6 +94,11 @@ def convert(key, raw, field):
                 raise ValueError
             if field.kind == "hashlist":
                 value = tuple(item.lower() for item in value)
+            if field.kind == "dirnamelist" and any(
+                item in (".", "..") or not re.fullmatch(r"[A-Za-z0-9_.-]+", item)
+                for item in value
+            ):
+                raise ValueError
         elif field.kind == "json":
             value = json.loads(raw)
             if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):

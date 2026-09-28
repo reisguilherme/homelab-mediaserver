@@ -73,6 +73,7 @@ são aceitos na importação, mas seus caminhos efetivos são derivados do runti
 | `SOURCE_PROBE_SECONDS`, `SOURCE_MIN_TIME_GAIN_PERCENT` | 60, 20 | Janela de medida e vantagem de ETA exigida |
 | `HTTP_TIMEOUT_SECONDS`, `SEARCH_TIMEOUT_SECONDS` | 15, 90 | Requisições rotineiras e busca Arr |
 | `WORKER_CYCLE_TIMEOUT_SECONDS` | 900 | Prazo máximo fixo de cada ciclo; heartbeat não o renova |
+| `BACKUP_EXCLUDE_DIRS` | .venv,__pycache__,logs,cache | Diretórios gerados omitidos da captura de backup |
 
 O piso usa MiB (1.048.576 bytes) por minuto da duração informada pelo Arr:
 episódio primeiro, duração da série como fallback, e duração do filme no Radarr.
@@ -128,3 +129,17 @@ uma segunda cópia do vídeo. Esses valores são invariantes do fluxo e não
 recebem chaves editáveis no `.env`. Mudanças pela UI nativa aparecem como drift
 no `config verify` e são reconciliadas pelo `config apply`, com IDs e demais
 preferências preservados.
+
+## Diretórios excluídos do backup
+
+`BACKUP_EXCLUDE_DIRS` é uma lista de nomes de diretórios separados por vírgulas.
+O padrão `.venv,__pycache__,logs,cache` omite esses diretórios recursivamente em
+appdata e releases. Logs e caches são estado gerado; os arquivos originais não
+são apagados ou alterados. Arquivos comuns com esses nomes continuam incluídos.
+Isso permite capturar o estado do Seerr sem seguir seus links de logs rotativos.
+
+Use `HOMESERVER_BACKUP_EXCLUDE_DIRS=""` para incluir todos os diretórios comuns.
+A lista aceita apenas nomes com letras ASCII, números, ponto, hífen e underscore;
+caminhos absolutos, barras, `.` e `..` são rejeitados. Symlinks em qualquer estado
+incluído continuam impedindo a captura e exigem revisão do operador. A exclusão
+não altera a rejeição de symlinks durante a restauração.

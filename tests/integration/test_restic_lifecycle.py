@@ -92,6 +92,83 @@ def test_real_restic_preserves_wal_tombstones_and_excludes_media(tmp_path: Path)
     assert not (Path(settings.run_root) / "maintenance").exists()
 
 
+def test_generated_directories_are_excluded_before_following_log_symlinks(tmp_path: Path) -> None:
+    env, settings, database = fixture(tmp_path)
+    appdata = Path(settings.appdata_root)
+    release = Path(settings.install_root) / "releases/fixture"
+    release.mkdir(parents=True)
+    (release / "manifest.json").write_text('{"fixture":true}\n')
+    logs = appdata / "seerr/logs"
+    logs.mkdir(parents=True)
+    actual_log = logs / "jellyseerr-2026-09-28.log"
+    actual_log.write_text("generated log\n")
+    (logs / "jellyseerr.log").symlink_to(actual_log.name)
+    (logs / ".machinelogs.json").symlink_to(".machinelogs-2026-09-28.json")
+    for directory in (
+        appdata / "control/cache", release / "logs", release / ".venv", release / "__pycache__"
+    ):
+        directory.mkdir()
+        (directory / "generated.bin").write_bytes(b"unnecessary generated state")
+    # Exclusions apply to directory names, not ordinary files with those names.
+    (appdata / "control/logs").write_text("operator state, not a log directory\n")
+    try:
+        result = create_backup(settings, env)
+    finally:
+        database.close()
+    target = tmp_path / "restore-without-generated-state"
+    restore_snapshot(settings, result["snapshot_id"], target, isolated=True)
+    assert (target / "releases/fixture/manifest.json").is_file()
+    assert (target / "appdata/control/config.json").is_file()
+    assert (target / "appdata/control/logs").read_text() == (
+        "operator state, not a log directory\n"
+    )
+    assert not (target / "appdata/seerr/logs").exists()
+    assert not (target / "appdata/control/cache").exists()
+    assert not (target / "releases/fixture/logs").exists()
+    assert not (target / "releases/fixture/.venv").exists()
+    assert not (target / "releases/fixture/__pycache__").exists()
+    assert actual_log.read_text() == "generated log\n"
+    assert (logs / "jellyseerr.log").is_symlink()
+    assert (logs / ".machinelogs.json").is_symlink()
+
+
+def test_empty_exclusion_setting_keeps_ordinary_generated_directories(tmp_path: Path) -> None:
+    env, _, database = fixture(tmp_path)
+    env.write_text(env.read_text() + "\nHOMESERVER_BACKUP_EXCLUDE_DIRS=\n")
+    settings = load_settings(env, mode="dev")
+    appdata = Path(settings.appdata_root)
+    release = Path(settings.install_root) / "releases/fixture"
+    release.mkdir(parents=True)
+    for root in (appdata / "control", release):
+        for name in (".venv", "__pycache__", "logs", "cache"):
+            directory = root / name
+            directory.mkdir()
+            (directory / "ordinary.txt").write_text(name + "\n")
+    try:
+        result = create_backup(settings, env)
+    finally:
+        database.close()
+    target = tmp_path / "restore-with-generated-state"
+    restore_snapshot(settings, result["snapshot_id"], target, isolated=True)
+    for relative in ("appdata/control", "releases/fixture"):
+        for name in (".venv", "__pycache__", "logs", "cache"):
+            assert (target / relative / name / "ordinary.txt").read_text() == name + "\n"
+
+
+def test_nonexcluded_state_symlink_still_rejects_capture(tmp_path: Path) -> None:
+    env, settings, database = fixture(tmp_path)
+    control = Path(settings.appdata_root) / "control"
+    (control / "state-alias.json").symlink_to("config.json")
+    try:
+        with pytest.raises(ValueError, match="symlink"):
+            create_backup(settings, env)
+    finally:
+        database.close()
+    assert (control / "state-alias.json").is_symlink()
+    assert (control / "config.json").read_text() == '{"fixture":true}\n'
+    assert not (Path(settings.run_root) / "maintenance").exists()
+
+
 def test_wrong_password_missing_snapshot_and_occupied_target_are_safe(tmp_path: Path) -> None:
     env, settings, database = fixture(tmp_path)
     create_backup(settings, env)
