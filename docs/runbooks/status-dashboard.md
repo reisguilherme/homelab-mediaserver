@@ -22,8 +22,9 @@ df -hT /srv/data
 
 A telemetria recebe mídia/snapshots somente leitura; não publica segredos.
 O monitor qBit usa loopback e [Tailscale Serve](../installation.md#acesso-pelo-tailscale).
-O hostname MagicDNS do servidor permite alcançá-lo na tailnet; confira o
-endereço informado pelo Serve se o card não abrir.
+Use encaminhamento TCP e abra `http://IP_TAILSCALE:18080` ou o hostname
+MagicDNS na mesma porta. Confira `tailscale serve status` se o card não abrir.
+O painel também está disponível em `/ui/status`; `/` abre o mesmo dashboard.
 
 O painel não executa comandos de administração. Para falhas e estados
 da fila consulte [diagnóstico](../troubleshooting.md).

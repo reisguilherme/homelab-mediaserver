@@ -30,7 +30,7 @@ privadas. Reiniciar sem corrigir a causa costuma repetir o erro.
 | Preferência alterada sem efeito | Rodar operator apply e reiniciar os cinco consumidores conforme o guia do operador. |
 | Painel sem métricas | Ver logs de host-metrics/telemetry e idade dos snapshots; primeira amostra não tem taxa. |
 | Serviço inacessível pelo Tailscale | Conferir autenticação/status, IP atual e acesso na mesma tailnet; usar a porta do serviço. |
-| Monitor qBit inacessível | Conferir loopback18080 e `tailscale serve status`; usar o endereço MagicDNS informado pelo Serve. |
+| Monitor qBit inacessível | Conferir loopback `18080` e `tailscale serve status`; usar encaminhamento TCP para abrir pelo IP Tailscale ou MagicDNS na porta `18080`. |
 | Intel inacessível | Conferir renderD128 e GIDs reais no override; consultar o guia de hardware e testar reprodução. |
 
 ## Comandos por serviço

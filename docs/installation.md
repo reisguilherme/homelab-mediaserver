@@ -133,14 +133,15 @@ O monitor qBit é um proxy somente leitura em `127.0.0.1:18080`. Para acessá-lo
 na tailnet:
 
 ```bash
-sudo tailscale serve --bg --http=18080 http://127.0.0.1:18080
+sudo tailscale serve --bg --tcp=18080 tcp://127.0.0.1:18080
 tailscale serve status
 ```
 
-Abra o endereço MagicDNS HTTP mostrado pelo comando, na porta `18080`.
-[`--bg` e `--http`](https://tailscale.com/docs/reference/tailscale-cli/serve)
-mantêm a publicação após reinício e servem a porta escolhida dentro da tailnet.
-O login é o nativo qBit; o proxy recusa mudanças na fila e nas preferências.
+Abra `http://IP_TAILSCALE:18080` ou `http://NOME_MAGICDNS:18080` no navegador.
+O [encaminhamento TCP](https://tailscale.com/docs/reference/tailscale-cli/serve#use-a-tcp-forwarder)
+leva essa porta da tailnet ao proxy Caddy em loopback. `--bg` mantém a
+configuração após reinício. O login é o nativo qBit; o proxy continua recusando
+mudanças na fila e nas preferências, sem publicar a API nativa na LAN.
 
 ## Reutilizar uma instalação
 

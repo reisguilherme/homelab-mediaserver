@@ -29,7 +29,7 @@ O monitor público é um proxy separado, em loopback `18080`, com allowlist
 de arquivos da UI, GETs de monitoramento e login/logout. Adicionar, excluir,
 retomar, pausar ou alterar preferências pelo monitor retorna HTTP 403.
 O acesso externo à LAN ocorre dentro da tailnet por
-[Tailscale Serve](../installation.md#acesso-pelo-tailscale).
+[encaminhamento TCP Tailscale Serve](../installation.md#acesso-pelo-tailscale).
 
 ## Regras de mídia
 

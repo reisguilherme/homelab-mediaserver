@@ -56,7 +56,8 @@ Os cards do painel em `8081` abrem os aplicativos.
 | Monitor qBittorrent | 18080 | Progresso, velocidade e peers; somente leitura |
 
 O monitor qBit fica em loopback. Publique-o dentro da tailnet com
-[Tailscale Serve](docs/installation.md#acesso-pelo-tailscale). A API nativa qBit
+[encaminhamento TCP Tailscale Serve](docs/installation.md#acesso-pelo-tailscale)
+e abra `http://IP_TAILSCALE:18080`. A API nativa qBit
 é interna ao Compose.
 
 ## Preferências
