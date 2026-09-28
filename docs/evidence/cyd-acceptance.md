@@ -1,7 +1,9 @@
-# CYD acceptance — pendente de hardware
+# Histórico — aceite CYD retirado
 
-O firmware atual é uma base de rede/MQTT e não deve ser gravado sem identificar
-a revisão exata do ESP32-2432S028, controlador da tela/touch e memória.
+A CYD e o MQTT exclusivo foram retirados do projeto em 28/09/2026.
+O ensaio de hardware do display não foi concluído e não é uma etapa pendente
+da stack atual.
 
-Ficam pendentes: compilação com toolchain fixada, gravação USB, OTA autenticada,
-TLS/MQTT, telas LVGL, limite de 8 KiB, reconexão e ensaio de 24 horas.
+Os critérios anteriores estão preservados no
+[histórico Git](https://github.com/reisguilherme/homelab-mediaserver/blob/89c84f26e4426d2f025573ce3728c5fa320f6267/docs/evidence/cyd-acceptance.md).
+O monitoramento atual usa [painel web](../runbooks/status-dashboard.md).

@@ -436,7 +436,7 @@ async def test_series_acquirer_grabs_only_due_episode_with_season_permit(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_series_does_not_grab_later_episode_while_earliest_has_no_release(tmp_path):
+async def test_series_prefetches_later_episode_while_earliest_has_no_release(tmp_path):
     repo, permits, reservation_id = _reserve(tmp_path)
     torrent = _torrent(episode=7)
     inspected = inspect_torrent(torrent)
@@ -485,16 +485,14 @@ async def test_series_does_not_grab_later_episode_while_earliest_has_no_release(
             sonarr_url="http://sonarr:8989", sonarr_api_key="secret",
             prowlarr_url="http://prowlarr:9696", client=client,
         )
-        assert await acquirer.acquire("season:tmdb:97546:4", reservation_id) == (
-            "no_eligible_release"
-        )
-    assert searched == ["46"]
-    assert grabbed == []
-    assert permits.get_for_reservation(reservation_id, scope_key="S04E07") is None
+        assert await acquirer.acquire("season:tmdb:97546:4", reservation_id) == "grabbed"
+    assert searched == ["46", "47"]
+    assert len(grabbed) == 1
+    assert permits.get_for_reservation(reservation_id, scope_key="S04E07") is not None
 
 
 @pytest.mark.asyncio
-async def test_series_waits_for_downloaded_episode_import_before_grabbing_next(tmp_path):
+async def test_series_can_prefetch_next_episode_before_downloaded_episode_import(tmp_path):
     repo, permits, reservation_id = _reserve(tmp_path)
     torrent6 = _torrent(episode=6)
     inspected6 = inspect_torrent(torrent6)
@@ -557,19 +555,17 @@ async def test_series_waits_for_downloaded_episode_import_before_grabbing_next(t
             sonarr_url="http://sonarr:8989", sonarr_api_key="secret",
             prowlarr_url="http://prowlarr:9696", client=client,
         )
-        assert await acquirer.acquire("season:tmdb:97546:4", reservation_id) == (
-            "waiting_episodes"
-        )
-        assert searched == []
+        assert await acquirer.acquire("season:tmdb:97546:4", reservation_id) == "grabbed"
+        assert searched == ["47"]
         imported6 = True
         assert repo.claim_episode_import(permit.permit_id)
         repo.record_episode_import(permit.permit_id, "sonarr-import-6")
         assert await acquirer.acquire("season:tmdb:97546:4", reservation_id) == (
             "waiting_episodes"
         )
-        assert searched == []
+        assert searched == ["47"]
         repo.complete_episode_import(permit.permit_id)
-        assert await acquirer.acquire("season:tmdb:97546:4", reservation_id) == "grabbed"
+        assert await acquirer.acquire("season:tmdb:97546:4", reservation_id) == "waiting_episodes"
     assert searched == ["47"]
     assert len(grabbed) == 1
     assert permits.get_for_reservation(reservation_id, scope_key="S04E07") is not None
@@ -577,7 +573,7 @@ async def test_series_waits_for_downloaded_episode_import_before_grabbing_next(t
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("target_season, missing_season", [(2, 1), (3, 2)])
-async def test_series_waits_for_every_earlier_season_before_grabbing(
+async def test_single_episode_window_waits_for_earlier_season_before_grabbing(
     tmp_path, target_season, missing_season,
 ):
     for earlier in range(1, target_season):
@@ -631,6 +627,7 @@ async def test_series_waits_for_every_earlier_season_before_grabbing(
             repository=repo, permits=permits,
             sonarr_url="http://sonarr:8989", sonarr_api_key="secret",
             prowlarr_url="http://prowlarr:9696", client=client,
+            download_window=1,
         )
         assert await acquirer.acquire(media_key, reservation_id) == "waiting_previous_season"
         assert searched == []
@@ -680,7 +677,7 @@ async def test_series_does_not_block_requested_season_for_unrequested_earlier_se
 
 
 @pytest.mark.asyncio
-async def test_series_reconciles_existing_torrents_across_seasons_in_order(tmp_path):
+async def test_single_episode_window_reconciles_torrents_across_seasons_in_order(tmp_path):
     _, _, season1_reservation = _reserve(tmp_path, season=1)
     repo, permits, season2_reservation = _reserve(tmp_path, season=2)
     episode_files = {(1, 1): False, (1, 2): False, (2, 1): False}
@@ -758,6 +755,7 @@ async def test_series_reconciles_existing_torrents_across_seasons_in_order(tmp_p
             prowlarr_url="http://prowlarr:9696", client=client,
             gateway_url="http://download-gateway:8081", arr_token="worker-secret",
             capacity_provider=capacity,
+            download_window=1,
         )
         assert await acquirer.acquire("season:tmdb:97546:1", season1_reservation) == (
             "waiting_episodes"
@@ -856,6 +854,7 @@ async def test_series_stops_later_torrents_but_does_not_resume_without_space(
             prowlarr_url="http://prowlarr:9696", client=client,
             gateway_url="http://download-gateway:8081", arr_token="worker-secret",
             capacity_provider=capacity,
+            download_window=1,
         )
         assert await acquirer.acquire("season:tmdb:97546:1", reservation_id) == expected
     assert actions == [

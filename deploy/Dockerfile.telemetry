@@ -3,6 +3,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock /app/
 COPY services/telemetry/src /app/services/telemetry/src
 COPY services/common/src /app/services/common/src
+COPY scripts/host-metrics.py /app/scripts/host-metrics.py
 ENV PYTHONPATH=/app/services/common/src:/app/services/telemetry/src
 ENV PATH=/app/.venv/bin:$PATH
 RUN apt-get update \

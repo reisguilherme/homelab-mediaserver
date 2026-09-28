@@ -175,7 +175,7 @@ async def test_series_ordering_does_not_start_or_stop_protected_episode(tmp_path
                 episodes=[{"id": 4, "seasonNumber": 2, "episodeNumber": 4}],
                 season=2,
                 reservation_id=reserved.reservation_id,
-                active_episode_id=4 if active else 3,
+                active_episode_ids={4} if active else {3},
                 imported_episode_ids=set(),
             )
             is None

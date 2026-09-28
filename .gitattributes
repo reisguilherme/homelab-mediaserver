@@ -8,3 +8,6 @@ Makefile text eol=lf
 scripts/homeserver text eol=lf
 *.env text eol=lf
 .env.example text eol=lf
+**/*.env.example text eol=lf
+*.md text eol=lf
+.gitattributes text eol=lf

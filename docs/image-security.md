@@ -40,8 +40,8 @@ See the [official incident advisory](https://github.com/aquasecurity/trivy/secur
 and [release checksums](https://github.com/aquasecurity/trivy/releases/download/v0.73.0/trivy_0.73.0_checksums.txt).
 The signature command follows the [official signature documentation](https://trivy.dev/docs/v0.73/getting-started/signature-verification/).
 
-The manual `Public image vulnerability scan` workflow builds the project images from
-public source and retains reports for fourteen days. Dependabot checks GitHub Actions,
-the uv dependency manifests and Dockerfiles weekly. Local fixtures prove policy and
-failure behavior; actual image scan results remain unknown until the script runs with
-Docker and the vulnerability database available.
+Run the script manually after building the project images from public source.
+Keep reports privately under `.runtime` and review dependency updates explicitly;
+the project has no scheduled scanner, CI/CD workflow or update bot. Local fixtures
+prove policy and failure behavior; actual image scan results remain unknown until
+the script runs with Docker and the vulnerability database available.

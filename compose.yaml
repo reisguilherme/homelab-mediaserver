@@ -1,0 +1,898 @@
+# HomeServer pessoal. Edite .env e execute docker compose up -d --build.
+name: homeserver
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:10.10.7
+    restart: unless-stopped
+    networks:
+    - apps
+    - telemetry
+    - egress
+    volumes:
+    - type: bind
+      source: /srv/appdata/jellyfin
+      target: /config
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/data/media
+      target: /data/media
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/transcode
+      target: /transcode
+      read_only: false
+      bind:
+        create_host_path: false
+    logging: &id001
+      driver: json-file
+      options:
+        max-size: ${HOMESERVER_LOG_MAX_SIZE_MB:-10}m
+        max-file: ${HOMESERVER_LOG_MAX_FILES:-3}
+    user: 1000:1000
+    environment:
+      TZ: ${HOMESERVER_TIMEZONE:-America/Sao_Paulo}
+    depends_on:
+      init:
+        condition: service_completed_successfully
+  jellyfin-proxy:
+    image: nginx:1.30.5-alpine
+    restart: unless-stopped
+    networks:
+    - apps
+    - edge_control
+    volumes:
+    - type: bind
+      source: ./deploy/jellyfin-proxy/nginx.conf
+      target: /etc/nginx/nginx.conf
+      read_only: true
+      bind:
+        create_host_path: false
+    logging: *id001
+    ports:
+    - host_ip: 0.0.0.0
+      published: '8096'
+      target: 8096
+      protocol: tcp
+    depends_on:
+      jellyfin:
+        condition: service_started
+      control-api:
+        condition: service_started
+      init:
+        condition: service_completed_successfully
+  seerr:
+    image: fallenbagel/jellyseerr:2.7.3
+    restart: unless-stopped
+    networks:
+    - apps
+    - edge_control
+    - egress
+    volumes:
+    - type: bind
+      source: /srv/appdata/seerr
+      target: /app/config
+      read_only: false
+      bind:
+        create_host_path: false
+    logging: *id001
+    ports:
+    - host_ip: 0.0.0.0
+      published: '5055'
+      target: 5055
+      protocol: tcp
+    user: 1000:1000
+    environment:
+      TZ: ${HOMESERVER_TIMEZONE:-America/Sao_Paulo}
+      NODE_OPTIONS: --no-network-family-autoselection --dns-result-order=ipv4first
+    depends_on:
+      init:
+        condition: service_completed_successfully
+  sonarr:
+    image: linuxserver/sonarr:4.0.15
+    restart: unless-stopped
+    networks:
+    - apps
+    - edge_control
+    - egress
+    volumes:
+    - type: bind
+      source: /srv/appdata/sonarr
+      target: /config
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/data
+      target: /data
+      read_only: false
+      bind:
+        create_host_path: false
+    logging: *id001
+    ports:
+    - host_ip: 0.0.0.0
+      published: '8989'
+      target: 8989
+      protocol: tcp
+    environment:
+      PUID: '1000'
+      PGID: '1000'
+      TZ: ${HOMESERVER_TIMEZONE:-America/Sao_Paulo}
+    depends_on:
+      init:
+        condition: service_completed_successfully
+  radarr:
+    image: lscr.io/linuxserver/radarr@sha256:adb6c09d6b729ea5e642c99cea35af72702ef476bf4763f153299ac5db9f0b4f
+    restart: unless-stopped
+    networks:
+    - apps
+    - edge_control
+    - egress
+    volumes:
+    - type: bind
+      source: /srv/appdata/radarr
+      target: /config
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/data
+      target: /data
+      read_only: false
+      bind:
+        create_host_path: false
+    logging: *id001
+    ports:
+    - host_ip: 0.0.0.0
+      published: '7878'
+      target: 7878
+      protocol: tcp
+    environment:
+      PUID: '1000'
+      PGID: '1000'
+      TZ: ${HOMESERVER_TIMEZONE:-America/Sao_Paulo}
+    depends_on:
+      init:
+        condition: service_completed_successfully
+  prowlarr:
+    image: linuxserver/prowlarr:1.35.1
+    restart: unless-stopped
+    networks:
+    - apps
+    - edge_control
+    - egress
+    volumes:
+    - type: bind
+      source: /srv/appdata/prowlarr
+      target: /config
+      read_only: false
+      bind:
+        create_host_path: false
+    logging: *id001
+    ports:
+    - host_ip: 0.0.0.0
+      published: '9696'
+      target: 9696
+      protocol: tcp
+    environment:
+      PUID: '1000'
+      PGID: '1000'
+      TZ: ${HOMESERVER_TIMEZONE:-America/Sao_Paulo}
+    depends_on:
+      init:
+        condition: service_completed_successfully
+  bazarr:
+    image: linuxserver/bazarr:1.5.1
+    restart: unless-stopped
+    networks:
+    - apps
+    - edge_control
+    - egress
+    volumes:
+    - type: bind
+      source: /srv/appdata/bazarr
+      target: /config
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/data/media
+      target: /data/media
+      read_only: false
+      bind:
+        create_host_path: false
+    logging: *id001
+    ports:
+    - host_ip: 0.0.0.0
+      published: '6767'
+      target: 6767
+      protocol: tcp
+    environment:
+      PUID: '1000'
+      PGID: '1000'
+      TZ: ${HOMESERVER_TIMEZONE:-America/Sao_Paulo}
+    depends_on:
+      init:
+        condition: service_completed_successfully
+  qbittorrent:
+    image: linuxserver/qbittorrent:5.1.2
+    restart: unless-stopped
+    networks:
+    - transfer
+    - egress_transfer
+    volumes:
+    - type: bind
+      source: /srv/appdata/qbittorrent
+      target: /config
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/data
+      target: /data
+      read_only: false
+      bind:
+        create_host_path: false
+    logging: *id001
+    environment:
+      PUID: '1000'
+      PGID: '1000'
+      TZ: ${HOMESERVER_TIMEZONE:-America/Sao_Paulo}
+      WEBUI_PORT: '8080'
+      TORRENTING_PORT: '6881'
+    ports:
+    - host_ip: 0.0.0.0
+      published: '6881'
+      target: 6881
+      protocol: tcp
+    - host_ip: 0.0.0.0
+      published: '6881'
+      target: 6881
+      protocol: udp
+    depends_on:
+      init:
+        condition: service_completed_successfully
+  qbit-monitor:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    networks:
+    - transfer
+    - edge_control
+    volumes:
+    - type: bind
+      source: ./deploy/qbit-monitor/Caddyfile
+      target: /etc/caddy/Caddyfile
+      read_only: true
+      bind:
+        create_host_path: false
+    logging: *id001
+    ports:
+    - host_ip: 127.0.0.1
+      published: '18080'
+      target: 8080
+      protocol: tcp
+    depends_on:
+      init:
+        condition: service_completed_successfully
+  control-api:
+    image: homeserver-control:dev
+    restart: unless-stopped
+    networks:
+    - edge_control
+    - apps
+    - telemetry
+    volumes:
+    - &id002
+      type: bind
+      source: /srv/appdata/control
+      target: /var/lib/homeserver
+      read_only: false
+      bind:
+        create_host_path: false
+    - &id003
+      type: bind
+      source: /srv/appdata/control
+      target: /run/homeserver
+      read_only: true
+      bind: &id004
+        create_host_path: false
+    - type: bind
+      source: /srv/data
+      target: /data
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: .
+      target: /project
+      read_only: true
+      bind:
+        create_host_path: false
+    logging: *id001
+    environment:
+      HOMESERVER_CONFIG_VERSION: '1'
+      HOMESERVER_ENVIRONMENT: prod
+      HOMESERVER_INSTANCE_NAME: homeserver
+      HOMESERVER_APPDATA_ROOT: /var/lib/homeserver
+      HOMESERVER_MEDIA_ROOT: /data
+      HOMESERVER_TRANSCODE_ROOT: /srv/transcode
+      HOMESERVER_RUN_ROOT: /run/homeserver
+      HOMESERVER_MEDIA_UUID: ''
+      HOMESERVER_QBIT_GATEWAY_URL: http://download-gateway:8081
+      HOMESERVER_QBIT_QUEUEING_ENABLED: 'true'
+      HOMESERVER_UPLOAD_LIMIT_BYTES: '-1'
+      HOMESERVER_DOWNLOAD_LIMIT_BYTES: '-1'
+      HOMESERVER_SERVICE_UID: '1000'
+      HOMESERVER_SERVICE_GID: '1000'
+      HOMESERVER_RENDER_GID: '1000'
+      HOMESERVER_VIDEO_GID: '1000'
+      HOMESERVER_NETWORK_INTERFACE: auto
+      HOMESERVER_ACCESS_MODE: tailscale
+      HOMESERVER_LAN_BIND_IP: 127.0.0.1
+      HOMESERVER_TAILSCALE_BIND_IP: 127.0.0.1
+      HOMESERVER_QBIT_PEER_BIND_IP: 127.0.0.1
+      HOMESERVER_TAILSCALE_HOSTNAME: ''
+      HOMESERVER_JELLYFIN_PORT: '8096'
+      HOMESERVER_JELLYFIN_PUBLIC_URL: ''
+      HOMESERVER_SEERR_PORT: '5055'
+      HOMESERVER_SEERR_PUBLIC_URL: ''
+      HOMESERVER_SONARR_PORT: '8989'
+      HOMESERVER_SONARR_PUBLIC_URL: ''
+      HOMESERVER_RADARR_PORT: '7878'
+      HOMESERVER_RADARR_PUBLIC_URL: ''
+      HOMESERVER_PROWLARR_PORT: '9696'
+      HOMESERVER_PROWLARR_PUBLIC_URL: ''
+      HOMESERVER_BAZARR_PORT: '6767'
+      HOMESERVER_BAZARR_PUBLIC_URL: ''
+      HOMESERVER_CONTROL_PORT: '8080'
+      HOMESERVER_CONTROL_PUBLIC_URL: ''
+      HOMESERVER_STATUS_PORT: '8081'
+      HOMESERVER_STATUS_PUBLIC_URL: ''
+      HOMESERVER_QBIT_MONITOR_PORT: '18080'
+      HOMESERVER_QBIT_MONITOR_PUBLIC_URL: ''
+      HOMESERVER_JELLYFIN_URL: http://jellyfin:8096
+      HOMESERVER_SEERR_URL: http://seerr:5055
+      HOMESERVER_SONARR_URL: http://sonarr:8989
+      HOMESERVER_RADARR_URL: http://radarr:7878
+      HOMESERVER_PROWLARR_URL: http://prowlarr:9696
+      HOMESERVER_BAZARR_URL: http://bazarr:6767
+      HOMESERVER_QBIT_URL: http://qbittorrent:8080
+      HOMESERVER_QBIT_PEER_PORT: '6881'
+      HOMESERVER_TRANSCODE_MODE: cpu
+      HOMESERVER_INTEL_RENDER_DEVICE: /dev/dri/renderD128
+      HOMESERVER_MOVIE_QUEUE_PRIORITY: seeders
+      HOMESERVER_SERIES_ORDER: sequential
+      HOMESERVER_MOVIE_PRIORITY_INTERVAL_SECONDS: '60'
+      HOMESERVER_HTTP_TIMEOUT_SECONDS: '15'
+      HOMESERVER_SEARCH_TIMEOUT_SECONDS: '90'
+      HOMESERVER_WORKER_CYCLE_TIMEOUT_SECONDS: '900'
+      HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS: '30'
+      HOMESERVER_SOURCE_PROTECTED_HASHES: ''
+      HOMESERVER_WORKER_HEARTBEAT_MAX_AGE_SECONDS: '90'
+      HOMESERVER_BYPARR_URL: http://byparr:8191
+      HOMESERVER_ARR_UID: '1000'
+      HOMESERVER_ARR_GID: '1000'
+      HOMESERVER_WORKER_INTERVAL: '5'
+      HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
+      HOMESERVER_CAPACITY_SNAPSHOT: /run/homeserver/capacity.json
+      HOMESERVER_HOST_SNAPSHOT: /run/homeserver/host.json
+      HOMESERVER_RECOVERY_MODE: /var/lib/homeserver/RECOVERY_MODE
+      HOMESERVER_MEDIA_ROOTS: /data/media:/data/torrents
+      HOMESERVER_ENV_PATH: /project/.env
+      HOMESERVER_ENV_MODE: prod
+    ports:
+    - host_ip: 0.0.0.0
+      published: '8080'
+      target: 8080
+      protocol: tcp
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready',timeout=5).close()
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    command:
+    - uvicorn
+    - homeserver_control.api.app:app
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8080'
+    - --log-level
+    - info
+    entrypoint:
+    - python
+    - -m
+    - homeserver_common.runtime
+    user: 1000:1000
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.control
+    depends_on:
+      init:
+        condition: service_completed_successfully
+  control-worker:
+    image: homeserver-control:dev
+    restart: unless-stopped
+    networks:
+    - apps
+    - egress
+    volumes:
+    - *id002
+    - *id003
+    - type: bind
+      source: /srv/data
+      target: /data
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: .
+      target: /project
+      read_only: true
+      bind:
+        create_host_path: false
+    logging: *id001
+    environment:
+      HOMESERVER_CONFIG_VERSION: '1'
+      HOMESERVER_ENVIRONMENT: prod
+      HOMESERVER_INSTANCE_NAME: homeserver
+      HOMESERVER_APPDATA_ROOT: /var/lib/homeserver
+      HOMESERVER_MEDIA_ROOT: /data
+      HOMESERVER_TRANSCODE_ROOT: /srv/transcode
+      HOMESERVER_RUN_ROOT: /run/homeserver
+      HOMESERVER_MEDIA_UUID: ''
+      HOMESERVER_QBIT_GATEWAY_URL: http://download-gateway:8081
+      HOMESERVER_QBIT_QUEUEING_ENABLED: 'true'
+      HOMESERVER_UPLOAD_LIMIT_BYTES: '-1'
+      HOMESERVER_DOWNLOAD_LIMIT_BYTES: '-1'
+      HOMESERVER_SERVICE_UID: '1000'
+      HOMESERVER_SERVICE_GID: '1000'
+      HOMESERVER_RENDER_GID: '1000'
+      HOMESERVER_VIDEO_GID: '1000'
+      HOMESERVER_NETWORK_INTERFACE: auto
+      HOMESERVER_ACCESS_MODE: tailscale
+      HOMESERVER_LAN_BIND_IP: 127.0.0.1
+      HOMESERVER_TAILSCALE_BIND_IP: 127.0.0.1
+      HOMESERVER_QBIT_PEER_BIND_IP: 127.0.0.1
+      HOMESERVER_TAILSCALE_HOSTNAME: ''
+      HOMESERVER_JELLYFIN_PORT: '8096'
+      HOMESERVER_JELLYFIN_PUBLIC_URL: ''
+      HOMESERVER_SEERR_PORT: '5055'
+      HOMESERVER_SEERR_PUBLIC_URL: ''
+      HOMESERVER_SONARR_PORT: '8989'
+      HOMESERVER_SONARR_PUBLIC_URL: ''
+      HOMESERVER_RADARR_PORT: '7878'
+      HOMESERVER_RADARR_PUBLIC_URL: ''
+      HOMESERVER_PROWLARR_PORT: '9696'
+      HOMESERVER_PROWLARR_PUBLIC_URL: ''
+      HOMESERVER_BAZARR_PORT: '6767'
+      HOMESERVER_BAZARR_PUBLIC_URL: ''
+      HOMESERVER_CONTROL_PORT: '8080'
+      HOMESERVER_CONTROL_PUBLIC_URL: ''
+      HOMESERVER_STATUS_PORT: '8081'
+      HOMESERVER_STATUS_PUBLIC_URL: ''
+      HOMESERVER_QBIT_MONITOR_PORT: '18080'
+      HOMESERVER_QBIT_MONITOR_PUBLIC_URL: ''
+      HOMESERVER_JELLYFIN_URL: http://jellyfin:8096
+      HOMESERVER_SEERR_URL: http://seerr:5055
+      HOMESERVER_SONARR_URL: http://sonarr:8989
+      HOMESERVER_RADARR_URL: http://radarr:7878
+      HOMESERVER_PROWLARR_URL: http://prowlarr:9696
+      HOMESERVER_BAZARR_URL: http://bazarr:6767
+      HOMESERVER_QBIT_URL: http://qbittorrent:8080
+      HOMESERVER_QBIT_PEER_PORT: '6881'
+      HOMESERVER_TRANSCODE_MODE: cpu
+      HOMESERVER_INTEL_RENDER_DEVICE: /dev/dri/renderD128
+      HOMESERVER_MOVIE_QUEUE_PRIORITY: seeders
+      HOMESERVER_SERIES_ORDER: sequential
+      HOMESERVER_MOVIE_PRIORITY_INTERVAL_SECONDS: '60'
+      HOMESERVER_HTTP_TIMEOUT_SECONDS: '15'
+      HOMESERVER_SEARCH_TIMEOUT_SECONDS: '90'
+      HOMESERVER_WORKER_CYCLE_TIMEOUT_SECONDS: '900'
+      HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS: '30'
+      HOMESERVER_SOURCE_PROTECTED_HASHES: ''
+      HOMESERVER_WORKER_HEARTBEAT_MAX_AGE_SECONDS: '90'
+      HOMESERVER_BYPARR_URL: http://byparr:8191
+      HOMESERVER_ARR_UID: '1000'
+      HOMESERVER_ARR_GID: '1000'
+      HOMESERVER_WORKER_INTERVAL: '5'
+      HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
+      HOMESERVER_CAPACITY_SNAPSHOT: /run/homeserver/capacity.json
+      HOMESERVER_HOST_SNAPSHOT: /run/homeserver/host.json
+      HOMESERVER_RECOVERY_MODE: /var/lib/homeserver/RECOVERY_MODE
+      HOMESERVER_MEDIA_ROOTS: /data/media:/data/torrents
+      HOMESERVER_ENV_PATH: /project/.env
+      HOMESERVER_ENV_MODE: prod
+    command:
+    - python
+    - -m
+    - homeserver_control.worker
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import os,time; from homeserver_control.persistence.heartbeat import WorkerHeartbeatStore;
+        assert WorkerHeartbeatStore(os.environ['HOMESERVER_DB_PATH']).ready(now=time.time(),max_age=float(os.environ.get('HOMESERVER_WORKER_HEARTBEAT_MAX_AGE_SECONDS','90')))
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    entrypoint:
+    - python
+    - -m
+    - homeserver_common.runtime
+    user: 1000:1000
+    depends_on:
+      init:
+        condition: service_completed_successfully
+  download-gateway:
+    image: homeserver-control:dev
+    restart: unless-stopped
+    networks:
+    - apps
+    - transfer
+    volumes:
+    - *id002
+    - *id003
+    - type: bind
+      source: /srv/data
+      target: /data
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: .
+      target: /project
+      read_only: true
+      bind:
+        create_host_path: false
+    logging: *id001
+    environment:
+      HOMESERVER_CONFIG_VERSION: '1'
+      HOMESERVER_ENVIRONMENT: prod
+      HOMESERVER_INSTANCE_NAME: homeserver
+      HOMESERVER_APPDATA_ROOT: /var/lib/homeserver
+      HOMESERVER_MEDIA_ROOT: /data
+      HOMESERVER_TRANSCODE_ROOT: /srv/transcode
+      HOMESERVER_RUN_ROOT: /run/homeserver
+      HOMESERVER_MEDIA_UUID: ''
+      HOMESERVER_QBIT_GATEWAY_URL: http://download-gateway:8081
+      HOMESERVER_QBIT_QUEUEING_ENABLED: 'true'
+      HOMESERVER_UPLOAD_LIMIT_BYTES: '-1'
+      HOMESERVER_DOWNLOAD_LIMIT_BYTES: '-1'
+      HOMESERVER_SERVICE_UID: '1000'
+      HOMESERVER_SERVICE_GID: '1000'
+      HOMESERVER_RENDER_GID: '1000'
+      HOMESERVER_VIDEO_GID: '1000'
+      HOMESERVER_NETWORK_INTERFACE: auto
+      HOMESERVER_ACCESS_MODE: tailscale
+      HOMESERVER_LAN_BIND_IP: 127.0.0.1
+      HOMESERVER_TAILSCALE_BIND_IP: 127.0.0.1
+      HOMESERVER_QBIT_PEER_BIND_IP: 127.0.0.1
+      HOMESERVER_TAILSCALE_HOSTNAME: ''
+      HOMESERVER_JELLYFIN_PORT: '8096'
+      HOMESERVER_JELLYFIN_PUBLIC_URL: ''
+      HOMESERVER_SEERR_PORT: '5055'
+      HOMESERVER_SEERR_PUBLIC_URL: ''
+      HOMESERVER_SONARR_PORT: '8989'
+      HOMESERVER_SONARR_PUBLIC_URL: ''
+      HOMESERVER_RADARR_PORT: '7878'
+      HOMESERVER_RADARR_PUBLIC_URL: ''
+      HOMESERVER_PROWLARR_PORT: '9696'
+      HOMESERVER_PROWLARR_PUBLIC_URL: ''
+      HOMESERVER_BAZARR_PORT: '6767'
+      HOMESERVER_BAZARR_PUBLIC_URL: ''
+      HOMESERVER_CONTROL_PORT: '8080'
+      HOMESERVER_CONTROL_PUBLIC_URL: ''
+      HOMESERVER_STATUS_PORT: '8081'
+      HOMESERVER_STATUS_PUBLIC_URL: ''
+      HOMESERVER_QBIT_MONITOR_PORT: '18080'
+      HOMESERVER_QBIT_MONITOR_PUBLIC_URL: ''
+      HOMESERVER_JELLYFIN_URL: http://jellyfin:8096
+      HOMESERVER_SEERR_URL: http://seerr:5055
+      HOMESERVER_SONARR_URL: http://sonarr:8989
+      HOMESERVER_RADARR_URL: http://radarr:7878
+      HOMESERVER_PROWLARR_URL: http://prowlarr:9696
+      HOMESERVER_BAZARR_URL: http://bazarr:6767
+      HOMESERVER_QBIT_URL: http://qbittorrent:8080
+      HOMESERVER_QBIT_PEER_PORT: '6881'
+      HOMESERVER_TRANSCODE_MODE: cpu
+      HOMESERVER_INTEL_RENDER_DEVICE: /dev/dri/renderD128
+      HOMESERVER_MOVIE_QUEUE_PRIORITY: seeders
+      HOMESERVER_SERIES_ORDER: sequential
+      HOMESERVER_MOVIE_PRIORITY_INTERVAL_SECONDS: '60'
+      HOMESERVER_HTTP_TIMEOUT_SECONDS: '15'
+      HOMESERVER_SEARCH_TIMEOUT_SECONDS: '90'
+      HOMESERVER_WORKER_CYCLE_TIMEOUT_SECONDS: '900'
+      HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS: '30'
+      HOMESERVER_SOURCE_PROTECTED_HASHES: ''
+      HOMESERVER_WORKER_HEARTBEAT_MAX_AGE_SECONDS: '90'
+      HOMESERVER_BYPARR_URL: http://byparr:8191
+      HOMESERVER_ARR_UID: '1000'
+      HOMESERVER_ARR_GID: '1000'
+      HOMESERVER_WORKER_INTERVAL: '5'
+      HOMESERVER_DB_PATH: /var/lib/homeserver/control.sqlite
+      HOMESERVER_CAPACITY_SNAPSHOT: /run/homeserver/capacity.json
+      HOMESERVER_HOST_SNAPSHOT: /run/homeserver/host.json
+      HOMESERVER_RECOVERY_MODE: /var/lib/homeserver/RECOVERY_MODE
+      HOMESERVER_MEDIA_ROOTS: /data/media:/data/torrents
+      HOMESERVER_ENV_PATH: /project/.env
+      HOMESERVER_ENV_MODE: prod
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health/live',timeout=5).close()
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    command:
+    - uvicorn
+    - homeserver_control.gateway.app:app
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8081'
+    - --log-level
+    - info
+    entrypoint:
+    - python
+    - -m
+    - homeserver_common.runtime
+    user: 1000:1000
+    depends_on:
+      init:
+        condition: service_completed_successfully
+  telemetry:
+    image: homeserver-telemetry:dev
+    restart: unless-stopped
+    networks:
+    - telemetry
+    - edge_control
+    - egress
+    volumes:
+    - *id003
+    - type: bind
+      source: /srv/data
+      target: /data
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: .
+      target: /project
+      read_only: true
+      bind:
+        create_host_path: false
+    logging: *id001
+    environment:
+      HOMESERVER_TAILSCALE_HOSTNAME: ''
+      HOMESERVER_JELLYFIN_PORT: '8096'
+      HOMESERVER_JELLYFIN_PUBLIC_URL: ''
+      HOMESERVER_SEERR_PORT: '5055'
+      HOMESERVER_SEERR_PUBLIC_URL: ''
+      HOMESERVER_SONARR_PORT: '8989'
+      HOMESERVER_SONARR_PUBLIC_URL: ''
+      HOMESERVER_RADARR_PORT: '7878'
+      HOMESERVER_RADARR_PUBLIC_URL: ''
+      HOMESERVER_PROWLARR_PORT: '9696'
+      HOMESERVER_PROWLARR_PUBLIC_URL: ''
+      HOMESERVER_BAZARR_PORT: '6767'
+      HOMESERVER_BAZARR_PUBLIC_URL: ''
+      HOMESERVER_CONTROL_PORT: '8080'
+      HOMESERVER_CONTROL_PUBLIC_URL: ''
+      HOMESERVER_STATUS_PORT: '8081'
+      HOMESERVER_STATUS_PUBLIC_URL: ''
+      HOMESERVER_QBIT_MONITOR_PORT: '18080'
+      HOMESERVER_QBIT_MONITOR_PUBLIC_URL: ''
+      HOMESERVER_QBIT_PEER_PORT: '6881'
+      HOMESERVER_HOST_SNAPSHOT: /run/homeserver/host.json
+      HOMESERVER_CAPACITY_SNAPSHOT: /run/homeserver/capacity.json
+      HOMESERVER_MEDIA_ROOT: /data
+      HOMESERVER_MEDIA_UUID: ''
+      HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS: '30'
+      HOMESERVER_ENV_PATH: /project/.env
+      HOMESERVER_ENV_MODE: prod
+    ports:
+    - host_ip: 0.0.0.0
+      published: '8081'
+      target: 8080
+      protocol: tcp
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready',timeout=5).close()
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    command:
+    - uvicorn
+    - homeserver_telemetry.app:app
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8080'
+    - --log-level
+    - info
+    entrypoint:
+    - python
+    - -m
+    - homeserver_common.runtime
+    user: 1000:1000
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.telemetry
+    depends_on:
+      init:
+        condition: service_completed_successfully
+  operator:
+    image: homeserver-control:dev
+    restart: 'no'
+    networks:
+    - apps
+    - transfer
+    volumes:
+    - type: bind
+      source: /srv/appdata
+      target: /srv/appdata
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/data
+      target: /data
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/appdata/control
+      target: /run/homeserver
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: .
+      target: /project
+      read_only: false
+      bind:
+        create_host_path: false
+    logging: *id001
+    profiles:
+    - operator
+    environment:
+      HOMESERVER_NATIVE_CONTEXT: container
+    user: 0:0
+    entrypoint:
+    - python
+    - -m
+    - homeserver_common.cli
+  init:
+    image: homeserver-control:dev
+    restart: 'no'
+    networks: []
+    volumes:
+    - type: bind
+      source: /srv/appdata
+      target: /srv/appdata
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/data
+      target: /srv/data
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/transcode
+      target: /srv/transcode
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/appdata/control
+      target: /run/homeserver
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: .
+      target: /project
+      read_only: true
+      bind:
+        create_host_path: false
+    logging: *id001
+    user: 0:0
+    environment:
+      HOMESERVER_NATIVE_CONTEXT: container
+    command:
+    - python
+    - -m
+    - homeserver_common.host
+    - --env-file
+    - /project/.env
+  host-metrics:
+    image: homeserver-telemetry:dev
+    restart: unless-stopped
+    volumes:
+    - type: bind
+      source: /srv/appdata/control
+      target: /run/homeserver
+      read_only: false
+      bind: *id004
+    - type: bind
+      source: /srv/data
+      target: /data
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /sys
+      target: /sys
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: .
+      target: /project
+      read_only: true
+      bind:
+        create_host_path: false
+    logging: *id001
+    network_mode: host
+    pid: host
+    environment:
+      HOMESERVER_MEDIA_ROOT: /data
+      HOMESERVER_ENV_PATH: /project/.env
+      HOMESERVER_ENV_MODE: prod
+    command:
+    - python
+    - /app/scripts/host-metrics.py
+    - --loop
+    user: 1000:1000
+    entrypoint:
+    - python
+    - -m
+    - homeserver_common.runtime
+    depends_on:
+      init:
+        condition: service_completed_successfully
+  byparr:
+    image: ghcr.io/thephaseless/byparr@sha256:874f719518f617d03a60e03411fc5d090647e1a877041e81f8dc965927c7deb6
+    restart: unless-stopped
+    networks:
+    - apps
+    - egress
+    volumes: []
+    logging: *id001
+    shm_size: 512m
+    depends_on:
+      init:
+        condition: service_completed_successfully
+networks:
+  apps:
+    internal: true
+  transfer:
+    internal: true
+  telemetry:
+    internal: true
+  edge_control:
+    internal: false
+  egress:
+    internal: false
+  egress_transfer:
+    internal: false

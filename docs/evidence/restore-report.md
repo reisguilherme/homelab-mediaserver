@@ -1,13 +1,19 @@
-# Ensaio de restauração
+# Histórico de ensaios de restauração
 
-O ensaio automatizado local verifica captura, manifesto, checksum e restauração
-isolada com `admission_enabled=false`. A verificação foi executada com fixtures;
-SFTP/Restic, migrações e reconciliação da biblioteca no Legion ainda exigem a
-infraestrutura real.
+O gerenciador de backups próprio foi retirado em 28/09/2026 por decisão
+posterior de simplificar o projeto. Este documento registra ensaios anteriores,
+sem constituir um procedimento atual.
 
-Em 2026-09-22, um snapshot real do Legion foi copiado para o desktop via SSH.
-`restic check` terminou sem erros no repositório local e o arquivo `COMMIT` de
-um release foi restaurado em diretório isolado e conferido (41 bytes). Um
-segundo snapshot foi capturado pelo serviço systemd, copiado pela chave SSH
-restrita e verificado novamente no Windows. Os testes de migração e
-reconciliação da biblioteca após restauração completa ainda estão pendentes.
+Em 22/09/2026 um snapshot real foi copiado para o desktop por SSH.
+Restic check terminou sem erros; um arquivo de identidade de release foi
+restaurado isoladamente e conferido. Esse ensaio parcial não comprovava
+restauração completa da biblioteca.
+
+Em 28/09/2026, após corrigir exclusões de logs/cache, backup real, check e
+restore isolado de **2,9724 GB de estado**, sem mídia, passaram com Restic.
+O repositório criptografado ocupou aproximadamente 186 MB.
+A cópia independente dessa nova captura para o desktop não foi comprovada.
+
+O [registro histórico de aceite](productization-acceptance.md) apresenta os
+limites e o contexto. A stack atual usa [Compose](../installation.md);
+dados e cópias existentes não são apagados pela retirada do gerenciador.

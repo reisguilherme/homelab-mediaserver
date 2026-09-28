@@ -21,8 +21,8 @@ PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT / "services/common/src"))
 from homeserver_common.cli import initialize_env  # noqa: E402
 from homeserver_common.env import load_settings, parse_env, serialize_env  # noqa: E402
-from homeserver_common.install import DependencyError, apply_install  # noqa: E402
-from homeserver_common.render import atomic_write  # noqa: E402
+from homeserver_common.host import DependencyError, prepare_runtime  # noqa: E402
+from homeserver_common.render import atomic_write, write_stack  # noqa: E402
 
 SERVICES = {"qbittorrent", "radarr", "sonarr", "prowlarr", "bazarr", "jellyfin", "seerr"}
 
@@ -71,8 +71,10 @@ def prepare_fixture(root):
     env_file = root / ".env"
     initialize_env(env_file, "dev")
     values = parse_env(env_file.read_text())
-    for key in ("INSTALL", "APPDATA", "MEDIA", "TRANSCODE", "BACKUP_STAGING", "RUN"):
+    for key in ("APPDATA", "MEDIA", "TRANSCODE", "RUN"):
         values[f"HOMESERVER_{key}_ROOT"] = str(root / key.lower())
+    values["HOMESERVER_RUN_ROOT"] = str(root / "appdata/control")
+    values["HOMESERVER_ENVIRONMENT"] = "dev"
     names = (
         "JELLYFIN",
         "SEERR",
@@ -103,7 +105,6 @@ def prepare_fixture(root):
         HOMESERVER_PROWLARR_INDEXERS="[]",
         HOMESERVER_BAZARR_PROVIDERS="",
         HOMESERVER_SOURCE_PROBE_ENABLED="false",
-        HOMESERVER_BACKUP_ENABLED="false",
     )
     atomic_write(env_file, serialize_env(values))
     return env_file, load_settings(env_file, mode="dev")
@@ -121,11 +122,28 @@ def check_outcomes(rows, *, unchanged=False):
         raise RuntimeError("native configuration did not verify all seven services")
 
 
+def containers_ready(rows):
+    if not rows:
+        return False
+    for item in rows:
+        state = item["State"]
+        service = item.get("Config", {}).get("Labels", {}).get("com.docker.compose.service")
+        if service == "init":
+            if state.get("Status") != "exited" or state.get("ExitCode") != 0:
+                return False
+        elif (
+            state.get("Status") != "running"
+            or state.get("Health", {}).get("Status", "healthy") != "healthy"
+        ):
+            return False
+    return True
+
+
 class Runner:
     def __init__(self, settings, env_file, timeout):
         self.settings, self.env_file = settings, env_file
         self.timeout = timeout
-        self.compose_file = Path(settings.install_root) / "shared/compose.json"
+        self.compose_file = env_file.parent / "compose.json"
         self.project = settings.instance_name
         self.started = False
         self.metrics = None
@@ -154,7 +172,7 @@ class Runner:
             "config",
             action,
             "--env-file",
-            "/run/homeserver/operator.env",
+            "/project/" + self.env_file.name,
             "--mode",
             "dev",
             "--in-container",
@@ -206,20 +224,10 @@ class Runner:
             time.sleep(3)
         raise RuntimeError("native API bootstrap exceeded bounded wait")
 
-    def adopt_credentials(self):
-        path = Path(self.settings.run_root) / "native-credentials.json"
-        if not path.is_file() or path.stat().st_mode & 0o077:
-            raise RuntimeError("private credential adoption record unavailable")
-        updates = json.loads(path.read_text())
-        allowed = {"HOMESERVER_JELLYFIN_API_KEY", "HOMESERVER_SEERR_API_KEY"}
-        if not isinstance(updates, dict) or set(updates) - allowed or not updates:
-            raise RuntimeError("invalid private credential adoption record")
-        if any(not isinstance(value, str) or not value for value in updates.values()):
-            raise RuntimeError("invalid native credential")
-        values = parse_env(self.env_file.read_text()) | updates
-        atomic_write(self.env_file, serialize_env(values))
-        path.unlink()
+    def prepare(self):
         self.settings = load_settings(self.env_file, mode="dev")
+        prepare_runtime(self.settings)
+        write_stack(self.settings, self.compose_file, env_file=self.env_file)
 
     def wait_health(self):
         deadline = time.monotonic() + self.timeout
@@ -237,16 +245,7 @@ class Runner:
                             ["docker", "inspect", *ids], capture_output=True, text=True, timeout=15
                         )
                         containers = json.loads(inspection.stdout)
-                        if (
-                            not ids
-                            or inspection.returncode
-                            or any(
-                                item["State"]["Status"] != "running"
-                                or item["State"].get("Health", {}).get("Status", "healthy")
-                                != "healthy"
-                                for item in containers
-                            )
-                        ):
+                        if not ids or inspection.returncode or not containers_ready(containers):
                             time.sleep(3)
                             continue
                         return
@@ -256,15 +255,14 @@ class Runner:
         raise RuntimeError("runtime readiness exceeded bounded wait")
 
     def execute(self):
-        apply_install(self.settings, self.env_file)
+        self.prepare()
         self.checked_compose("config", "--quiet")
         self.snapshots()
         self.started = True  # A failed up can still have created owned containers.
         self.checked_compose("up", "-d")
         self.wait_native()
         check_outcomes(self.operator("apply"))
-        self.adopt_credentials()
-        apply_install(self.settings, self.env_file)
+        self.prepare()
         self.checked_compose("up", "-d")
         check_outcomes(self.operator("apply"), unchanged=True)
         check_outcomes(self.operator("verify"), unchanged=True)
@@ -277,7 +275,7 @@ class Runner:
         )
         atomic_write(self.env_file, serialize_env(values))
         self.settings = load_settings(self.env_file, mode="dev")
-        apply_install(self.settings, self.env_file)
+        self.prepare()
         self.checked_compose("up", "-d")
         changed = self.operator("apply")
         check_outcomes(changed)

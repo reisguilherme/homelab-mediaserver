@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import signal
@@ -193,8 +194,12 @@ def main() -> int:
 
         settings = load_settings(args.env_file, mode="prod")
         args.output = Path(settings.run_root) / "host.json"
-    if args.loop and settings is None:
-        parser.error("--loop requires --env-file")
+    interval = (
+        settings.metrics_interval_seconds if settings else
+        float(os.environ.get("HOMESERVER_METRICS_INTERVAL_SECONDS", "5"))
+    )
+    if not math.isfinite(interval) or interval <= 0:
+        parser.error("collection interval must be positive")
     running = True
 
     def stop(_signal, _frame):
@@ -208,8 +213,10 @@ def main() -> int:
             previous = json.loads(args.output.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             previous = None
-        media = Path(settings.media_root) if settings else Path("/srv/data")
-        if settings:
+        media = Path(settings.media_root) if settings else Path(
+            os.environ.get("HOMESERVER_MEDIA_ROOT", "/srv/data")
+        )
+        if settings and settings.media_uuid:
             guard = subprocess.run(
                 ["bash", str(root / "scripts/check-mount.sh"), str(media), settings.media_uuid],
                 capture_output=True,
@@ -223,35 +230,40 @@ def main() -> int:
                 )
                 if not args.loop:
                     return 4
-                time.sleep(settings.metrics_interval_seconds)
+                time.sleep(interval)
                 continue
+        try:
             stat = os.statvfs(media)
             write_atomic(
-                Path(settings.run_root) / "capacity.json",
+                args.output.parent / "capacity.json",
                 {
-                    "filesystem_id": settings.media_uuid,
+                    "filesystem_id": (
+                        settings.media_uuid if settings and settings.media_uuid else
+                        "device:" + str(os.stat(media).st_dev)
+                    ),
                     "measured_at": time.time(),
                     "free_bytes": stat.f_bavail * stat.f_frsize,
                     "total_bytes": stat.f_blocks * stat.f_frsize,
                 },
             )
+        except OSError:
+            write_atomic(
+                args.output.parent / "capacity.json",
+                {"filesystem_id": None, "state": "missing", "measured_at": time.time()},
+            )
+            if not args.loop:
+                return 4
+            time.sleep(interval)
+            continue
         snapshot = collect(
             previous=previous,
             media_path=media,
             network_interface=settings.network_interface if settings else "auto",
         )
-        if settings:
-            from homeserver_common.backup_status import read_backup_status
-
-            snapshot["backup"] = read_backup_status(
-                Path(settings.appdata_root) / "control/last-backup.json",
-                enabled=settings.backup_enabled,
-                stale_hours=settings.backup_stale_hours,
-            )
         write_atomic(args.output, snapshot)
         if not args.loop:
             break
-        time.sleep(settings.metrics_interval_seconds)
+        time.sleep(interval)
     return 0
 
 

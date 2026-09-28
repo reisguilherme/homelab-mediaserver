@@ -1,169 +1,158 @@
-# Instalação em Ubuntu
+# Instalação em Ubuntu e acesso Tailscale
 
-O alvo é Ubuntu Server 24.04 LTS amd64 com systemd, Python 3.12, uv 0.8.0 e
-Docker Engine com Compose v2. O instalador prepara arquivos e diretórios do
-projeto em um host existente; pacotes, identidade do operador e disco montado
-são pré-requisitos. Fresh e adopt preservam dados e serviços alheios ao projeto.
+O alvo é Ubuntu Server 24.04 LTS amd64 com Docker Engine e Compose v2.
+Python, uv e os serviços próprios são instalados nas imagens; o operador não
+precisa instalar um ambiente Python no host para executar o servidor.
 
-## Preparar o host
+## Preparar Ubuntu e Docker
 
-Instale Docker seguindo o [repositório oficial para Ubuntu](https://docs.docker.com/engine/install/ubuntu/).
-Use o [instalador oficial do uv](https://docs.astral.sh/uv/getting-started/installation/)
-na versão **0.8.0**, e deixe `uv` acessível também ao processo root/systemd.
-São necessários `git`, `make`, `findmnt`, Python 3.12 e `python3.12-venv`.
-Restic é necessário quando backup estiver habilitado; ShellCheck participa do
-lint quando instalado.
+Em uma máquina nova, instale ferramentas básicas e SSH:
 
 ```bash
-python3.12 --version
-uv --version
+sudo apt update
+sudo apt install -y git curl ca-certificates openssl nano openssh-server
+```
+
+A [documentação Ubuntu OpenSSH](https://ubuntu.com/server/docs/how-to/security/openssh-server/)
+explica o acesso remoto. Instale Docker Engine e o plugin Compose pelo
+[repositório oficial para Ubuntu](https://docs.docker.com/engine/install/ubuntu/).
+Se Docker já funciona na máquina, confira a instalação existente:
+
+```bash
+docker --version
 docker compose version
-systemctl is-active docker
+sudo docker run --rm hello-world
 ```
 
-Escolha uma identidade existente para `SERVICE_UID/GID`. Descubra os números com
-`id`; o configurador não muda usuários ou permissões de serviços externos.
-Monte o filesystem de mídia previamente. Obtenha seu UUID e confirme o mountpoint:
+Para usar Docker sem `sudo`, siga
+[as instruções oficiais de pós-instalação](https://docs.docker.com/engine/install/linux-postinstall/):
+adicione seu usuário ao grupo `docker` e inicie uma nova sessão. Esse grupo dá
+acesso administrativo ao host.
+
+## Preparar os diretórios
+
+A stack usa caminhos fixos:
+
+| Host | Conteúdo |
+|---|---|
+| `/srv/appdata` | Bancos e configurações persistentes |
+| `/srv/data` | Torrents e biblioteca no mesmo filesystem |
+| `/srv/transcode` | Arquivos temporários do Jellyfin |
+| `/srv/appdata/control` | É montado como `/run/homeserver` nos containers; estado e snapshots |
+
+Escolha e monte seu armazenamento antes de começar. Se houver um disco separado,
+confirme que ele está montado em `/srv/data`; criar um diretório não monta o disco.
+O projeto não particiona, formata ou modifica `fstab`.
 
 ```bash
-findmnt --mountpoint /srv/data --output TARGET,UUID,FSTYPE,OPTIONS
-bash scripts/check-mount.sh /srv/data UUID_REAL_DO_FILESYSTEM
+sudo mkdir -p /srv/appdata/{jellyfin,seerr,sonarr,radarr,prowlarr,bazarr,qbittorrent,control}
+sudo mkdir -p /srv/data/media/{movies,tv} /srv/data/torrents /srv/transcode
+sudo chown 1000:1000 /srv/appdata /srv/appdata/{jellyfin,seerr,sonarr,radarr,prowlarr,bazarr,qbittorrent,control}
+sudo chown 1000:1000 /srv/data /srv/data/media /srv/data/media/{movies,tv} /srv/data/torrents /srv/transcode
+df -hT /srv/data
 ```
 
-O UUID é do filesystem montado, não um número escolhido para o `.env`. Diretório
-existente no disco do sistema não substitui mountpoint. Este fluxo não particiona,
-formata, modifica `fstab`, ativa mergerfs/RTX ou altera energia/serviço Lenovo.
+Prepare essas pastas antes do Compose, pois os bind mounts são validados antes
+de o init executar. Os serviços de mídia usam UID/GID `1000:1000`.
+A inicialização prepara os
+subdiretórios necessários; em dados preexistentes, confirme permissões antes
+de iniciar. Downloads e biblioteca precisam compartilhar filesystem para que
+hardlinks não criem uma segunda cópia física.
 
-## Criar a configuração privada
-
-No checkout da release pretendida:
+## Criar o .env
 
 ```bash
-uv sync --frozen
-sudo install -d -m 0700 /etc/homeserver
-sudo .venv/bin/python scripts/homeserver env init --env-file /etc/homeserver/.env --mode prod
-sudoedit /etc/homeserver/.env
-sudo .venv/bin/python scripts/homeserver config validate --env-file /etc/homeserver/.env
-sudo .venv/bin/python scripts/homeserver config show --redacted --env-file /etc/homeserver/.env
+git clone https://github.com/reisguilherme/homelab-mediaserver.git
+cd homelab-mediaserver
+cp .env.example .env
+chmod 600 .env
 ```
 
-Init gera credenciais iniciais em arquivo `0600` e recusa sobrescrever um arquivo
-existente. Configure pelo menos `MEDIA_UUID`, roots, `SERVICE_UID/GID`, timezone,
-binds e URLs públicas conforme o host. Os nomes completos usam `HOMESERVER_`.
-Não execute `.env` como shell: `$`, `#`, espaços e aspas são dados literais.
-Segredos podem usar `_FILE`; consulte [a gramática](configuration.md).
-
-Roots padrão do host: `/opt/homeserver`, `/srv/appdata`, `/srv/data`,
-`/srv/transcode`, `/srv/backup-staging` e `/run/homeserver`. Nos containers a mídia
-é `/data`, estado do controlador `/var/lib/homeserver`. Mantenha torrents e
-biblioteca no mesmo filesystem para permitir hardlinks.
-
-`TRANSCODE_MODE=cpu` funciona sem render node. Para Intel, configure
-`TRANSCODE_MODE=intel`, `INTEL_RENDER_DEVICE` e os GIDs reais de `render`/`video`.
-O preflight exige acesso ao device; confirme QSV/VA-API e reprodução no host
-seguindo [o guia de hardware](runbooks/jellyfin-hardware.md).
-
-Para acesso Tailscale, configure `ACCESS_MODE=tailscale`, `TAILSCALE_BIND_IP`,
-hostname e URLs públicas; autenticação da tailnet é uma operação do administrador.
-Modo LAN exige `ACCESS_MODE=lan` e bind explícito. O monitor qBit continua restrito
-ao Tailscale ou loopback e mantém a autenticação nativa. A porta de peers TCP/UDP
-é separada da WebUI. Nenhum comando abre portas no roteador.
-
-## Planejar e preparar
+Em uma instalação nova, gere tokens sem imprimi-los:
 
 ```bash
-sudo .venv/bin/python scripts/homeserver doctor --env-file /etc/homeserver/.env
-sudo .venv/bin/python scripts/homeserver install plan --env-file /etc/homeserver/.env --mode fresh
-sudo .venv/bin/python scripts/homeserver install apply --env-file /etc/homeserver/.env --mode fresh
+for key in ARR_TOKEN ADMIN_TOKEN CSRF_TOKEN SONARR_API_KEY RADARR_API_KEY PROWLARR_API_KEY BAZARR_API_KEY; do
+  sed -i "s/^HOMESERVER_${key}=.*/HOMESERVER_${key}=$(openssl rand -hex 16)/" .env
+done
+nano .env
+sudo chown 1000:1000 .env
 ```
 
-Plan valida dependências, UUID e Intel quando selecionado. Apply cria apenas
-diretórios e arquivos próprios, journal de checksums, Compose, operator.env e
-units; prepara um runtime bootstrap quando necessário. Arquivos gerados editados
-fora do fluxo são recusados. Esta preparação requer deploy para ativar a release.
+Preencha `HOMESERVER_ADMIN_PASSWORD` e `HOMESERVER_QBIT_PASSWORD`, ajuste as
+preferências e informe credenciais de provedores que quiser habilitar.
+Jellyfin e Seerr podem começar com suas API keys vazias: o operator as adota
+após o bootstrap autenticado. Não execute o bloco de geração sobre uma
+instalação existente: importe suas chaves atuais.
 
-Para inspeção isolada do render:
+Os consumidores próprios leem esse arquivo como UID 1000; mantenha seu owner
+alinhado e a permissão 0600. Se seu usuário do host tiver outro UID, use
+`sudoedit .env` nas alterações posteriores.
+
+O arquivo contém dados, não comandos shell. Não use `source`. Consulte
+[configuração](configuration.md) para a sintaxe, os parâmetros e os idiomas.
+
+## Iniciar e conectar os serviços
 
 ```bash
-sudo .venv/bin/python scripts/homeserver render --env-file /etc/homeserver/.env --output /etc/homeserver/stack-preview.json
+docker compose up -d --build
+docker compose ps
+docker compose run --rm operator config validate --env-file /project/.env
+docker compose run --rm operator config apply --env-file /project/.env --in-container
+docker compose restart control-api control-worker download-gateway telemetry host-metrics
 ```
 
-O render contém segredos e permanece `0600`; não publicá-lo. Os arquivos ativos
-em `INSTALL_ROOT/shared` são derivados e não devem ser editados manualmente.
+Espere as APIs iniciarem antes do apply. Se um serviço ainda estiver indisponível,
+consulte `docker compose logs` e repita o apply. A inicialização cria apenas
+configurações ausentes; não substitui bancos existentes. O operator preserva
+IDs e confirma as preferências pela API. O checkout fica montado em `/project`
+nesse container para que API keys adotadas sejam salvas no próprio `.env`.
 
-## Adotar uma instalação existente
+Abra o painel em `http://IP_DO_SERVIDOR:8081` e confira Jellyfin/Seerr,
+bibliotecas, Arr e provedores. Indexadores começam vazios: configure-os conforme
+[o guia dos serviços](runbooks/service-setup.md). Ter todos os containers
+iniciados não comprova que uma fonte tenha peers ou que uma legenda esteja disponível.
 
-Faça backup antes da migração. Preencha um `.env` privado com roots, portas,
-usuário, chaves reais de API e credenciais existentes. Preserve os bancos e os
-IDs em uso. Não copie inventário bruto para o Git. Importe os limites qBit exatos
-em bytes/s; `UPLOAD_LIMIT_BYTES=-1` deriva de `UPLOAD_LIMIT_MBIT` e pode alterar
-um arredondamento anterior.
+## Acesso pelo Tailscale
+
+Instale e autentique Tailscale no host seguindo
+[a documentação oficial Linux](https://tailscale.com/docs/install/linux):
 
 ```bash
-sudo .venv/bin/python scripts/homeserver install plan --env-file /etc/homeserver/.env --mode adopt
-sudo .venv/bin/python scripts/homeserver install apply --env-file /etc/homeserver/.env --mode adopt
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+tailscale status
+tailscale ip -4
 ```
 
-Adopt não descobre automaticamente todo estado do servidor. Ele aplica o plano
-aos arquivos próprios e recusa substituir configurações nativas não gerenciadas.
-Credenciais reais devem ser importadas; contas existentes não recebem reset de
-senha silencioso. Antes de ativar failover, registre no `.env` privado os hashes
-das aquisições preexistentes protegidas pela migração em `SOURCE_PROTECTED_HASHES`.
-Uma aquisição já concluída não deve ser reaberta.
+Entre na mesma tailnet no dispositivo cliente. Use o IP retornado por
+`tailscale ip -4` com as portas do [README](../README.md#acessar), por exemplo
+`http://IP_TAILSCALE:8096` para Jellyfin e `http://IP_TAILSCALE:8081` para o
+painel. Não é necessário encaminhar portas no roteador.
 
-## Ativar uma release
-
-Produza o artefato em checkout limpo com credenciais do registry disponíveis:
+O monitor qBit é um proxy somente leitura em `127.0.0.1:18080`. Para acessá-lo
+na tailnet:
 
 ```bash
-bash scripts/build-release.sh --image-prefix ghcr.io/SEU_NAMESPACE/homeserver --output /tmp/homeserver-release
+sudo tailscale serve --bg --http=18080 http://127.0.0.1:18080
+tailscale serve status
 ```
 
-Build publica as imagens próprias e resolve upstreams por digest. Transfira
-artefato e manifesto ao servidor. Substitua os placeholders pelo SHA completo
-e pelos arquivos realmente produzidos:
+Abra o endereço MagicDNS HTTP mostrado pelo comando, na porta `18080`.
+[`--bg` e `--http`](https://tailscale.com/docs/reference/tailscale-cli/serve)
+mantêm a publicação após reinício e servem a porta escolhida dentro da tailnet.
+O login é o nativo qBit; o proxy recusa mudanças na fila e nas preferências.
+
+## Reutilizar uma instalação
+
+Preserve `/srv/appdata` e `/srv/data`, importe credenciais existentes no `.env`
+e confira os paths esperados pelos serviços. Pare a stack anterior antes de
+iniciar outra que use os mesmos bancos ou portas. Contas existentes não têm
+senha redefinida pelo apply. Examine `config plan` antes de reconciliar preferências:
 
 ```bash
-sudo bash scripts/deploy.sh --env-file /etc/homeserver/.env \
-  --release SHA_DE_40_HEXADECIMAIS \
-  --artifact /caminho/homeserver-SHA.tar --manifest /caminho/homeserver-SHA.json
-sudo .venv/bin/python scripts/homeserver config plan --env-file /etc/homeserver/.env
-sudo .venv/bin/python scripts/homeserver config verify --env-file /etc/homeserver/.env
-sudo bash scripts/smoke.sh --env-file /etc/homeserver/.env
-systemctl status homeserver-stack.service homeserver-metrics.service
+docker compose run --rm operator config plan --env-file /project/.env --in-container
 ```
 
-Deploy valida checksums/imagens/schema, captura backup quando exigido, aplica
-migrações, configura serviços nativos no operator isolado e verifica prontidão.
-Jellyfin/Seerr podem descobrir seus tokens reais na primeira configuração;
-o host os salva no `.env` privado e refaz os derivados. Falha mantém admissão
-bloqueada e exige revisão, sem restaurar bancos silenciosamente.
-
-Ainda é necessário registrar um ensaio completo em host/VM novo: segundo apply
-sem recursos duplicados, reboot com disco presente/ausente, backup e restore,
-acesso de rede e reprodução. Fixtures locais não cumprem esse aceite físico.
-
-## Deploy manual pelo GitHub Actions
-
-Após um push em `main` com HomeServer CI aprovado, execute manualmente
-**Build HomeServer release** com `commit` igual ao SHA completo validado.
-Depois execute **Deploy HomeServer** com o mesmo `commit` e `release_run`
-igual ao ID da execução de build concluída com sucesso. Deploy baixa o artefato
-`homeserver-release-{SHA}` dessa execução e valida sua identidade; não recebe
-um caminho arbitrário de artefato.
-
-Configure o environment `production` do repositório com os secrets
-`TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET`, `HOMESERVER_SSH_KEY`,
-`HOMESERVER_SSH_KNOWN_HOSTS`, `HOMESERVER_SSH_HOST` e `HOMESERVER_SSH_USER`.
-As variáveis `HOMESERVER_INSTALL_ROOT` e `HOMESERVER_ENV_FILE` usam
-`/opt/homeserver` e `/etc/homeserver/.env` quando omitidas. Cadastre o cliente
-OAuth e autorize `tag:homeserver-ci` na tailnet administrada; isso exige ação
-externa e não é criado pelo instalador. A host key SSH deve ser confirmada
-fora do workflow e salva em known_hosts; acesso e confiança não são inferidos.
-
-O host deve ter sido preparado pelo fluxo local, incluindo o runtime bootstrap
-em `INSTALL_ROOT/current`. O deploy remoto chama `sudo bash` sobre
-`current/scripts/deploy.sh`: ele precisa de execução root não interativa.
-Configure uma autorização sudo limitada ao caminho/fluxo de deploy controlado;
-uma política que exige senha falha na sessão SSH sem prompt interativo. O `.env`
-privado permanece no host e não deve ser cadastrado como artefato de Actions.
+Dados de um layout diferente precisam de adaptação explícita; não copie bancos
+ou mídia para o repositório. Intel é opcional e exige
+[verificação do hardware](runbooks/jellyfin-hardware.md).

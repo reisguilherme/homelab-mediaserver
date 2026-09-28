@@ -1,16 +1,13 @@
-# Recuperação
+# Histórico — recuperação gerenciada retirada
 
-Em perda de serviço, preservar a mídia e bloquear admissões. Verificar
-`/health/live` para diferenciar processo vivo de prontidão. Restaurar em um
-diretório isolado, validar manifesto/checksums e reconciliar arquivos antes de
-iniciar o worker.
+O procedimento de promoção de restore, reconciliação de manifesto e rollback
+pertence à infraestrutura anterior, retirada em 28/09/2026. Ele não é um fluxo
+ativo do HomeServer pessoal.
 
-Uma instância recuperada deve responder readiness 503 com
-`admission_enabled=false` até que UUID, espaço atual, schema e efeitos externos
-tenham sido revisados. Não recriar mídia ausente nem reabrir scheduler baseado
-em uma reserva antiga.
+Para problemas na stack atual, consulte [diagnóstico](../troubleshooting.md)
+e [operação](../operator-guide.md). Bancos, mídia e cópias existentes devem
+ser preservados enquanto se investiga a causa; recriar containers não deve
+substituir esses dados.
 
-O arquivo `RECOVERY_MODE` é montado em `/var/lib/homeserver/RECOVERY_MODE` nos
-processos próprios. API, worker e gateway permanecem bloqueados enquanto o
-arquivo existir sem `admission_enabled=true`; remover ou alterar o marcador
-somente depois da reconciliação manual e de uma nova medição de capacidade.
+O procedimento anterior está no
+[histórico Git](https://github.com/reisguilherme/homelab-mediaserver/blob/89c84f26e4426d2f025573ce3728c5fa320f6267/docs/runbooks/recovery.md).

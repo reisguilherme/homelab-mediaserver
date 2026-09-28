@@ -1,5 +1,9 @@
 # HomeServer — Implementação 02: automação, capacidade e ciclo da mídia
 
+> Plano histórico de 21/09. O contrato vigente de configuração/aquisição está
+> no [design de produtização](../specs/2026-09-28-homeserver-productization-design.md)
+> e nos [guias atuais](../../../README.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans. Executar os checkboxes em ordem; não liberar downloads reais antes dos testes de admissão.
 
 **Goal:** implementar pedidos que respeitem qualidade, idioma, tamanho e espaço reservado, com retomada e exclusão coordenadas.

@@ -1,41 +1,47 @@
-# Contratos externos v1
+# Contratos de integração
 
-Este documento registra o subconjunto permitido pelos adaptadores próprios. Os
-endpoints são referências de contrato e só podem ser ativados depois de uma
-prova contra as versões registradas em `upstream-versions.json`.
+Os adaptadores próprios usam subconjuntos explícitos das APIs nativas.
+Autenticação, identidade, versão/schema e leitura após escrita precisam ser
+compatíveis; uma resposta desconhecida não é tratada como sucesso.
 
-| Serviço | Operações permitidas | Regra de falha |
-| --- | --- | --- |
-| Seerr | `GET /api/v1/request` paginado | 401/403 bloqueiam; resposta sem identidade é incompatível |
-| Sonarr/Radarr | `GET /api/v3/release`, `POST /api/v3/command` para grab/import | timeout após POST fica incerto; não repetir cegamente |
-| qBittorrent | login, versão, preferências, categorias, lista/propriedades/arquivos e `POST /api/v2/torrents/add` | somente o gateway possui a credencial; rotas desconhecidas são negadas |
-| Bazarr | busca explícita de legenda do objeto validado | ausência mantém `waiting_subtitles` |
-| Jellyfin | `GET /Sessions` | snapshot degradado não vira zero |
+| Integração | Uso | Comportamento em falha |
+|---|---|---|
+| Seerr | Pedidos paginados, bibliotecas e sincronização de estado | 401/403 ou objeto sem identidade bloqueiam a integração |
+| Sonarr/Radarr | Fontes, arquivos, importação e preferências nativas | Escrita com resultado incerto é reconciliada antes de repetir |
+| Prowlarr | Definições/indexadores, aplicações e proxy Byparr | Definição ou fields desconhecidos retornam unsupported |
+| qBittorrent via gateway | Leituras compatíveis Arr e adições/controle admitidos | Rotas desconhecidas, falta de autorização ou reserva inválida são recusadas |
+| Bazarr/SubDL | Legendas do objeto/edição validado | Ausência mantém espera por legenda |
+| Jellyfin | Bibliotecas, sessões e sincronização | Snapshot degradado não vira zero |
+| Operator | Plan/apply/read-back das preferências gerenciadas | Preserva IDs/estado e informa aplicação parcial ou drift |
 
-Os adaptadores usam timeout, cabeçalhos específicos e validação da resposta.
-Não existe proxy genérico para URL/path arbitrário. Respostas de exemplo ficam
-em `tests/fixtures/upstream/` sem tokens, URLs privadas ou nomes da biblioteca.
+## Gateway e monitor qBit
 
-Em 22/09/2026 o servidor executava Sonarr 4.0.15.2941, Radarr 6.4.4.10685 e
-qBittorrent 5.1.2 (Web API 2.11.4). O código-fonte dessas versões confirma que
-os Arr usam `/api/v2/auth/login`, `app/webapiVersion`, `app/version`,
-`app/preferences`, `torrents/categories`, `torrents/info`, `torrents/properties`,
-`torrents/files` e `torrents/add`. O gateway responde apenas a esse subconjunto
-de leitura e ao `add` admitido. `delete`, `setCategory`, `createCategory`,
-`setShareLimits` e `setForceStart` permanecem bloqueados. `topPrio` não é exposto
-à sessão dos Arr; somente a rotina interna autenticada do gateway pode usá-lo
-para ordenar filmes admitidos por seeds e preservar a precedência dos episódios
-elegíveis, sempre com permissão confirmada e identidade conferida no qBittorrent.
+Arr usa o cliente HomeServer Gateway. Admissão verifica identidade do torrent,
+destino, categoria, artefato inspecionado, tamanho real, reserva e capacidade
+recente. Controlar uma fonte também exige permissão ligada à aquisição e
+respeita proteção persistente; não existe proxy genérico de URL/path.
 
-O caminho de adição implementado aceita somente upload de `.torrent` v1. O
-gateway reinterpreta os bytes, verifica infohash, digest completo, arquivos,
-tamanho, categoria, destino e permit ligado a uma reserva existente antes de
-encaminhar os mesmos bytes ao qBittorrent. Magnet e URL de torrent são negados
-até que exista obtenção e inspeção prévia segura. A seleção automática de
-releases e a importação validada dependem de reserva, inspeção do torrent,
-verificação de capacidade e permissão confirmada pelo gateway.
+A API nativa qBit não tem porta administrativa publicada no host.
+O gateway e os clientes internos autorizados alcançam a rede de transferência.
+O operator tem acesso pontual às APIs para configurar preferências.
 
-Em produção, qBittorrent usa `transfer` + `egress_transfer`; Sonarr/Radarr e
-Prowlarr usam `apps` + `egress`. O gateway é o único serviço ligado a `apps`
-e `transfer`. A porta de administração do qBittorrent fica ligada somente ao
-loopback do host para uso do operador, sem publicação na LAN.
+O monitor público é um proxy separado, em loopback `18080`, com allowlist
+de arquivos da UI, GETs de monitoramento e login/logout. Adicionar, excluir,
+retomar, pausar ou alterar preferências pelo monitor retorna HTTP 403.
+O acesso externo à LAN ocorre dentro da tailnet por
+[Tailscale Serve](../installation.md#acesso-pelo-tailscale).
+
+## Regras de mídia
+
+Downloads de episódios podem ocorrer em paralelo dentro da janela por série
+e do limite global; importação no Jellyfin segue temporada/episódio em ordem.
+CDH Arr permanece desabilitado e hardlinks habilitados, de modo que o worker
+coordene validação, legenda e importação sem duplicar os bytes do vídeo.
+
+Fixtures de API ficam em `tests/fixtures/upstream/`, sem tokens, endereços
+privados ou nomes da biblioteca. Os contratos do monitor também executam
+Caddy real; versões novas precisam de verificação própria.
+
+A fotografia do servidor em 22/09/2026 usava Sonarr 4.0.15.2941,
+Radarr 6.4.4.10685 e qBittorrent 5.1.2 (Web API 2.11.4).
+Esse registro histórico não substitui versões observadas em outra instalação.

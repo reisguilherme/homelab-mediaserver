@@ -7,6 +7,14 @@ from homeserver_control.worker.__main__ import _build_cycle
 from homeserver_control.worker.runtime import WorkerCycle
 
 
+def test_media_identity_uses_the_mounted_device_without_operator_uuid(tmp_path):
+    from homeserver_control.worker.__main__ import _media_filesystem_id
+
+    assert _media_filesystem_id(tmp_path) == f"device:{tmp_path.stat().st_dev}"
+    assert _media_filesystem_id(tmp_path, "existing-uuid") == "existing-uuid"
+    assert _media_filesystem_id(tmp_path / "absent") is None
+
+
 def test_worker_snapshot_enforces_configured_uuid_and_age(tmp_path):
     import json
 
@@ -472,10 +480,8 @@ async def test_worker_admits_every_page_before_slow_acquisition() -> None:
     assert seen_admissions == [2, 2]
 
 
-def test_worker_reads_subdl_key_from_private_file(tmp_path, monkeypatch) -> None:
-    key_file = tmp_path / "subdl.key"
-    key_file.write_text("test-subdl-key\n", encoding="utf-8")
-    monkeypatch.setenv("HOMESERVER_SUBDL_API_KEY_FILE", str(key_file))
+def test_worker_reads_subdl_key_from_environment(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOMESERVER_SUBDL_API_KEY", "test-subdl-key")
     monkeypatch.setenv("HOMESERVER_SEERR_URL", "http://seerr:5055")
     monkeypatch.setenv("HOMESERVER_SEERR_API_KEY", "seerr-test")
     monkeypatch.setenv("HOMESERVER_CAPACITY_SNAPSHOT", str(tmp_path / "capacity.json"))

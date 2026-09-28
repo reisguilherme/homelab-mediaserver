@@ -1,29 +1,33 @@
-# HomeServer — guia do agente e do operador
+# HomeServer — guia do agente
+
+Projeto pessoal executado pelo `compose.yaml` da raiz. Parâmetros de comportamento
+e credenciais ficam no `.env` privado; defaults técnicos ficam no código/Compose.
 
 ## Comandos
 
-- `make lint`: Ruff, sintaxe Bash e ShellCheck quando instalado.
-- `make test-unit`: testes unitários sem rede.
-- `make test-contract`: contratos HTTP/API com fixtures locais.
-- `make test-integration`: SQLite, filesystem temporário e containers quando disponíveis.
-- `make compose-check`: valida o Compose dev sem segredos de produção.
-- `make smoke`: healthchecks locais e guarda de montagem em modo fixture.
-- `make test-config`, `make test-install`, `make test-restic`: configuração,
-  instalação idempotente e recuperação real com Restic temporário.
+- `docker compose up -d --build`: construir e iniciar a stack.
+- `docker compose ps` e `docker compose logs --tail=100`: acompanhar serviços.
+- `make lint`: Ruff, compilação, sintaxe Bash e ShellCheck quando instalado.
+- `make test-unit`, `make test-contract`, `make test-integration`: checks locais.
+- `make compose-check` e `make smoke`: Compose e verificações locais.
 
-Use Python 3.12 e `uv sync --frozen` no ambiente Linux/WSL2. O desktop Windows não substitui os testes de filesystem, GPU, rede, energia, Docker e reprodução no Legion.
+Use Python 3.12 e `uv sync --frozen` em Linux/WSL2 para desenvolvimento.
+Windows não substitui testes de filesystem, GPU, rede e reprodução no servidor.
 
-## Separação de ambientes
+## Configuração e dados
 
-- Desenvolvimento usa `.runtime/dev`, fixtures, portas loopback e credenciais locais.
-- Produção usa `/srv/data`, `/srv/appdata`, `/srv/transcode` e `/srv/backup-staging` somente após a guarda de UUID.
-- Nunca copie bancos, mídia, tokens ou inventário bruto do servidor para o Git.
-- O pipeline de produção é manual (`workflow_dispatch`) e deve usar o mesmo `scripts/deploy.sh` validado localmente.
+- `.env` guarda credenciais diretamente, sem arquivos de segredo `*_FILE`.
+- Layout padrão: `/srv/appdata`, `/srv/data`, `/srv/transcode` e `/srv/appdata/control` (runtime `/run/homeserver` nos containers).
+- Fixtures usam diretórios temporários; nunca apontar testes para dados reais.
+- Nunca colocar `.env`, bancos, tokens, mídia ou inventário bruto no Git.
 
-## Operações proibidas nesta versão
+## Limites operacionais
 
-Não formatar ou particionar discos, ativar mergerfs, reativar a RTX, substituir `fstab`, reescrever o serviço Lenovo, abrir portas no roteador, publicar a API do qBittorrent na LAN, liberar downloads sem gateway e checagem de capacidade real ou apagar mídia automaticamente.
+Não formatar/particionar discos, ativar mergerfs/RTX, substituir `fstab`,
+reescrever o serviço Lenovo, abrir portas no roteador, publicar a API nativa
+qBit, liberar downloads sem gateway/capacidade real ou apagar mídia automaticamente.
 
-## Estado externo
-
-Os scripts de auditoria e deploy registram `reported`, `verified`, `missing` e `unknown`. Não transformar uma informação fornecida pelo usuário em comprovação física. Validações SSH/Tailscale, Intel UHD, SFTP e reprodução exigem o ambiente real. CYD e MQTT exclusivo foram retirados; especificações antigas que os mencionem são históricas.
+O projeto atual não tem CI/CD, releases próprias, gerenciador de backups ou
+units do host. Não reintroduzir essas camadas. CYD/MQTT exclusivo foram retirados.
+Documentos antigos de produtização são históricos; use README e guias atuais.
+Informações declaradas não comprovam testes físicos, Tailscale ou reprodução.

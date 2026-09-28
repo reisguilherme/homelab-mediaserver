@@ -1,23 +1,27 @@
-# Diagnóstico da base do servidor
+# Conferir o host
 
-O diagnóstico atual lê o `.env` canônico e verifica dependências/montagem sem
-alterar o host:
+Estes comandos consultam o servidor sem alterar rede ou armazenamento:
 
 ```bash
-sudo .venv/bin/python scripts/homeserver doctor --env-file /etc/homeserver/.env
-bash scripts/check-mount.sh /CAMINHO_DA_MIDIA UUID_VERIFICADO
+uname -a
+ip -br addr
+ip route
+df -hT /srv/data /srv/appdata /srv/transcode
+findmnt --target /srv/data
+docker version
+docker compose version
+docker compose ps
+tailscale status
+tailscale ip -4
 ```
 
-O mountpoint deve ser exato, ter UUID correto e escrita permitida. Diretório
-existente no filesystem raiz não comprova o disco de mídia. Paths, UID/GID e
-Intel opcional devem corresponder ao hardware real da máquina.
+Confirme que `/srv/data` está no filesystem pretendido e tem espaço/escrita
+para UID/GID 1000. Um diretório existente não comprova um disco separado.
+Downloads e biblioteca devem compartilhar filesystem para usar hardlinks.
 
-`scripts/audit-server.sh` e `config/server.example.yaml` permanecem como
-instrumentos históricos de inventário somente leitura. Não são configuração
-ativa e não substituem Settings/install/doctor; seus relatórios físicos exigem
-revisão sanitizada antes de compartilhamento.
+Compare resultados com [instalação](../installation.md) e
+[diagnóstico](../troubleshooting.md). SSH, acesso Tailscale, GPU e reprodução
+exigem verificação na máquina real. Registre declaração e medição separadamente;
+não publique IPs privados, tokens ou inventário bruto no Git.
 
-SSH LAN, autorização da tailnet, hardlinks, Intel e reprodução exigem ambiente
-real. Registre reported/verified/missing/unknown; não transforme declaração do
-usuário ou fixture em prova. Inventário bruto, tokens e chaves ficam fora do Git.
-O diagnóstico não altera rede, fstab, Lenovo, GPU ou portas do roteador.
+O projeto não altera Netplan, roteador, `fstab`, partições ou energia do host.

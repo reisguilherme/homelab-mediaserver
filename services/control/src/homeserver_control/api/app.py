@@ -14,6 +14,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from homeserver_common.filesystem import filesystem_identity
 from homeserver_control.api.deletion_capture import DeletionAdmission, DeletionCaptureError
 from homeserver_control.domain.deletion_plan import DeletionPlanError, DeletionPlanner
 from homeserver_control.persistence.db import ReservationRepository
@@ -159,7 +160,10 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
             ),
             telemetry_provider=lambda: _host_status_from_environment(),
         )
-        media_uuid = os.environ.get("HOMESERVER_MEDIA_UUID", "")
+        media_uuid = filesystem_identity(
+            Path(os.environ.get("HOMESERVER_MEDIA_ROOT", "/data")),
+            os.environ.get("HOMESERVER_MEDIA_UUID"),
+        )
         if media_uuid and state.db_path is not None:
             deletion_jobs = DeletionJobStore(state.db_path)
             deletion_jobs.initialize()

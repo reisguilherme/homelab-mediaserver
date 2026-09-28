@@ -1,59 +1,59 @@
 # Diagnóstico
 
-Comece por `config validate`, `doctor` e readiness; preserve a mídia e o estado
-antes de tentar recuperação. O `.env` privado continua sendo a configuração
-editável. Saídas de comandos nativos precisam de sanitização antes de compartilhar.
+Comece pelos containers, logs e validação do `.env`:
 
 ```bash
-sudo .venv/bin/python scripts/homeserver config validate --env-file /etc/homeserver/.env
-sudo .venv/bin/python scripts/homeserver doctor --env-file /etc/homeserver/.env
-systemctl status homeserver-stack.service homeserver-metrics.service
-journalctl -u homeserver-stack.service --since '30 minutes ago'
+docker compose ps
+docker compose logs --tail=100
+docker compose run --rm operator config validate --env-file /project/.env
+df -hT /srv/data
+tailscale status
 ```
+
+Revise saídas nativas antes de compartilhar: logs podem conter informações
+privadas. Reiniciar sem corrigir a causa costuma repetir o erro.
 
 | Sintoma | Verificação e ação |
 |---|---|
-| Configuração inválida/exit 2 | Revisar a chave indicada, tipo, listas, portas duplicadas, modo e conflito `_FILE`. Não usar `source .env`. |
-| UUID/mount recusado | `findmnt --mountpoint <MEDIA_ROOT>` e `check-mount.sh <path> <UUID>`. Confirmar filesystem correto, montagem rw e permissão. Um diretório vazio em `/` não é prova de disco. |
-| Native HTTP 401/403 | Importar a chave/senha real da instância. Init de env não altera credenciais existentes. Repetir plan; nunca resetar conta para contornar erro. |
-| Native `unsupported` | Verificar versão, schema/definition/fields/IDs reais do serviço. Configurar capability suportada ou fazer adoção explícita; não aceitar como sucesso. |
-| Native read-back drift | Conferir preferências efetivas e outra configuração concorrente. Repetir plan após corrigir; writes com resposta perdida são relidos antes de repetir. |
-| Arquivo gerado modificado | Comparar com backup/journal. Migrar intenção para `.env`; não apagar o journal ou forçar overwrite de arquivo desconhecido. |
-| Container unhealthy/encerrado | Conferir supervisor.json, tentativas na janela, memória, logs e mounts. Supervisor respeita manutenção/recovery e tem limite de reinícios. |
-| Readiness 503 | Checar RECOVERY_MODE, heartbeat do worker, idade do snapshot e capacidade. `/health/live` 200 sozinho não permite novas aquisições. |
-| Pedido Requested por horas | Consultar fila Arr/qBit e estado do controlador: pode aguardar espaço, fonte, sequência de série, legenda ou importação. Repetir o pedido não resolve essa condição. |
-| Fonte existe no site, mas Arr não a encontra | Conferir indexador habilitado, categorias/caps da aplicação e sincronização Prowlarr. Se usar Byparr, proxy e indexador precisam de tag correspondente; proxy sem tags não comprova que a busca o utiliza. |
-| Indexador responde HTTP 429 | Conferir logs sanitizados, limitação da fonte e seleção do proxy. Não insistir em buscas contínuas; corrigir a configuração e respeitar o retry antes de testar novamente. |
-| Release pequena anunciada como 1080p | Conferir duração e bytes do vídeo principal contra o piso MiB/min. Tamanho do torrent inteiro/seeds não tornam um encode elegível; samples/sidecars não contam. |
-| qBit 100%, mas mídia indisponível | Conferir validação, legenda e importação pelo worker; depois sincronização Arr/Jellyfin/Seerr. Completed Download Handling Arr permanece desabilitado e hardlinks devem estar habilitados. |
-| Fonte lenta sem troca | Verificar janela de 300 s, qualidade/edição, peers medidos, bytes conjuntos, ETA e proteção de hash. Download pausado/completo ou candidato inferior não deve ser promovido. |
-| Painel mostra dados antigos | Conferir homeserver-metrics.service e arquivos em RUN_ROOT. Ausência de host/capacidade é indisponibilidade explícita; não fabricar métricas. |
-| Intel inacessível | Revisar render node e GIDs reais, permissões e driver. CPU funciona sem GPU; habilitar Intel exige teste no host e playback. |
-| Backup/copy falha | Revisar Restic, repository, senha `_FILE`, espaço de staging e host key SFTP. Falha de copy não invalida automaticamente o snapshot local; validar cada repo. |
-| Release falha | Conferir manifesto, digest, SHA e compatibilidade de schema. Preservar maintenance/RECOVERY_MODE até reconciliar; rollback não restaura banco silenciosamente. |
+| Configuração inválida | Corrigir a chave/tipo/lista indicada; não usar `source .env`. |
+| Diretório ausente ou sem escrita | Conferir /srv e UID/GID 1000; conferir o filesystem montado com `findmnt --target /srv/data`. |
+| Native HTTP 401/403 | Importar a chave/senha real no .env; init/apply não resetam contas existentes. |
+| Native unsupported | Conferir versão, definição, fields e IDs reais; não tratar capacidade não suportada como sucesso. |
+| Read-back drift | Conferir preferências nativas e configurações concorrentes; repetir plan/apply/verify. |
+| Container encerrado/unhealthy | Ver logs, memória e mounts; repetir a inicialização após corrigir a causa. |
+| Requested por horas | Conferir Arr/qBit/controlador: pode aguardar espaço, fonte, janela de episódios, legenda ou importação. |
+| Fonte aparece no site, mas Arr não encontra | Conferir indexador, categorias/caps e sincronização Prowlarr; proxy Byparr deve compartilhar a tag gerenciada com a fonte. |
+| Indexador responde 429 | Revisar seleção do proxy e limitação da fonte; respeitar o retry configurado. |
+| Torrent pequeno anunciado como 1080p | Conferir bytes do vídeo principal e duração contra o piso MiB/min; samples/sidecars não contam. |
+| qBit 100%, mas nada no Jellyfin | Ver validação, legenda e importação worker; episódio pronto aguarda anteriores importados. Depois conferir sync Arr/Jellyfin/Seerr; manter CDH desabilitado e hardlinks habilitados. |
+| Fonte lenta sem troca | Conferir janela, qualidade/edição, peers medidos, capacidade conjunta e ETA; pausa/completo ou candidata inferior não deve ser promovida. |
+| Preferência alterada sem efeito | Rodar operator apply e reiniciar os cinco consumidores conforme o guia do operador. |
+| Painel sem métricas | Ver logs de host-metrics/telemetry e idade dos snapshots; primeira amostra não tem taxa. |
+| Serviço inacessível pelo Tailscale | Conferir autenticação/status, IP atual e acesso na mesma tailnet; usar a porta do serviço. |
+| Monitor qBit inacessível | Conferir loopback18080 e `tailscale serve status`; usar o endereço MagicDNS informado pelo Serve. |
+| Intel inacessível | Conferir renderD128 e GIDs reais no override; consultar o guia de hardware e testar reprodução. |
 
-## Manutenção e retorno
+## Comandos por serviço
 
-As operações do projeto coordenam `RUN_ROOT/operation.lock` e o marcador
-`RUN_ROOT/maintenance`. Backup/deploy/configuração de runtime param escritores
-e só retomam após guarda da montagem. Não iniciar containers manualmente enquanto
-esses marcadores representam uma operação real.
+```bash
+docker compose logs --tail=100 control-worker download-gateway
+docker compose logs --tail=100 sonarr radarr prowlarr
+docker compose logs --tail=100 jellyfin seerr bazarr
+docker compose logs --tail=100 host-metrics telemetry
+docker compose run --rm operator config plan --env-file /project/.env --in-container
+docker compose run --rm operator config verify --env-file /project/.env --in-container
+```
 
-Depois de uma falha, confirme que nenhum backup/deploy está executando, preserve
-o estado e examine a razão registrada. Execute doctor novamente. Restart do
-supervisor pode ser feito com `sudo systemctl restart homeserver-stack.service`
-apenas após corrigir a causa e confirmar a montagem; recovery continuará bloqueando
-admissão. Não remova RECOVERY_MODE como tentativa de fazer healthcheck ficar verde.
-
-Para recuperação de backup, siga [restore isolado](operator-guide.md#backup-e-restore)
-e [reconciliação](runbooks/recovery.md). A API/worker/gateway aceitam operação normal
-somente depois da revisão de UUID, capacidade, schema, tombstones e efeitos
-externos. O supervisor também respeita a presença do marcador de recovery.
+O healthcheck do gateway verifica processo HTTP; autorização de downloads
+também exige capacidade recente, reservas válidas e estado consistente.
+Não contorne o gateway para fazer um pedido começar.
 
 ## Evidência
 
-Registre versão/SHA, comando, resultado sanitizado, horário e ambiente. Use
-`reported`, `verified`, `missing` e `unknown` para separar declaração de medição.
-Fixtures e testes WSL validam contratos; reprodução, reboot, UUID físico,
-Intel, rede, energia, SFTP e Tailscale exigem máquina real. Nenhum banco, token,
-inventário bruto ou nome privado de mídia deve ser adicionado ao Git.
+Registre comando, horário, versão e resultado sanitizado. Separe declarado,
+verificado, ausente e desconhecido. Fixtures Linux/WSL comprovam contratos;
+rede, reinício, montagem física, GPU e reprodução precisam da máquina real.
+Nunca adicione bancos, mídia, credenciais ou inventário bruto ao Git.
+
+Veja [operação](operator-guide.md), [serviços](runbooks/service-setup.md) e
+[hardware Jellyfin](runbooks/jellyfin-hardware.md).

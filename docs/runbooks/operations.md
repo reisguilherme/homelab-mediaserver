@@ -1,26 +1,32 @@
 # Operação diária
 
-O [guia do operador](../operator-guide.md) é o procedimento atual para alterar
-`.env`, limites de downloads/seeding, qualidade/idiomas, supervisão, backup,
-update e rollback. Use [troubleshooting](../troubleshooting.md) para estados da
-fila e [serviços](service-setup.md) para os painéis nativos.
+O [guia do operador](../operator-guide.md) mostra como alterar `.env`,
+aplicar preferências, acompanhar downloads e atualizar a stack. Use
+[diagnóstico](../troubleshooting.md) para estados da fila e
+[serviços](service-setup.md) para conexões/provedores.
 
-Capacidade usa tamanho real dos arquivos e bytes pendentes, sem reserva fixa
-por filme. Filmes elegíveis são ordenados por seeds; séries seguem temporada
-e episódio. Fonte lenta por cinco minutos dispara busca/avaliação sem parar
-a atual; troca exige qualidade/edição compatíveis e ETA melhor medido.
+Capacidade usa bytes reais, sem reserva fixa por filme. Filmes elegíveis
+podem ser priorizados por seeds; séries baixam em paralelo na janela configurada,
+respeitando o limite global. A importação mantém temporada/episódio em ordem:
+E7 já baixado aguarda E5/E6 e S2 aguarda S1 para aparecer no Jellyfin.
+Fonte lenta por cinco minutos dispara busca/medição mantendo a atual,
+com qualidade/edição e previsão de término verificadas.
 
-Solicitações podem aguardar espaço, fonte, legenda, validação ou importação;
-Requested no Seerr sozinho não descreve o estado detalhado. Consulte a API de
-controle e o painel nativo Arr/qBit antes de repetir o pedido. Monitor qBit
-permite leitura; mutações nesse proxy são recusadas para preservar o gateway.
+Requested pode aguardar fonte, espaço, janela de episódios, legenda ou importação.
+Veja Arr, monitor qBit e estado do controlador antes de repetir um pedido.
+O monitor qBit permite leitura; mudanças pelo proxy são recusadas.
 
-Exclusão é explícita pelo Jellyfin com permissão configurada. Jellyfin continua
-sem escrita direta na biblioteca: proxy cria um job durável; worker verifica
-origem, remove torrent/registro/arquivo e sincroniza catálogo. Assistir não apaga.
-`GET /api/v1/deletions/jobs` com X-Admin-Token informa complete/blocked/retry.
-Exclusão de série/temporada inteira ou pacote compartilhado é bloqueada para
-não apagar outros episódios. Tombstones impedem reacquisição automática.
+## Exclusão coordenada
 
-Não apague mídia/cache por estimativa, remova recovery ou retome torrents como
-atalho. Verifique UUID, capacidade e efeitos externos antes de qualquer operação.
+Habilite `HOMESERVER_JELLYFIN_ENABLE_MEDIA_DELETION="true"` e aplique a
+configuração para permitir exclusão pelo usuário administrado no Jellyfin.
+A mídia continua sem escrita direta pelo Jellyfin: o proxy cria um job durável
+e o worker coordena torrent, registros e arquivo. Assistir não apaga.
+
+`GET /api/v1/deletions/jobs`, autenticado com `X-Admin-Token`, informa
+complete/blocked/retry. Série/temporada inteira ou pacote compartilhado é
+bloqueado quando a operação afetaria outros episódios. Tombstones impedem
+reaquisição automática da mídia explicitamente excluída.
+
+Não apague pastas ou retome torrents como atalho para liberar espaço.
+Confira o filesystem e os registros responsáveis pela mídia antes de agir.

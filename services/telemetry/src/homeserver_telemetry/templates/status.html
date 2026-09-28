@@ -118,7 +118,7 @@
         <a class="card service-card" id="service-bazarr" {{SERVICE_BAZARR_LINK}}><span class="card-label">Legendas</span><span class="service-name">Bazarr <span class="service-arrow" aria-hidden="true">↗</span></span><span class="service-description">Busca e idiomas das legendas</span></a>
       </div>
     </section>
-    <div class="footer"><span>Atualização <strong id="updated">—</strong></span><span>Ligado há <strong id="uptime">—</strong></span><span>Temperatura <strong id="temperature">—</strong></span><span>Backup <strong id="backup">—</strong></span></div>
+    <div class="footer"><span>Atualização <strong id="updated">—</strong></span><span>Ligado há <strong id="uptime">—</strong></span><span>Temperatura <strong id="temperature">—</strong></span></div>
   </main>
   <script>
     const $ = (id) => document.getElementById(id);
@@ -151,8 +151,6 @@
       $('uptime').textContent = uptime(host.uptime_seconds);
       $('temperature').textContent = isNumber(host.cpu_celsius) ? `${number.format(host.cpu_celsius)} °C` : '—';
       $('updated').textContent = host.measured_at ? new Date(host.measured_at).toLocaleTimeString('pt-BR') : '—';
-      const backup = data.backup || {};
-      $('backup').textContent = backup.state === 'ok' ? `${uptime(backup.age_seconds)} atrás` : {stale: 'Antigo', missing: 'Sem cópia verificada', disabled: 'Desativado', unavailable: 'Sem dados'}[backup.state] || 'Sem dados';
       $('free').textContent = bytes(cap.free_bytes);
       $('total').textContent = bytes(cap.total_bytes);
       $('used').textContent = bytes(cap.used_bytes);

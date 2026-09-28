@@ -14,6 +14,21 @@ from homeserver_control.api.deletion_capture import DeletionAdmission, DeletionC
 from homeserver_control.persistence.deletion_jobs import DeletionJobStore
 
 
+def test_default_docker_api_enables_delete_capture_without_uuid(tmp_path, monkeypatch):
+    import homeserver_control.api.app as api
+
+    constructed = []
+    media = tmp_path / "data"
+    media.mkdir()
+    monkeypatch.delenv("HOMESERVER_MEDIA_UUID", raising=False)
+    monkeypatch.setenv("HOMESERVER_DB_PATH", str(tmp_path / "control.sqlite"))
+    monkeypatch.setenv("HOMESERVER_MEDIA_ROOT", str(media))
+    monkeypatch.setattr(api, "DeletionAdmission", lambda **kwargs: constructed.append(kwargs))
+    api.create_app()
+    assert len(constructed) == 1
+    assert constructed[0]["filesystem_id"] == f"device:{media.stat().st_dev}"
+
+
 def _snapshot(path: Path) -> Path:
     snapshot = path / "capacity.json"
     snapshot.write_text(

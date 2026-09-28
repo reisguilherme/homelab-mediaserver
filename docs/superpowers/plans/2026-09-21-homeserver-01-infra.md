@@ -1,5 +1,9 @@
 # HomeServer — Implementação 01: ambiente, infraestrutura e implantação inicial
 
+> Plano histórico de 21/09. A instalação/configuração atuais e a operação
+> manual estão no [plano de produtização](2026-09-28-homeserver-productization.md)
+> e no [guia de instalação](../../installation.md); não há CI/CD no projeto atual.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans. Executar os checkboxes em ordem e registrar evidências por tarefa.
 
 **Goal:** preparar o desenvolvimento no desktop e adotar a base existente do Legion sem reinstalar o sistema ou alterar seu layout de discos.

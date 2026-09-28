@@ -18,7 +18,7 @@ from .finalization import (
     MovieFinalizer,
     _subtitle_has_content,
 )
-from .series_acquisition import _episode_tag, _single_episode_name
+from .series_acquisition import _episode_aired, _episode_tag, _single_episode_name
 from .subdl import SubDLSource
 from .subtitle_language import (
     SubtitlePolicy,
@@ -298,10 +298,17 @@ class SeriesFinalizer(MovieFinalizer):
                 and isinstance(item.get("episodeNumber"), int)
                 and not isinstance(item["episodeNumber"], bool)
                 and item["episodeNumber"] > 0
+                and item.get("monitored") is not False
+                and _episode_aired(item) is not False
             ),
             key=lambda item: (item["seasonNumber"], item["episodeNumber"]),
         )
-        known_seasons = {item["seasonNumber"] for item in chronological}
+        known_seasons = {
+            item["seasonNumber"] for item in episodes
+            if isinstance(item.get("seasonNumber"), int)
+            and not isinstance(item["seasonNumber"], bool)
+            and item["seasonNumber"] in reservations_by_season
+        }
         prior_season_missing = any(
             number < season and number not in known_seasons for number in reservations_by_season
         )
@@ -317,8 +324,8 @@ class SeriesFinalizer(MovieFinalizer):
         for episode in sorted(
             (
                 item
-                for item in episodes
-                if item.get("seasonNumber") == season and isinstance(item.get("episodeNumber"), int)
+                for item in chronological
+                if item["seasonNumber"] == season
             ),
             key=lambda item: item["episodeNumber"],
         ):

@@ -16,26 +16,6 @@ def test_empty_bazarr_providers_explicitly_disables_network_providers(tmp_path):
     assert settings.as_environment()["HOMESERVER_BAZARR_PROVIDERS"] == ""
 
 
-@pytest.mark.parametrize("raw,expected", [("logs,cache", ("logs", "cache")), ("", ())])
-def test_backup_directory_exclusions_accept_names_and_explicit_empty(tmp_path, raw, expected):
-    path = tmp_path / ".env"
-    path.write_text(f"HOMESERVER_BACKUP_EXCLUDE_DIRS={raw}\n")
-    settings = load_settings(path)
-    assert settings.backup_exclude_dirs == expected
-    assert settings.as_environment()["HOMESERVER_BACKUP_EXCLUDE_DIRS"] == raw
-
-
-@pytest.mark.parametrize(
-    "raw",
-    [".", "..", "/srv/appdata", "../logs", "logs/cache", r"logs\cache", "logs,logs", "C:\\logs"],
-)
-def test_backup_directory_exclusions_reject_paths_and_duplicate_names(tmp_path, raw):
-    path = tmp_path / ".env"
-    path.write_text(f"HOMESERVER_BACKUP_EXCLUDE_DIRS={raw}\n")
-    with pytest.raises(ValueError, match="HOMESERVER_BACKUP_EXCLUDE_DIRS"):
-        load_settings(path)
-
-
 def test_optional_jellyfin_deletion_preserves_unset_and_rejects_non_boolean(tmp_path):
     path = tmp_path / ".env"
     path.write_text("")
@@ -67,21 +47,17 @@ def test_effective_environment_and_redaction(tmp_path, monkeypatch):
     assert settings.as_environment()["HOMESERVER_UPLOAD_LIMIT_MBIT"] == "20"
 
 
-def test_secret_file_conflict_and_production(tmp_path):
+def test_credentials_are_required_in_production(tmp_path):
     path = tmp_path / ".env"
-    path.write_text("HOMESERVER_QBIT_PASSWORD=x\nHOMESERVER_QBIT_PASSWORD_FILE=y\n")
-    with pytest.raises(ValueError, match="HOMESERVER_QBIT_PASSWORD"):
-        load_settings(path, mode="dev")
     path.write_text("")
-    with pytest.raises(ValueError, match="HOMESERVER_MEDIA_UUID"):
+    with pytest.raises(ValueError, match="HOMESERVER_ARR_TOKEN"):
         load_settings(path, mode="prod")
 
 
-def test_file_secret_exact_value_and_repr(tmp_path):
+def test_credential_exact_value_and_repr(tmp_path):
     secret = " $HOME # literal ' \" "
-    (tmp_path / "password").write_text(secret + "\n")
     path = tmp_path / ".env"
-    path.write_text("HOMESERVER_QBIT_PASSWORD_FILE=password\n")
+    path.write_text(serialize_env({"HOMESERVER_QBIT_PASSWORD": secret}))
     settings = load_settings(path, mode="dev")
     assert settings.qbit_password == secret
     assert secret not in repr(settings)
@@ -110,11 +86,9 @@ def test_explicit_legacy_aliases_and_generated_runtime_paths(tmp_path):
     path = tmp_path / ".env"
     path.write_text(
         "HOMESERVER_ARR_UID=1234\nHOMESERVER_DB_PATH=/private/old.sqlite\n"
-        "HOMESERVER_RESTIC_REPOSITORY=/private/backup\n"
     )
     settings = load_settings(path, mode="dev")
     assert settings.service_uid == 1234
-    assert settings.backup_repository == "/private/backup"
     assert settings.as_environment()["HOMESERVER_DB_PATH"] == "/var/lib/homeserver/control.sqlite"
 
 
@@ -123,7 +97,7 @@ def test_catalog_matches_generated_example():
     from homeserver_common.settings import FIELDS
 
     rows = catalog()
-    assert len(rows) == len(FIELDS)
+    assert len(rows) == sum(field.editable for field in FIELDS.values())
     assert set(parse_env(example_env())) == {row["key"] for row in rows}
     assert all(row["consumer"] and row["application"] for row in rows)
 

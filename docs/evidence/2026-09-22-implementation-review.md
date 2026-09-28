@@ -1,5 +1,9 @@
 # Revisão da implementação — 22/09/2026
 
+> Evidência histórica. Os workflows/CI descritos aqui foram retirados em
+> 28/09 por decisão do operador. Consulte o [aceite atual](productization-acceptance.md)
+> e os [procedimentos manuais](../runbooks/releases.md).
+
 ## Incremento executado nesta revisao
 
 Apos o diagnostico inicial, o branch codex/implementation-safety recebeu correcoes de seguranca e operacao: fixtures de FFprobe portaveis, permits atomicos em memoria/SQLite com digest de metadado, readiness dependente de banco/capacidade, restore confinado por caminho canonico, worker fail-closed com reservas persistentes, extracao segura de releases e staging de backup sem reenvio duplicado. O workflow de producao agora continua manual, exige manifesto, valida CI bem-sucedido para o SHA exato em main e usa Dockerfiles com uv sync --frozen.

@@ -28,10 +28,15 @@ def test_hardlink_preserves_payload_after_unlink(local_tmp: Path) -> None:
     assert imported.read_bytes() == b"fixture"
 
 
-def test_dev_compose_does_not_reference_production_mounts() -> None:
-    compose = Path("deploy/compose.dev.yaml").read_text(encoding="utf-8")
-    assert "/srv/data" not in compose
-    assert "127.0.0.1" in compose
-    for name in ("MEDIA_ROOT", "APPDATA_ROOT", "RUN_ROOT", "TRANSCODE_ROOT"):
-        assert "HOMESERVER_" + name in compose
-    assert "../.runtime/dev/" in compose
+def test_dev_fixture_keeps_host_media_and_appdata_isolated(tmp_path) -> None:
+    from homeserver_common.env import load_settings
+    from homeserver_common.render import render_stack
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("")
+    stack = render_stack(load_settings(env_file, mode="dev"), env_file=env_file)
+    for service in stack["services"].values():
+        for mount in service["volumes"]:
+            assert not mount["source"].startswith("/srv/")
+        for port in service.get("ports", []):
+            assert port["host_ip"] == "127.0.0.1"

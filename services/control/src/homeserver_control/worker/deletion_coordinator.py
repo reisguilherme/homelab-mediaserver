@@ -74,7 +74,7 @@ class DeletionCoordinator:
                 jellyfin_api_key,
             )
         ):
-            raise ValueError("deletion coordinator requires service credentials and media UUID")
+            raise ValueError("deletion coordinator requires credentials and filesystem identity")
         self.jobs = jobs
         self.media_root = Path(media_root)
         self.data_root = Path(data_root)

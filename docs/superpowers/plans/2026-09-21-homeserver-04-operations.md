@@ -1,5 +1,10 @@
 # HomeServer — Implementação 04: backup, implantação, CI/CD e aceite
 
+> Plano histórico de 21/09. CI/CD e workflows foram retirados a pedido do
+> operador. Use [backup/restore](../../runbooks/backup-restore.md),
+> [releases](../../runbooks/releases.md) e [deploy manual](../../runbooks/manual-deploy.md).
+> As instruções GitHub Actions abaixo registram o projeto anterior.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans. Executar os checkboxes com evidências e preservar dados persistentes.
 
 **Goal:** tornar o projeto recuperável, permitir implantações versionadas e comprovar o funcionamento no servidor real.

@@ -1,5 +1,10 @@
 # HomeServer — Plano técnico de implementação
 
+> Plano histórico de 21/09. CI/CD e CYD foram retirados do escopo atual.
+> Não usar estes exemplos como procedimento de operação; consulte o
+> [plano atual](2026-09-28-homeserver-productization.md) e o
+> [deploy manual](../../runbooks/manual-deploy.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans para executar este plano tarefa por tarefa. As etapas usam checkboxes. Delegação somente quando autorizada; este documento não exige agentes paralelos.
 
 **Goal:** implementar no desktop um projeto reproduzível de mídia, automação e monitoramento, implantado por SSH/Tailscale no Legion já preparado.

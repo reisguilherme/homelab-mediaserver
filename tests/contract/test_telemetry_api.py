@@ -126,7 +126,7 @@ def test_status_dashboard_links_native_services_through_tailscale(monkeypatch) -
         assert cards[name]["rel"] == "noopener noreferrer"
 
 
-def test_status_dashboard_disables_links_without_valid_tailscale_hostname(monkeypatch) -> None:
+def test_status_dashboard_uses_request_host_without_tailscale_configuration(monkeypatch) -> None:
     client = TestClient(create_app(snapshot_provider=lambda: _snapshot()))
     for hostname in (None, 'https://server.example.ts.net/" onmouseover="alert(1)'):
         if hostname is None:
@@ -145,8 +145,8 @@ def test_status_dashboard_disables_links_without_valid_tailscale_hostname(monkey
             "service-radarr",
             "service-qbittorrent",
         ):
-            assert "href" not in cards[name]
-            assert cards[name]["aria-disabled"] == "true"
-        assert "Hostname Tailscale não configurado" in page.text
+            assert cards[name]["href"].startswith("http://testserver:")
+            assert cards[name]["target"] == "_blank"
+        assert "Painéis dos serviços" in page.text
         if hostname is not None:
             assert hostname not in page.text

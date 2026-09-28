@@ -1,7 +1,7 @@
 services:
   jellyfin:
     devices:
-      - "${HOMESERVER_INTEL_RENDER_DEVICE:-/dev/dri/renderD128}:${HOMESERVER_INTEL_RENDER_DEVICE:-/dev/dri/renderD128}"
+    - /dev/dri/renderD128:/dev/dri/renderD128
     group_add:
-      - "${HOMESERVER_RENDER_GID:-109}"
-      - "${HOMESERVER_VIDEO_GID:-44}"
+    - '993'
+    - '44'

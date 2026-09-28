@@ -141,3 +141,34 @@ def test_cpu_temperature_is_unavailable_without_cpu_zone(tmp_path: Path, monkeyp
     monkeypatch.setattr(metrics, "glob", lambda _pattern: [str(zone / "temp")])
 
     assert metrics.collect(media_path=tmp_path)["host"]["cpu_celsius"] is None
+
+
+def test_docker_collector_writes_live_capacity_without_an_env_file(tmp_path, monkeypatch):
+    import json
+
+    metrics = _module()
+    output = tmp_path / "run/host.json"
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(metrics.os, "statvfs", lambda _path: SimpleNamespace(
+        f_bavail=100, f_bfree=100, f_frsize=4096, f_blocks=200,
+    ))
+    monkeypatch.setenv("HOMESERVER_MEDIA_ROOT", str(tmp_path))
+    monkeypatch.setattr("sys.argv", ["host-metrics.py", "--output", str(output)])
+    assert metrics.main() == 0
+    capacity = json.loads((output.parent / "capacity.json").read_text())
+    assert capacity["filesystem_id"]
+    assert capacity["free_bytes"] == 100 * 4096
+    assert capacity["total_bytes"] > 0
+
+
+def test_docker_collector_blocks_admission_when_storage_is_unavailable(tmp_path, monkeypatch):
+    import json
+
+    metrics = _module()
+    output = tmp_path / "run/host.json"
+    monkeypatch.setenv("HOMESERVER_MEDIA_ROOT", str(tmp_path / "unavailable"))
+    monkeypatch.setattr("sys.argv", ["host-metrics.py", "--output", str(output)])
+    assert metrics.main() == 4
+    capacity = json.loads((output.parent / "capacity.json").read_text())
+    assert capacity["filesystem_id"] is None

@@ -83,12 +83,12 @@ collect identity 'id' id
 collect docker_version 'docker version' docker version
 collect compose_version 'docker compose version' docker compose version
 collect media_mount 'findmnt --json --target /srv/data --output TARGET,SOURCE,UUID,FSTYPE,OPTIONS' findmnt --json --target /srv/data --output TARGET,SOURCE,UUID,FSTYPE,OPTIONS
-collect disk_usage 'df -B1 /srv/data /srv/appdata /srv/transcode /srv/backup-staging' df -B1 /srv/data /srv/appdata /srv/transcode /srv/backup-staging
+collect disk_usage 'df -B1 /srv/data /srv/appdata /srv/transcode' df -B1 /srv/data /srv/appdata /srv/transcode
 collect block_devices 'lsblk --json --output NAME,SIZE,FSTYPE,UUID,MOUNTPOINTS' lsblk --json --output NAME,SIZE,FSTYPE,UUID,MOUNTPOINTS
 collect service_status 'systemctl is-active ssh tailscaled docker lenovo-conservation.service' systemctl is-active ssh tailscaled docker lenovo-conservation.service
 collect power_targets 'systemctl is-enabled sleep.target suspend.target hibernate.target hybrid-sleep.target' systemctl is-enabled sleep.target suspend.target hibernate.target hybrid-sleep.target
 collect logind_config 'systemd-analyze cat-config systemd/logind.conf' systemd-analyze cat-config systemd/logind.conf
-collect permissions 'stat -c %u:%g %a %n /srv/data /srv/appdata /srv/transcode /srv/backup-staging' stat -c '%u:%g %a %n' /srv/data /srv/appdata /srv/transcode /srv/backup-staging
+collect permissions 'stat -c %u:%g %a %n /srv/data /srv/appdata /srv/transcode' stat -c '%u:%g %a %n' /srv/data /srv/appdata /srv/transcode
 collect render_devices 'ls -l /dev/dri' ls -l /dev/dri
 collect pci_devices 'lspci -nnk' lspci -nnk
 

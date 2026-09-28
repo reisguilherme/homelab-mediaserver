@@ -23,7 +23,7 @@ def test_fixture_configuration_is_isolated_and_disables_external_sources(tmp_pat
     assert not settings.bazarr_providers
     assert settings.transcode_mode == "cpu"
     assert settings.qbit_peer_bind_ip == "127.0.0.1"
-    for key in ("install_root", "media_root", "appdata_root", "run_root", "transcode_root"):
+    for key in ("media_root", "appdata_root", "run_root", "transcode_root"):
         assert Path(getattr(settings, key)).is_relative_to(tmp_path / "fresh")
     with pytest.raises(ValueError):
         module.prepare_fixture(tmp_path / "fresh")
@@ -70,3 +70,23 @@ def test_unavailable_docker_reports_not_run_and_never_prepares_state(monkeypatch
     output = capsys.readouterr().err
     assert "not run" in output
     assert "private detail" not in output
+
+
+def test_runtime_readiness_accepts_completed_init_and_healthy_running_services():
+    module = validator()
+    rows = [
+        {
+            "Config": {"Labels": {"com.docker.compose.service": "init"}},
+            "State": {"Status": "exited", "ExitCode": 0},
+        },
+        {
+            "Config": {"Labels": {"com.docker.compose.service": "sonarr"}},
+            "State": {"Status": "running", "Health": {"Status": "healthy"}},
+        },
+    ]
+    assert module.containers_ready(rows)
+    rows[0]["State"]["ExitCode"] = 1
+    assert not module.containers_ready(rows)
+    rows[0]["State"]["ExitCode"] = 0
+    rows[1]["State"]["Status"] = "exited"
+    assert not module.containers_ready(rows)

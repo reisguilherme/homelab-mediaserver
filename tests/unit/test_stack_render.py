@@ -35,7 +35,10 @@ def test_cpu_stack_preserves_shared_data_and_persistent_appdata(tmp_path: Path) 
         and volume["read_only"] is True
         for volume in services["telemetry"]["volumes"]
     )
-    assert all(service["restart"] == "no" for service in services.values())
+    assert all(
+        service["restart"] == ("no" if name in ("init", "operator") else "unless-stopped")
+        for name, service in services.items()
+    )
 
 
 def test_intel_device_is_added_only_when_selected(tmp_path: Path) -> None:

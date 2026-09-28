@@ -1,28 +1,22 @@
 # Segurança
 
-Reporte problemas de segurança pelo recurso privado de security advisories do
-[repositório](https://github.com/reisguilherme/homelab-mediaserver/security/advisories).
-Não publique senhas, arquivos `.env`, bancos nativos, inventários ou URLs com tokens
-em issues, logs ou anexos.
+Credenciais ficam diretamente no `.env` local, com permissão `0600`, fora do Git.
+Não use senhas reais nos exemplos, fixtures, screenshots, issues ou logs.
+O `.gitignore` e o contexto Docker excluem estado privado; confira isso antes
+de publicar alterações.
 
-Os painéis são destinados à rede local e ao Tailscale. A API nativa do qBittorrent
-fica numa rede Docker interna; o painel de administração usa autenticação nativa
-e um proxy vinculado ao endereço Tailscale. Downloads automáticos passam pelo
-gateway, que verifica identidade, metadados e espaço disponível.
+Os painéis são usados na rede doméstica ou pelo Tailscale. A API nativa do
+qBittorrent fica interna ao Docker; o monitor passa por proxy somente leitura
+e mantém login nativo. Downloads passam pelo gateway com capacidade real.
 
-`scripts/homeserver env init` gera credenciais locais. A configuração efetiva fica
-no `.env` do operador, com permissão `0600`, fora do checkout publicado. Use
-`config show --redacted` para diagnósticos. Arquivos `_FILE` são lidos como dados;
-os scripts não executam o conteúdo do `.env`.
+Se um segredo for publicado, revogue-o no serviço e troque o valor no `.env`.
+Excluir o arquivo do último commit não remove cópias antigas. Diagnósticos de
+configuração devem usar saída redigida.
 
-Se um segredo for publicado, revogue-o no serviço correspondente e atualize o
-`.env`. Apagar o arquivo do commit mais recente não remove cópias do histórico.
-O pipeline verifica segredos com Gitleaks antes de produzir uma release.
+O projeto não abre portas do roteador nem apaga mídia por ela ter sido assistida.
+A exclusão é uma ação explícita coordenada entre serviços.
 
-Backups Restic têm senha própria. A cópia externa deve ser outro repositório
-Restic, com retenção independente. A restauração de validação usa um diretório
-isolado; ela não sobrescreve mídia ou bancos em operação.
-
-As configurações adotadas de uma instalação existente preservam seus usuários,
-bibliotecas e credenciais. A alteração desses dados deve ser feita explicitamente
-pelo operador. Consulte [o guia do operador](docs/operator-guide.md).
+Reporte vulnerabilidades pelo recurso privado de
+[security advisories](https://github.com/reisguilherme/homelab-mediaserver/security/advisories).
+Os [checks locais](docs/development.md) incluem scanners opcionais para revisão
+de código e imagens; não são requisito de um pipeline de implantação.

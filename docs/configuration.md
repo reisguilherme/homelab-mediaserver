@@ -1,145 +1,163 @@
 # Configuração
 
-O `.env` privado é a interface do operador. O schema em
-`services/common/src/homeserver_common/settings.py` define tipos, defaults, unidades,
-consumidores e aplicação. Gere o catálogo com `scripts/homeserver config catalog`
-e o exemplo com `scripts/homeserver config catalog --example`. As saídas não incluem
-credenciais. O exemplo representa produção e precisa ser preenchido antes da validação.
-No checkout com `.venv` sincronizado, prepare o arquivo privado conforme o
-[guia de instalação](installation.md#criar-a-configuração-privada):
+Copie [`.env.example`](../.env.example) para `.env`. Ele contém preferências
+editáveis e credenciais da instalação. Caminhos, portas, UID/GID e URLs internas
+são defaults do código/Compose, para que a operação cotidiana se concentre no
+comportamento do servidor. Não há arquivos de segredo `*_FILE`.
+
+O catálogo tipado em `homeserver_common.settings` é a referência para nomes,
+defaults, tipos e unidades. Consulte-o sem revelar credenciais:
 
 ```bash
-sudo .venv/bin/python scripts/homeserver env init --env-file /etc/homeserver/.env --mode prod
-sudo .venv/bin/python scripts/homeserver config validate --env-file /etc/homeserver/.env --mode prod
-sudo .venv/bin/python scripts/homeserver config show --redacted --env-file /etc/homeserver/.env --mode prod
+docker compose run --rm operator config catalog
+docker compose run --rm operator config validate --env-file /project/.env
+docker compose run --rm operator config show --redacted --env-file /project/.env
 ```
 
-O init gera tokens e senhas iniciais aleatórios, usa permissões `0600` e recusa
-sobrescrever um arquivo existente. Informe UUID de mídia, endereço Tailscale e
-chaves das integrações obtidas no onboarding. Validação do UUID no `.env` não
-comprova montagem física; a guarda no host é obrigatória antes de escrever mídia.
-O modo dev exige binds loopback e usa `.runtime/dev` ao lado do `.env` por default.
+## Sintaxe e aplicação
 
-Cada linha contém `KEY=value`. Linhas vazias e linhas iniciadas por `#` são
-ignoradas. Não existem expansão de variáveis, comandos, `export` ou comentários
-ao final de uma linha: `$HOME`, `#`, apóstrofos e espaços são dados literais.
-Valores sem aspas perdem espaços externos; aspas simples delimitam texto literal.
-Aspas duplas usam escapes JSON, por exemplo `"senha $HOME # com ' e \\"aspas\\""`.
-A serialização oficial usa strings JSON e preserva espaços e caracteres especiais.
-Uma chave duplicada é erro. Chaves `HOMESERVER_` desconhecidas são rejeitadas;
-chaves de terceiros são ignoradas. O arquivo explícito prevalece sobre o ambiente
-do processo. Nunca execute o arquivo com `source` ou `eval`.
+Cada linha contém `HOMESERVER_CHAVE=value`. Linhas vazias e comentários iniciados
+por `#` são ignorados. O loader trata o conteúdo como dados: não expande `$`,
+não executa comandos e não interpreta comentários ao final de valores. Uma
+chave duplicada ou desconhecida é erro de validação.
 
-Segredos aceitam `HOMESERVER_<CHAVE>_FILE` em lugar do valor direto. As duas
-formas simultâneas são erro, mesmo quando o valor direto está vazio. Caminhos
-relativos são resolvidos ao lado do `.env`; apenas a quebra de linha final do
-arquivo de segredo é removida. Diagnósticos mostram `[redacted]` ou `[absent]`.
+Valores sem aspas perdem espaços externos; aspas simples delimitam texto
+literal. Aspas duplas usam escapes JSON. O exemplo usa strings JSON:
 
-Bandwidth usa Mbit/s decimais: 20 Mbit/s corresponde a 2.500.000 bytes/s; zero
-significa ilimitado. `UPLOAD_LIMIT_BYTES` e `DOWNLOAD_LIMIT_BYTES` preservam
-arredondamentos de instalações adotadas: `-1` usa a conversão de Mbit/s e valores
-não negativos têm precedência. Limites de seed `-1` desabilitam aquele limite.
-O total de torrents deve comportar cada limite individual de downloads e seed.
+```dotenv
+HOMESERVER_MEDIA_RESOLUTIONS="2160,1080"
+HOMESERVER_ADMIN_PASSWORD="preencha sua senha"
+HOMESERVER_SUBTITLE_SKIP_ORIGINAL_AUDIO_LANGUAGES=""
+```
 
-Resoluções e fontes são listas ordenadas separadas por vírgulas. Idiomas de
-legenda atualmente suportados são `pt-BR` e `en-US`; fontes são `remux`, `bluray`
-e `webdl`. A busca de fonte lenta começa após 300 segundos por default e mantém
-a fonte atual durante a avaliação. Caminhos dos containers permanecem `/data`
-e `/var/lib/homeserver`; `MEDIA_ROOT` e demais raízes são caminhos do host.
+Não execute `source .env` nem `eval`. Guarde o arquivo com permissão `0600`;
+ele está ignorado pelo Git. Os consumidores rodam UID 1000 e precisam ler o
+arquivo; preserve esse owner ou adapte a identidade estrutural no Compose.
+O operator escreve API keys adotadas no mesmo
+arquivo, sem criar arquivos de segredo separados. Veja
+[o procedimento de alteração](operator-guide.md#aplicar-uma-mudança).
 
-Migração reconhece explicitamente `ARR_UID/GID` como `SERVICE_UID/GID`,
-`WORKER_INTERVAL` como `WORKER_INTERVAL_SECONDS`, `SOURCE_SLOW_SECONDS` como
-`SOURCE_SLOW_WINDOW_SECONDS`, `RESTIC_REPOSITORY` como `BACKUP_REPOSITORY` e
-`RESTIC_PASSWORD_FILE` como `BACKUP_PASSWORD_FILE`. Alias conflitante é erro.
-DB, snapshots e marcador `RECOVERY_MODE` são estado interno; seus nomes antigos
-são aceitos na importação, mas seus caminhos efetivos são derivados do runtime.
+## Downloads e seeding
 
-
-## Parâmetros de operação
-
-| Parâmetro `.env` (prefixo `HOMESERVER_`) | Default | Efeito |
+| Parâmetro, com prefixo `HOMESERVER_` | Default | Unidade e efeito |
 |---|---|---|
-| `DOWNLOAD_MAX_ACTIVE`, `SEED_MAX_ACTIVE`, `TORRENT_MAX_ACTIVE` | 4, 8, 12 | Concorrência nativa qBit |
-| `MEDIA_RESOLUTIONS` | 2160,1080 | Resoluções permitidas, por preferência |
-| `MEDIA_SOURCES` | remux,bluray,webdl | Fontes permitidas; WEBRip/TV ficam excluídas |
-| `QUALITY_MIN_MIB_PER_MIN_720` | 10 | Piso de tamanho do vídeo por minuto |
-| `QUALITY_MIN_MIB_PER_MIN_1080` | 20 | Piso de tamanho do vídeo por minuto |
-| `QUALITY_MIN_MIB_PER_MIN_2160` | 50 | Piso de tamanho do vídeo por minuto |
-| `PREFER_DOLBY_VISION`, `PREFER_ATMOS` | true, true | Preferências dentro da qualidade permitida |
-| `AUDIO_LANGUAGES` | original | Ordem de preferência dos idiomas declarados pela release |
-| `SUBTITLE_LANGUAGES` | pt-BR,en-US | Ordem de idiomas da política |
-| `SUBTITLE_SKIP_ORIGINAL_AUDIO_LANGUAGES` | pt-BR | Dispensa com evidência de áudio original brasileiro; vazio desativa |
-| `SOURCE_SLOW_WINDOW_SECONDS`, `SOURCE_MIN_RATE_KIB` | 300, 1024 | Quando procurar alternativa à fonte lenta |
-| `SOURCE_PROBE_SECONDS`, `SOURCE_MIN_TIME_GAIN_PERCENT` | 60, 20 | Janela de medida e vantagem de ETA exigida |
-| `HTTP_TIMEOUT_SECONDS`, `SEARCH_TIMEOUT_SECONDS` | 15, 90 | Requisições rotineiras e busca Arr |
-| `WORKER_CYCLE_TIMEOUT_SECONDS` | 900 | Prazo máximo fixo de cada ciclo; heartbeat não o renova |
-| `BACKUP_EXCLUDE_DIRS` | .venv,__pycache__,logs,cache | Diretórios gerados omitidos da captura de backup |
+| `DOWNLOAD_MAX_ACTIVE` | 4 | Downloads simultâneos globais |
+| `SERIES_DOWNLOAD_WINDOW` | 4 | Janela de episódios ainda não importados por série |
+| `SEED_MAX_ACTIVE` | 8 | Torrents em seeding simultâneos |
+| `TORRENT_MAX_ACTIVE` | 12 | Total ativo nativo qBit |
+| `UPLOAD_LIMIT_MBIT` | 20 | Mbit/s; zero é ilimitado |
+| `DOWNLOAD_LIMIT_MBIT` | 0 | Mbit/s; zero é ilimitado |
+| `TORRENT_MAX_CONNECTIONS` | 500 | Conexões globais |
+| `TORRENT_MAX_CONNECTIONS_PER_TORRENT` | 100 | Conexões por torrent |
+| `UPLOAD_SLOTS`, `UPLOAD_SLOTS_PER_TORRENT` | 20, 4 | Slots de upload |
+| `SEED_RATIO_LIMIT` | -1 | Ratio; -1 desativa o limite |
+| `SEED_TIME_LIMIT_MINUTES`, `SEED_INACTIVE_LIMIT_MINUTES` | -1, -1 | Minutos; -1 desativa |
 
-O piso usa MiB (1.048.576 bytes) por minuto da duração informada pelo Arr:
-episódio primeiro, duração da série como fallback, e duração do filme no Radarr.
-O worker confere o tamanho do vídeo principal nos metadados do torrent;
-amostras, legendas e outros arquivos não aumentam esse tamanho. O Arr recebe
-o mesmo mínimo em suas definições de qualidade. Um episódio 1080p de 45 minutos
-precisa de pelo menos 900 MiB (aproximadamente 944 MB): uma release de 434 MB
-é rejeitada, e uma de 1,8 GB passa pelo critério de tamanho. Resolução, fonte,
-edição, legenda e capacidade continuam sendo verificadas separadamente.
+Mbit/s é decimal: 20 Mbit/s equivale a 2.500.000 bytes/s. qBit pode arredondar
+para KiB inteiros; o read-back mostra o valor efetivo. O total ativo deve
+comportar os limites individuais. Contribuir com seeding depende de upload,
+peers e disco disponíveis, não somente do limite configurado.
 
-Tamanho não garante qualidade visual, pois codecs e conteúdo têm eficiências
-diferentes. Os pisos são uma proteção contra encodes muito pequenos; altere-os
-no `.env` para ajustar a política. Zero desabilita o piso daquela resolução.
-Duração ausente não comprova um piso habilitado e impede nova aquisição daquela
-candidata. A validação cobre aquisição inicial e alternativas de failover;
-não remove arquivos existentes. Não há teto de tamanho: `maxSize` das qualidades
-gerenciadas é ilimitado, e capacidade usa os bytes reais pendentes.
+Capacidade considera tamanho solicitado, bytes já baixados, bytes ainda
+pendentes e reservas concorrentes no filesystem de mídia. Não existe reserva
+fixa de 80 GB por filme nem teto estático de tamanho.
+
+## Qualidade e fontes lentas
+
+| Parâmetro | Default | Efeito |
+|---|---|---|
+| `MEDIA_RESOLUTIONS` | 2160,1080 | Resoluções aceitas em ordem de preferência |
+| `MEDIA_SOURCES` | remux,bluray,webdl | Fontes aceitas; WEBRip/TV ficam excluídas |
+| `PREFER_DOLBY_VISION`, `PREFER_ATMOS` | true, true | Preferências de vídeo/áudio |
+| `QUALITY_MIN_MIB_PER_MIN_720` | 10 | Piso MiB/min do vídeo principal |
+| `QUALITY_MIN_MIB_PER_MIN_1080` | 20 | Piso MiB/min do vídeo principal |
+| `QUALITY_MIN_MIB_PER_MIN_2160` | 50 | Piso MiB/min do vídeo principal |
+| `AUTOMATIC_UPGRADES` | false | Atualizações automáticas após aquisição |
+| `SOURCE_SLOW_WINDOW_SECONDS`, `SOURCE_STALL_SECONDS` | 300, 300 | Janela de lentidão ou falta de progresso |
+| `SOURCE_MIN_RATE_KIB` | 1024 | KiB/s; limiar de lentidão |
+| `SOURCE_PROBE_SECONDS` | 60 | Medição da candidata |
+| `SOURCE_MIN_TIME_GAIN_PERCENT` | 20 | Melhoria mínima do ETA medido |
+
+Fonte, resolução, Dolby Vision e Atmos precedem idioma de áudio e seeds na
+escolha da release. Filmes elegíveis podem passar à frente por seeds.
+Séries podem baixar em paralelo dentro de `SERIES_DOWNLOAD_WINDOW`, respeitando
+o limite global. A janela contém os primeiros episódios ainda não importados:
+um episódio sem fonte ou lento não impede buscar os seguintes dessa janela.
+Importação/Jellyfin mantém temporada/episódio em ordem: E7 pronto espera E5/E6;
+S2 pode baixar quando couber na janela, mas aguarda S1 para ser importada.
+Episódios desmonitorados ou futuros conhecidos não bloqueiam a cadeia.
+Um episódio completo aguardando importação não conta como download ativo.
+Seeds anunciados não garantem velocidade real.
+
+Os pisos recusam encodes muito pequenos, usando bytes do vídeo principal e
+duração declarada, sem somar samples/sidecars. Tamanho não garante qualidade
+visual. Zero desativa o piso daquela resolução; duração desconhecida não
+comprova um piso habilitado. Essa regra vale também para candidatas de failover,
+sem apagar arquivos existentes.
+
+Após cinco minutos lento ou sem progresso, o worker busca e mede uma candidata
+mantendo o download atual. Promoção exige qualidade/edição compatíveis,
+capacidade conjunta e previsão de término melhor. Pausas por operador/capacidade
+e torrents completos não disparam troca. Alterações da política orientam
+seleções futuras; não autorizam cancelar aquisições em andamento.
 
 ## Idiomas de áudio e legenda
 
-`AUDIO_LANGUAGES` aceita uma lista ordenada, por exemplo `original,pt-BR,en-US`.
-A preferência considera somente o campo de idiomas declarado nos metadados
-da release. `original` exige o idioma original do filme/série informado pelo
-Arr. Sem esse contexto, o valor não pontua; sem metadados de idioma, a release
-continua elegível pelos demais critérios. Título, nome do arquivo e ID numérico
-isolado não estabelecem idioma. Uma preferência regional como `pt-BR` exige
-região declarada; `pt` genérico não comprova áudio brasileiro.
+`AUDIO_LANGUAGES` aceita lista ordenada, por exemplo `original,pt-BR,en-US`.
+Ela considera somente idiomas declarados nos metadados da release.
+`original` exige contexto de idioma original do filme/série fornecido pelo Arr.
+Sem contexto ou metadados, não há pontuação de idioma; a release continua
+elegível pelos demais critérios. Nome do arquivo, título e ID numérico isolado
+não comprovam idioma. `pt` genérico não comprova a região brasileira.
 
-Na escolha da release, fonte, resolução, Dolby Vision e Atmos têm precedência
-sobre idioma; idioma precede seeds. Isso é preferência, não um requisito que
-elimine toda release com idioma desconhecido. A ordem das séries continua
-sequencial. Mais seeds anunciados não comprovam maior velocidade real.
+`SUBTITLE_LANGUAGES` aceita `pt-BR,en-US`. Com
+`SUBTITLE_MATCH_MODES=release,compatible_edition`, a ordem padrão é:
 
-Idiomas de legenda suportados são `pt-BR` e `en-US`. A ordem padrão tenta
-pt-BR da mesma release, pt-BR de edição compatível, inglês da mesma release e
-inglês de edição compatível. `SUBTITLE_ALLOW_GENERIC_ENGLISH=true` permite
-inglês genérico quando a fonte não informa região. Identificação da edição e
-cobertura temporal evitam versões extended/director cut incompatíveis; a
-margem para créditos não garante sincronismo perfeito.
+1. pt-BR da mesma release.
+2. pt-BR de edição compatível.
+3. Inglês da mesma release.
+4. Inglês de edição compatível.
+
+O filtro de edição evita legendas de extended/director cut em versão base,
+usando metadados e cobertura temporal, com
+`SUBTITLE_CREDITS_MARGIN_SECONDS=600` por padrão. Não exige o mesmo nome de
+release e não garante sincronismo perfeito. `SUBTITLE_ALLOW_GENERIC_ENGLISH=true`
+aceita inglês genérico quando o provedor não declara região. pt-PT não é pt-BR.
 
 `SUBTITLE_SKIP_ORIGINAL_AUDIO_LANGUAGES` aceita somente `pt-BR` nesta versão.
-A dispensa depende de evidência de áudio original brasileiro na mídia;
-mera dublagem ou tag portuguesa genérica não a autorizam. Use valor vazio
-(`HOMESERVER_SUBTITLE_SKIP_ORIGINAL_AUDIO_LANGUAGES=""`) para exigir legenda
-também nesse caso. Outros idiomas nessa chave retornam erro de validação.
+Dispensa exige evidência de áudio original brasileiro na mídia; dublagem ou
+português genérico não bastam. Valor vazio desativa a dispensa.
 
-## Guardas internas de importação
+## Indexadores, provedores e credenciais
 
-O operator mantém `enableCompletedDownloadHandling=false` e
-`copyUsingHardlinks=true` no Sonarr/Radarr. O worker coordena validação de mídia,
-legenda e importação; hardlinks preservam o torrent para seeding sem alocar
-uma segunda cópia do vídeo. Esses valores são invariantes do fluxo e não
-recebem chaves editáveis no `.env`. Mudanças pela UI nativa aparecem como drift
-no `config verify` e são reconciliadas pelo `config apply`, com IDs e demais
-preferências preservados.
+`PROWLARR_INDEXERS` começa como `[]`. Configure fontes públicas e suas
+definições nativas conforme [o guia dos serviços](runbooks/service-setup.md).
+`BYPARR_ENABLED` controla o proxy para desafios Cloudflare. Provedores de
+legendas usam `SUBTITLE_PROVIDERS` e `BAZARR_PROVIDERS`, com suas credenciais:
 
-## Diretórios excluídos do backup
+- `SUBDL_API_KEY`.
+- `OPENSUBTITLES_USERNAME` e `OPENSUBTITLES_PASSWORD`.
+- API keys de Sonarr, Radarr, Prowlarr, Bazarr, Jellyfin e Seerr.
+- `ARR_TOKEN`, `ADMIN_TOKEN` e `CSRF_TOKEN` do controlador.
+- `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `QBIT_USERNAME` e `QBIT_PASSWORD`.
 
-`BACKUP_EXCLUDE_DIRS` é uma lista de nomes de diretórios separados por vírgulas.
-O padrão `.venv,__pycache__,logs,cache` omite esses diretórios recursivamente em
-appdata e releases. Logs e caches são estado gerado; os arquivos originais não
-são apagados ou alterados. Arquivos comuns com esses nomes continuam incluídos.
-Isso permite capturar o estado do Seerr sem seguir seus links de logs rotativos.
+Todos usam o prefixo `HOMESERVER_` e ficam diretamente no `.env`.
+Jellyfin/Seerr podem ter key vazia no primeiro bootstrap. Senhas de contas
+existentes não são redefinidas silenciosamente.
 
-Use `HOMESERVER_BACKUP_EXCLUDE_DIRS=""` para incluir todos os diretórios comuns.
-A lista aceita apenas nomes com letras ASCII, números, ponto, hífen e underscore;
-caminhos absolutos, barras, `.` e `..` são rejeitados. Symlinks em qualquer estado
-incluído continuam impedindo a captura e exigem revisão do operador. A exclusão
-não altera a rejeição de symlinks durante a restauração.
+## Monitoramento e invariantes
+
+`METRICS_INTERVAL_SECONDS` define a coleta; `METRICS_MAX_AGE_SECONDS` define
+quando dados ficam antigos. `LOG_LEVEL`, `LOG_MAX_SIZE_MB` e `LOG_MAX_FILES`
+controlam os logs próprios. Alertas são opcionais por `ALERTS_ENABLED`,
+`ALERT_WEBHOOK_URL` e `ALERT_RETRY_SECONDS`.
+
+Completed Download Handling permanece desabilitado nos Arr
+(`enableCompletedDownloadHandling=false`) e hardlinks habilitados
+(`copyUsingHardlinks=true`). Essas guardas são internas: o worker valida,
+resolve legenda e importa antes de publicar no Jellyfin. O apply preserva IDs;
+verify detecta alterações divergentes feitas nas UIs nativas.
+
+Portas e paths atuais estão em [instalação](installation.md) e
+[README](../README.md#acessar). Para mudar uma convenção estrutural, adapte o
+Compose/código de forma explícita, mantendo as redes internas e o gateway.

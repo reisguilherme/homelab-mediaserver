@@ -15,8 +15,6 @@ ALIASES = {
     "ARR_GID": "SERVICE_GID",
     "WORKER_INTERVAL": "WORKER_INTERVAL_SECONDS",
     "SOURCE_SLOW_SECONDS": "SOURCE_SLOW_WINDOW_SECONDS",
-    "RESTIC_REPOSITORY": "BACKUP_REPOSITORY",
-    "RESTIC_PASSWORD_FILE": "BACKUP_PASSWORD_FILE",
     "TELEMETRY_PORT": "STATUS_PORT",
 }
 INTERNAL = {
@@ -26,10 +24,8 @@ INTERNAL = {
     "TELEMETRY_SNAPSHOT",
     "RECOVERY_MODE",
     "MEDIA_ROOTS",
-    "QBIT_CREDENTIALS_FILE",
     "WORKER_ONCE",
     "COLLECTOR_TOKEN",
-    "COLLECTOR_TOKEN_FILE",
 }
 
 
@@ -144,35 +140,21 @@ def load_settings(path: Path, *, mode="dev") -> Settings:
         name = key[11:].lower()
         if name.upper() in INTERNAL:
             continue
-        if name.endswith("_file") and name[:-5] in FIELDS and FIELDS[name[:-5]].secret:
-            continue
         if name not in FIELDS:
             raise ValueError(f"{key}: unknown managed key")
     values = {name: field.default for name, field in FIELDS.items()}
     values["environment"] = mode
     if mode == "dev":
         for name in (
-            "install_root",
             "appdata_root",
             "media_root",
             "transcode_root",
-            "backup_staging_root",
             "run_root",
         ):
             values[name] = str(path.parent / ".runtime/dev" / name.removesuffix("_root"))
         values["access_mode"] = "lan"
     for name, field in FIELDS.items():
         key = "HOMESERVER_" + name.upper()
-        if field.secret and key + "_FILE" in raw:
-            if key in raw:
-                raise ValueError(f"{key}: value and _FILE are mutually exclusive")
-            secret_path = Path(raw[key + "_FILE"])
-            if not secret_path.is_absolute():
-                secret_path = path.parent / secret_path
-            try:
-                raw[key] = secret_path.read_text(encoding="utf-8").rstrip("\r\n")
-            except OSError:
-                raise ValueError(f"{key}: secret file unavailable") from None
         if key in raw:
             values[name] = convert(key, raw[key], field)
     if values["environment"] != mode:
@@ -211,18 +193,9 @@ def load_settings(path: Path, *, mode="dev") -> Settings:
                 raise ValueError(f"HOMESERVER_{name.upper()}: dev requires loopback")
     if mode == "prod":
         required = list(PRODUCTION_REQUIRED)
-        if values["backup_enabled"]:
-            required += ["backup_repository", "backup_password"]
         if values["alerts_enabled"]:
             required += ["alert_webhook_url"]
         for name in required:
             if not values[name] or values[name] in ("unconfigured", "changeme"):
                 raise ValueError(f"HOMESERVER_{name.upper()}: required in production")
-        if (
-            values["access_mode"] in ("tailscale", "both")
-            and ipaddress.ip_address(values["tailscale_bind_ip"]).is_loopback
-        ):
-            raise ValueError(
-                "HOMESERVER_TAILSCALE_BIND_IP: production requires explicit Tailscale bind"
-            )
     return Settings(values)

@@ -45,23 +45,23 @@ def bind(source: Path | str, target: str, *, read_only: bool = False) -> dict:
     }
 
 
-def render_stack(settings: Settings, *, images: dict[str, str] | None = None) -> dict[str, object]:
+def render_stack(
+    settings: Settings, *, images: dict[str, str] | None = None, env_file: Path | None = None
+) -> dict[str, object]:
     env = settings.as_environment()
 
     def value(key):
         return env["HOMESERVER_" + key]
 
-    media, appdata, run = (Path(value(key)) for key in ("MEDIA_ROOT", "APPDATA_ROOT", "RUN_ROOT"))
-    code = Path(value("INSTALL_ROOT")) / "current"
+    media, appdata = (Path(value(key)) for key in ("MEDIA_ROOT", "APPDATA_ROOT"))
+    run = appdata / "control"
+    code = PROJECT_ROOT
+    env_file = Path(env_file) if env_file is not None else code / ".env"
     image_map = IMAGES | (images or {})
     addresses = (
         ["127.0.0.1"]
         if value("ENVIRONMENT") == "dev"
-        else [value("LAN_BIND_IP")]
-        if value("ACCESS_MODE") == "lan"
-        else [value("TAILSCALE_BIND_IP")]
-        if value("ACCESS_MODE") == "tailscale"
-        else [value("LAN_BIND_IP"), value("TAILSCALE_BIND_IP")]
+        else ["0.0.0.0"]
     )
     addresses = list(dict.fromkeys(addresses))
     logging = {
@@ -79,7 +79,7 @@ def render_stack(settings: Settings, *, images: dict[str, str] | None = None) ->
     def service(name: str, networks: list, volumes: list, **options):
         return {
             "image": image_map[name],
-            "restart": "no",
+            "restart": "unless-stopped",
             "networks": networks,
             "volumes": volumes,
             "logging": logging,
@@ -98,11 +98,7 @@ def render_stack(settings: Settings, *, images: dict[str, str] | None = None) ->
     ready_http = "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready',timeout=5).close()"
 
     identity = {"PUID": value("SERVICE_UID"), "PGID": value("SERVICE_GID"), "TZ": value("TIMEZONE")}
-    control_env = {
-        key: val
-        for key, val in env.items()
-        if not key.startswith(("HOMESERVER_BACKUP_", "HOMESERVER_RELEASE_"))
-    }
+    control_env = dict(env)
     control_env.update(
         {
             "HOMESERVER_MEDIA_ROOT": "/data",
@@ -110,6 +106,8 @@ def render_stack(settings: Settings, *, images: dict[str, str] | None = None) ->
             "HOMESERVER_APPDATA_ROOT": "/var/lib/homeserver",
             "HOMESERVER_RUN_ROOT": "/run/homeserver",
             "HOMESERVER_DB_PATH": "/var/lib/homeserver/control.sqlite",
+            "HOMESERVER_CAPACITY_SNAPSHOT": "/run/homeserver/capacity.json",
+            "HOMESERVER_HOST_SNAPSHOT": "/run/homeserver/host.json",
             "HOMESERVER_RECOVERY_MODE": "/var/lib/homeserver/RECOVERY_MODE",
             "HOMESERVER_ARR_UID": value("SERVICE_UID"),
             "HOMESERVER_ARR_GID": value("SERVICE_GID"),
@@ -201,9 +199,7 @@ def render_stack(settings: Settings, *, images: dict[str, str] | None = None) ->
             ports=ports(
                 "QBIT_MONITOR_PORT",
                 8080,
-                binds=[
-                    value("TAILSCALE_BIND_IP") if value("ACCESS_MODE") != "lan" else "127.0.0.1"
-                ],
+                binds=["127.0.0.1"],
             ),
         ),
         "control-api": service(
@@ -230,7 +226,7 @@ def render_stack(settings: Settings, *, images: dict[str, str] | None = None) ->
             [state, live, bind(media, "/data")],
             environment=control_env,
             command=["python", "-m", "homeserver_control.worker"],
-            healthcheck=healthcheck(
+        healthcheck=healthcheck(
                 "import os,time; "
                 "from homeserver_control.persistence.heartbeat import WorkerHeartbeatStore; "
                 "assert WorkerHeartbeatStore(os.environ['HOMESERVER_DB_PATH']).ready("
@@ -241,7 +237,7 @@ def render_stack(settings: Settings, *, images: dict[str, str] | None = None) ->
         "download-gateway": service(
             "download-gateway",
             ["apps", "transfer"],
-            [state],
+            [state, live, bind(media, "/data", read_only=True)],
             environment=control_env,
             healthcheck=healthcheck(
                 "import urllib.request; "
@@ -294,20 +290,57 @@ def render_stack(settings: Settings, *, images: dict[str, str] | None = None) ->
             "operator",
             ["apps", "transfer"],
             [
-                state,
+                bind(appdata, "/srv/appdata"),
+                bind(media, "/data"),
                 bind(run, "/run/homeserver"),
-                bind(
-                    Path(value("INSTALL_ROOT")) / "shared/operator.env",
-                    "/run/homeserver/operator.env",
-                    read_only=True,
-                ),
+                bind(env_file.parent, "/project"),
             ],
             profiles=["operator"],
             environment={"HOMESERVER_NATIVE_CONTEXT": "container"},
             user="0:0",
             entrypoint=["python", "-m", "homeserver_common.cli"],
         ),
+        "init": service(
+            "operator",
+            [],
+            [
+                bind(appdata, "/srv/appdata"),
+                bind(media, "/srv/data"),
+                bind(value("TRANSCODE_ROOT"), "/srv/transcode"),
+                bind(run, "/run/homeserver"),
+                bind(env_file.parent, "/project", read_only=True),
+            ],
+            restart="no",
+            user="0:0",
+            environment={"HOMESERVER_NATIVE_CONTEXT": "container"},
+            command=[
+                "python", "-m", "homeserver_common.host", "--env-file",
+                "/project/" + env_file.name,
+            ],
+        ),
+        "host-metrics": service(
+            "telemetry",
+            [],
+            [live | {"read_only": False}, bind(media, "/data", read_only=True),
+             bind("/sys", "/sys", read_only=True)],
+            network_mode="host",
+            pid="host",
+            environment={
+                "HOMESERVER_METRICS_INTERVAL_SECONDS": value("METRICS_INTERVAL_SECONDS"),
+                "HOMESERVER_MEDIA_ROOT": "/data",
+            },
+            command=["python", "/app/scripts/host-metrics.py", "--loop"],
+            user=f"{value('SERVICE_UID')}:{value('SERVICE_GID')}",
+        ),
     }
+    services["host-metrics"].pop("networks")
+    for name in ("control-api", "control-worker", "download-gateway", "telemetry", "host-metrics"):
+        services[name]["volumes"].append(bind(env_file.parent, "/project", read_only=True))
+        services[name]["environment"].update(
+            HOMESERVER_ENV_PATH="/project/" + env_file.name,
+            HOMESERVER_ENV_MODE=value("ENVIRONMENT"),
+        )
+        services[name]["entrypoint"] = ["python", "-m", "homeserver_common.runtime"]
     for name in ("control-api", "control-worker", "download-gateway", "telemetry"):
         services[name]["user"] = f"{value('SERVICE_UID')}:{value('SERVICE_GID')}"
     if value("TRANSCODE_MODE") == "intel":
@@ -316,14 +349,21 @@ def render_stack(settings: Settings, *, images: dict[str, str] | None = None) ->
             devices=[f"{device}:{device}"],
             group_add=list(dict.fromkeys([value("RENDER_GID"), value("VIDEO_GID")])),
         )
-    if value("BYPARR_ENABLED") == "true":
+    if value("BYPARR_ENABLED") == "true" or value("ENVIRONMENT") == "prod":
         services["byparr"] = service("byparr", ["apps", "egress"], [], shm_size="512m")
-    if value("ENVIRONMENT") == "dev" and images is None:
+    if images is None:
         for name, filename in (("control-api", "control"), ("telemetry", "telemetry")):
             services[name]["build"] = {
                 "context": str(PROJECT_ROOT),
                 "dockerfile": f"deploy/Dockerfile.{filename}",
             }
+    services["operator"]["restart"] = "no"
+    for name, spec in services.items():
+        if name not in ("init", "operator"):
+            dependencies = spec.get("depends_on", [])
+            spec["depends_on"] = {
+                dependency: {"condition": "service_started"} for dependency in dependencies
+            } | {"init": {"condition": "service_completed_successfully"}}
     return {
         "name": value("INSTANCE_NAME"),
         "services": services,
@@ -364,107 +404,11 @@ def atomic_write(path: Path, contents: str | bytes, *, mode: int = 0o600) -> Non
             os.unlink(temporary)
 
 
-def write_stack(settings: Settings, path: Path, *, images=None) -> None:
+def write_stack(settings: Settings, path: Path, *, images=None, env_file=None) -> None:
     atomic_write(
-        path, json.dumps(literal_compose(render_stack(settings, images=images)), indent=2) + "\n"
-    )
-
-
-def systemd_quote(value: str | Path) -> str:
-    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
-
-
-def render_units(settings: Settings, env_file: Path) -> dict[str, str]:
-    """Use explicit loader arguments; systemd must never parse the operator .env."""
-    env = settings.as_environment()
-    root = Path(env["HOMESERVER_INSTALL_ROOT"]) / "current"
-    quoted_env = systemd_quote(env_file.resolve())
-    python = systemd_quote(root / ".venv/bin/python")
-
-    def script(name):
-        return systemd_quote(root / "scripts" / name)
-
-    header = "# Generated by HomeServer; edit the operator .env instead.\n"
-    stack = f"""[Unit]
-Description=HomeServer guarded stack supervisor
-Requires=docker.service
-After=docker.service network-online.target
-Wants=network-online.target
-RequiresMountsFor={systemd_quote(env["HOMESERVER_MEDIA_ROOT"])}
-
-[Service]
-Type=simple
-ExecStart={python} {script("supervise-stack.py")} --env-file {quoted_env}
-Restart=on-failure
-RestartSec=10s
-TimeoutStopSec=120s
-UMask=0027
-
-[Install]
-WantedBy=multi-user.target
-"""
-    metrics = f"""[Unit]
-Description=HomeServer host and capacity snapshots
-After=local-fs.target
-
-[Service]
-Type=simple
-ExecStart={python} {script("host-metrics.py")} --env-file {quoted_env} --loop
-Group={env["HOMESERVER_SERVICE_GID"]}
-Restart=on-failure
-RestartSec=5s
-UMask=0027
-NoNewPrivileges=true
-PrivateTmp=true
-"""
-    units = {
-        "homeserver-stack.service": stack,
-        "homeserver-metrics.service": metrics + "\n[Install]\nWantedBy=multi-user.target\n",
-    }
-    if env["HOMESERVER_BACKUP_ENABLED"] == "true":
-        units.update(
-            {
-                "homeserver-backup.service": f"""[Unit]
-Description=HomeServer consistent Restic backup
-After=homeserver-stack.service
-[Service]
-Type=oneshot
-ExecStart={python} {script("infra.py")} backup-create --env-file {quoted_env}
-TimeoutStartSec=2h
-Nice=10
-IOSchedulingClass=best-effort
-""",
-                "homeserver-backup.timer": f"""[Unit]
-Description=HomeServer backup schedule
-[Timer]
-OnCalendar={env["HOMESERVER_BACKUP_SCHEDULE"]}
-Persistent=true
-Unit=homeserver-backup.service
-[Install]
-WantedBy=timers.target
-""",
-            }
+        path,
+        json.dumps(
+            literal_compose(render_stack(settings, images=images, env_file=env_file)), indent=2
         )
-        if env["HOMESERVER_BACKUP_TARGET_REPOSITORY"]:
-            units.update(
-                {
-                    "homeserver-backup-send.service": f"""[Unit]
-Description=Copy HomeServer snapshots to independent Restic repository
-[Service]
-Type=oneshot
-ExecStart={python} {script("infra.py")} backup-copy --env-file {quoted_env}
-TimeoutStartSec=2h
-""",
-                    "homeserver-backup-send.timer": """[Unit]
-Description=Retry offsite snapshots
-[Timer]
-OnBootSec=15m
-OnUnitActiveSec=1h
-Persistent=true
-Unit=homeserver-backup-send.service
-[Install]
-WantedBy=timers.target
-""",
-                }
-            )
-    return {name: header + content for name, content in units.items()}
+        + "\n",
+    )

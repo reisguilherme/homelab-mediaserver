@@ -221,8 +221,6 @@ class StatusProvider:
                         used = host_used
 
         interface = network.get("interface")
-        backup = host_snapshot.get("backup") if host_state == "ok" else None
-        backup = backup if isinstance(backup, dict) else {}
         return {
             "schema_version": 2,
             "generated_at": datetime.fromtimestamp(now, UTC).isoformat(),
@@ -255,11 +253,4 @@ class StatusProvider:
                 "used_bytes": used,
             },
             "storage": self.storage.snapshot(used_bytes=used),
-            "backup": {
-                "state": backup.get("state") if backup.get("state") in {
-                    "ok", "stale", "missing", "disabled", "unavailable"
-                } else "unavailable",
-                "age_seconds": _number(backup.get("age_seconds")),
-                "completed_at": _number(backup.get("completed_at")),
-            },
         }

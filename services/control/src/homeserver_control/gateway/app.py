@@ -1199,21 +1199,7 @@ def _configured_upstream() -> QbitClient:
                 trust_env=False,
             ),
         )
-    credentials_file = os.environ.get("HOMESERVER_QBIT_CREDENTIALS_FILE")
-    if not credentials_file:
-        return UnconfiguredQbitClient()
-    from homeserver_common.env import parse_env
-
-    credentials = parse_env(Path(credentials_file).read_text(encoding="utf-8"))
-    return QBittorrentAdapter(
-        base_url=os.environ.get("HOMESERVER_QBIT_URL", "http://qbittorrent:8080"),
-        username=credentials["QBIT_USERNAME"],
-        password=credentials["QBIT_PASSWORD"],
-        client=httpx.Client(
-            timeout=float(os.environ.get("HOMESERVER_HTTP_TIMEOUT_SECONDS", "15")),
-            trust_env=False,
-        ),
-    )
+    return UnconfiguredQbitClient()
 
 
 _database_path = os.environ.get("HOMESERVER_DB_PATH")

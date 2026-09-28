@@ -1,6 +1,6 @@
 # HomeServer — Escopo detalhado do projeto
 
-> Documento histórico de 21/09. Configuração, limites de download e CYD foram
+> Documento histórico de 21/09. Configuração, limites de download, CYD e CI/CD foram
 > substituídos pelo [design de produtização](2026-09-28-homeserver-productization-design.md).
 > Para instalar/operar, use o [README](../../../README.md) e os guias atuais.
 

@@ -1,5 +1,9 @@
 # HomeServer — Implementação 03: monitoramento, alertas e CYD
 
+> Plano histórico de 21/09. CYD/MQTT exclusivo foram retirados; operação e
+> implantação são manuais. Consulte o [painel atual](../../runbooks/status-dashboard.md)
+> e o [design de produtização](../specs/2026-09-28-homeserver-productization-design.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans. Executar os checkboxes por tarefa com as evidências indicadas.
 
 **Goal:** mostrar saúde, transferências, capacidade e reproduções no painel físico e enviar alertas úteis aos celulares.

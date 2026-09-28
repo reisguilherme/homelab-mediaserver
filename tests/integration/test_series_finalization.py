@@ -499,13 +499,13 @@ async def test_episode_subtitle_priority_and_original_audio(tmp_path, monkeypatc
         assert (destination / f"Ted.Lasso.S04E01.{suffix}.srt").read_bytes() == expected_subtitle
 
 
-def _reserved_season(repo, season, *, tmdb_id=99999):
+def _reserved_season(repo, season, *, tmdb_id=99999, budget=100):
     reserved = repo.reserve(
         request_id=f"seerr:chronology:{season}",
         source_id=f"chronology:{season}",
         media_key=f"season:tmdb:{tmdb_id}:{season}",
         filesystem_id="fixture",
-        budget_bytes=100,
+        budget_bytes=budget,
         free_bytes=1000,
         total_bytes=2000,
     )
@@ -533,6 +533,153 @@ def _confirmed_episode(permits, reservation_id, season, number):
         effect=lambda _: {"accepted": True},
     )
     return permit
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("earlier", ["future", "unmonitored"])
+async def test_unrequested_or_unaired_episode_does_not_block_ordered_import(tmp_path, earlier):
+    repo = ReservationRepository(tmp_path / "control.sqlite")
+    repo.initialize()
+    reservation = _reserved_season(repo, 1)
+    permits = PermitRegistry(repo.path)
+    _confirmed_episode(permits, reservation, 1, 2)
+    gateway_calls = []
+
+    def handler(request):
+        if request.url.path == "/api/v3/series":
+            return httpx.Response(200, json=[{"id": 1, "tmdbId": 99999}])
+        if request.url.path == "/api/v3/episode":
+            return httpx.Response(200, json=[
+                {"id": 1, "seasonNumber": 1, "episodeNumber": 1, "hasFile": False,
+                 "monitored": earlier != "unmonitored",
+                 "airDateUtc": (datetime.now(UTC) + timedelta(
+                     days=1 if earlier == "future" else -1
+                 )).isoformat()},
+                {"id": 2, "seasonNumber": 1, "episodeNumber": 2, "hasFile": False,
+                 "monitored": True, "airDateUtc": (datetime.now(UTC) - timedelta(
+                     days=1
+                 )).isoformat()},
+            ])
+        if request.url.path == "/api/v2/torrents/info":
+            gateway_calls.append(request)
+            return httpx.Response(200, json=[])
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        finalizer = SeriesFinalizer(
+            repository=repo, permits=permits, torrent_root=tmp_path,
+            gateway_url="http://gateway:8081", arr_token="secret",
+            sonarr_url="http://sonarr:8989", sonarr_api_key="secret", client=client,
+        )
+        assert await finalizer.finalize("season:tmdb:99999:1", reservation) == "downloading"
+    assert len(gateway_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_ready_episode_seven_waits_for_five_and_six_to_be_imported(tmp_path, monkeypatch):
+    repo = ReservationRepository(tmp_path / "control.sqlite")
+    repo.initialize()
+    reservation = _reserved_season(repo, 1, budget=300)
+    permits = PermitRegistry(repo.path)
+    episodes = {number: _confirmed_episode(permits, reservation, 1, number) for number in (5, 6, 7)}
+    torrents, library = tmp_path / "torrents", tmp_path / "media"
+    torrents.mkdir()
+    library.mkdir()
+    for permit in episodes.values():
+        (torrents / permit.selected_files[0]).write_bytes(b"video")
+    ready, imported, posts = {7}, set(), []
+    def validate(path, **_kwargs):
+        return ValidationResult(
+            Path(path), 5, MediaProbe(1920, 1080, ("pt-BR",), (), {"streams": [{
+                "codec_type": "audio", "tags": {"language": "pt-BR"},
+                "disposition": {"original": 1},
+            }]}),
+        )
+
+    monkeypatch.setattr("homeserver_control.worker.series_finalization.validate_media", validate)
+    monkeypatch.setattr("homeserver_control.worker.finalization.validate_media", validate)
+
+    def handler(request):
+        if request.url.path == "/api/v3/config/mediamanagement":
+            return httpx.Response(200, json={"copyUsingHardlinks": True})
+        if request.url.path == "/api/v3/series":
+            return httpx.Response(200, json=[{"id": 1, "tmdbId": 99999}])
+        if request.url.path == "/api/v3/episode":
+            return httpx.Response(200, json=[
+                {"id": number, "seasonNumber": 1, "episodeNumber": number,
+                 "hasFile": number in imported,
+                 "episodeFileId": number if number in imported else 0,
+                 "monitored": True,
+                 "airDateUtc": (datetime.now(UTC) - timedelta(days=1)).isoformat()}
+                for number in (5, 6, 7)
+            ])
+        if request.url.path == "/api/v2/torrents/info":
+            permit = next(item for item in episodes.values() if item.infohash == request.url.params[
+                "hashes"
+            ])
+            number = int(permit.scope_key[-2:])
+            return httpx.Response(200, json=[{
+                "hash": permit.infohash, "progress": 1 if number in ready else 0.5,
+                "amount_left": 0 if number in ready else 1,
+                "content_path": "/data/torrents/" + permit.selected_files[0],
+            }])
+        if request.url.path == "/api/v2/torrents/files":
+            permit = next(item for item in episodes.values() if item.infohash == request.url.params[
+                "hash"
+            ])
+            return httpx.Response(200, json=[{"name": permit.selected_files[0], "size": 5}])
+        if request.url.path == "/api/v3/command":
+            import json
+
+            body = json.loads(request.content)
+            permit = next(item for item in episodes.values() if item.infohash.upper() == body[
+                "downloadClientId"
+            ])
+            number = int(permit.scope_key[-2:])
+            assert number in ready
+            assert all(previous in imported for previous in (5, 6, 7) if previous < number)
+            os.link(torrents / permit.selected_files[0], library / permit.selected_files[0])
+            imported.add(number)
+            posts.append(number)
+            return httpx.Response(200, json={"id": number})
+        if request.url.path.startswith("/api/v3/episodefile/"):
+            number = int(request.url.path.rsplit("/", 1)[-1])
+            return httpx.Response(200, json={
+                "path": "/data/media/tv/" + episodes[number].selected_files[0],
+            })
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async def capacity():
+        return CapacityEvidence(
+            free_bytes=10_000,
+            remaining_by_hash={
+                permit.infohash: 0 if number in ready else 1
+                for number, permit in episodes.items()
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        finalizer = SeriesFinalizer(
+            repository=repo, permits=permits, torrent_root=torrents, media_root=library,
+            gateway_url="http://gateway:8081", arr_token="secret",
+            sonarr_url="http://sonarr:8989", sonarr_api_key="secret", client=client,
+            capacity_provider=capacity,
+        )
+        assert await finalizer.finalize("season:tmdb:99999:1", reservation) == "downloading"
+        assert posts == []
+        assert not list(library.iterdir())
+        ready.add(5)
+        assert await finalizer.finalize("season:tmdb:99999:1", reservation) == "import_requested"
+        assert await finalizer.finalize("season:tmdb:99999:1", reservation) == "complete"
+        assert await finalizer.finalize("season:tmdb:99999:1", reservation) == "downloading"
+        assert posts == [5]
+        assert not (library / episodes[7].selected_files[0]).exists()
+        ready.add(6)
+        assert await finalizer.finalize("season:tmdb:99999:1", reservation) == "import_requested"
+        assert await finalizer.finalize("season:tmdb:99999:1", reservation) == "complete"
+        assert await finalizer.finalize("season:tmdb:99999:1", reservation) == "import_requested"
+        assert await finalizer.finalize("season:tmdb:99999:1", reservation) == "complete"
+    assert posts == [5, 6, 7]
 
 
 @pytest.mark.asyncio

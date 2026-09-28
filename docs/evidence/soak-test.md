@@ -1,5 +1,10 @@
-# Soak test
+# Ensaio contínuo da stack pessoal
 
-Pendente até o deploy em um Legion validado. O ensaio deve durar 48–72 horas e
-registrar reinício planejado, backup, uso de memória, crescimento de logs/cache,
-saúde do SSD, duas reproduções, seeding e atualização da CYD.
+Pendente de registro após ativação da stack simplificada no servidor.
+Um ensaio de 48–72 horas pode registrar CPU/memória, crescimento de logs,
+espaço, seeding, reinício planejado e reprodução nos clientes reais.
+
+Use [operação](../operator-guide.md) e
+[diagnóstico](../troubleshooting.md). Não há display CYD ou serviço próprio
+de backup/release para validar. A passagem da suíte local não substitui
+observação contínua no host.

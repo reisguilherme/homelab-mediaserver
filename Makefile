@@ -1,4 +1,4 @@
-.PHONY: lint test-unit test-contract test-integration test-config test-install test-restic test-fresh-stack compose-check smoke
+.PHONY: lint test-unit test-contract test-integration test-config test-fresh-stack compose-check smoke
 
 PYTHON ?= python3
 
@@ -20,17 +20,11 @@ test-integration:
 test-config:
 	$(PYTHON) -m pytest tests/unit/test_settings.py tests/unit/test_native_config.py tests/unit/test_stack_render.py tests/contract/test_configuration_cli.py tests/contract/test_native_configuration.py tests/contract/test_qbit_configuration.py -q
 
-test-install:
-	$(PYTHON) -m pytest tests/integration/test_installation.py tests/integration/test_fresh_stack_validator.py tests/integration/test_release_lifecycle.py -q
-
-test-restic:
-	$(PYTHON) -m pytest tests/integration/test_restic_lifecycle.py tests/integration/test_backup_restore.py -q
-
 test-fresh-stack:
 	$(PYTHON) scripts/validate-fresh-stack.py
 
 compose-check:
-	@if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then docker compose -f deploy/compose.yaml -f deploy/compose.dev.yaml config --quiet; else echo 'docker compose unavailable' >&2; exit 2; fi
+	@if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then docker compose --env-file config/dev.env.example -f compose.yaml config --quiet; else echo 'docker compose unavailable' >&2; exit 2; fi
 
 smoke:
 	$(PYTHON) -m pytest tests/system -q

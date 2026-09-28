@@ -1,30 +1,10 @@
-# Releases e rollback
+# Histórico — releases próprias retiradas
 
-Release é a SHA Git de 40 caracteres, artefato verificado e manifesto schema2
-com todas as imagens por digest. Appdata, mídia e `.env` ficam fora da release.
-Build exige checkout limpo e acesso ao registry; não cria tags de produção a
-partir de arquivos modificados.
+O fluxo de artefato/manifesto, publicação de imagens próprias, deploy por SHA
+e rollback foi retirado em 28/09/2026 por decisão do operador. Não é requisito
+para instalar ou atualizar o HomeServer.
 
-```bash
-bash scripts/build-release.sh --image-prefix ghcr.io/SEU_NAMESPACE/homeserver --output /tmp/homeserver-release
-sudo bash scripts/deploy.sh --env-file /etc/homeserver/.env \
-  --release SHA_DE_40_HEXADECIMAIS \
-  --artifact /tmp/homeserver-release/homeserver-SHA.tar \
-  --manifest /tmp/homeserver-release/homeserver-SHA.json
-sudo bash scripts/smoke.sh --env-file /etc/homeserver/.env
-sudo bash scripts/rollback.sh --env-file /etc/homeserver/.env --release SHA_ANTERIOR
-```
-
-Troque os placeholders pelos arquivos/SHA realmente produzidos. O fluxo valida
-checksum, caminhos tar, digests, labels, schema e configuração antes de
-ativar. Para os escritores sob manutenção, migra o SQLite, troca `current`
-atomicamente, configura serviços e verifica saúde antes de liberar admissões.
-
-Falhas deixam diagnóstico sanitizado e tentam retorno somente quando compatível.
-Rollback restaura runtime/configuração e preserva segredos atuais; não reverte
-bancos implicitamente. Schema incompatível entra em RECOVERY_MODE e requer
-[restore isolado](backup-restore.md) seguido de [reconciliação](recovery.md).
-Nenhum prune pode remover release necessária ao retorno/recuperação.
-
-[GitHub Actions](github-actions.md) executa os mesmos scripts a partir de um
-artefato autenticado associado à CI aprovada.
+Use [instalação com Compose](../installation.md) e
+[atualização pelo operador](../operator-guide.md#atualizar-e-parar).
+A versão anterior deste procedimento está no
+[histórico Git](https://github.com/reisguilherme/homelab-mediaserver/blob/89c84f26e4426d2f025573ce3728c5fa320f6267/docs/runbooks/releases.md).

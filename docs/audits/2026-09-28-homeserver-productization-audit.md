@@ -5,6 +5,11 @@ Data: 2026-09-28. Escopo: diagnóstico e planejamento, sem mudanças operacionai
 > Esta é a fotografia anterior à implementação. Achados e medições abaixo são
 > preservados como baseline; consulte o [registro de implementação e aceite](../evidence/productization-acceptance.md)
 > para o tratamento de A01–A16 e as limitações de validação atuais.
+> Decisão posterior: CI/CD foi retirado a pedido do operador. As recomendações
+> de pipeline nesta fotografia não são requisitos da operação atual.
+> A decisão posterior também retirou instalador, releases e backups próprios;
+> o projeto pessoal usa [Compose raiz](../installation.md) e defaults técnicos
+> no código. Requisitos estruturais abaixo pertencem ao plano anterior.
 
 **Conclusão:** a automação principal tem implementação substancial e boa cobertura de testes, mas a instalação atual ainda depende de conhecimento e ajustes específicos do servidor. O projeto não está pronto para que outra pessoa faça um clone, configure um `.env` e reproduza o ambiente. A prioridade é fechar essa distância, preservando o fluxo de mídia já utilizado.
 
@@ -73,7 +78,12 @@ Prioridades: **P1** bloqueia instalação reproduzível ou operação confiável
 
 O clone padrão do GitHub recebe a branch antiga. `main` também está atrasada, enquanto o deploy só aceita CI bem-sucedida em `main`. Há risco de corrigir a versão errada ou publicar uma instalação que não corresponde à usada em casa.
 
-Evidência: referências locais e remotas acima; [deploy.yml](../../.github/workflows/deploy.yml), passo de seleção de CI. Ação: consolidar o desenvolvimento em `main` com revisão, CI e histórico preservado; mudar a branch padrão depois de validar a consolidação. Não apagar worktrees ou branches antes disso.
+Evidência: referências locais e remotas acima;
+[deploy.yml histórico na base auditada](https://github.com/reisguilherme/homelab-mediaserver/blob/2cffa20798574b3b0916458e11b3461ffe8d58b3/.github/workflows/deploy.yml),
+passo de seleção de CI. Ação proposta na auditoria: consolidar o desenvolvimento
+em `main` com revisão, CI e histórico preservado; mudar a branch padrão depois
+de validar a consolidação. CI foi posteriormente substituída por checks locais.
+Não apagar worktrees ou branches antes da consolidação.
 
 ### A02 — P1 — Não há uma interface única de configuração
 
@@ -93,19 +103,19 @@ Ação: reconciliador idempotente de configurações gerenciadas, usando APIs do
 
 O Compose vivo inclui `/etc/homeserver/compose.override.yaml`. Ele modifica redes, portas, ambientes e volumes de diversos serviços. Seerr e Prowlarr, por exemplo, recebem ajustes de persistência pelo override. Existe também drop-in de systemd não reproduzido pelo repositório. O Compose base/produção sozinho não representa a instalação utilizada.
 
-Evidência: labels/inspeção Docker e unit efetiva; [compose.yaml](../../deploy/compose.yaml), [compose.prod.yaml](../../deploy/compose.prod.yaml), [homeserver-stack.service](../../deploy/systemd/homeserver-stack.service). Ação: extrair a intenção dos overrides para templates versionados e valores locais no `.env`, sem publicar seu conteúdo bruto.
+Evidência: labels/inspeção Docker e unit efetiva; [compose.yaml](https://github.com/reisguilherme/homelab-mediaserver/blob/2cffa20798574b3b0916458e11b3461ffe8d58b3/deploy/compose.yaml), [compose.prod.yaml](https://github.com/reisguilherme/homelab-mediaserver/blob/2cffa20798574b3b0916458e11b3461ffe8d58b3/deploy/compose.prod.yaml), [homeserver-stack.service](https://github.com/reisguilherme/homelab-mediaserver/blob/2cffa20798574b3b0916458e11b3461ffe8d58b3/deploy/systemd/homeserver-stack.service). Ação: extrair a intenção dos overrides para templates versionados e valores locais no `.env`, sem publicar seu conteúdo bruto.
 
 ### A05 — P1 — Bootstrap ainda não provisiona uma máquina nova
 
 `apply_missing()` registra `no-host-changes-needed` no modo adopt e `fresh-prerequisites-only` no fresh; não instala os componentes. A verificação exige serviços que já deveriam estar preparados. O README começa com um Legion já configurado.
 
-Evidência: [bootstrap-server.sh](../../scripts/bootstrap-server.sh), [lib/bootstrap.sh](../../scripts/lib/bootstrap.sh), [README.md](../../README.md). Ação: separar pré-requisitos explícitos, preparação do host e instalação da aplicação; implementar fresh/adopt idempotentes, com simulação e verificação. Não automatizar formatação nem reescrever `fstab` ou políticas de energia existentes.
+Evidência: [bootstrap-server.sh](https://github.com/reisguilherme/homelab-mediaserver/blob/2cffa20798574b3b0916458e11b3461ffe8d58b3/scripts/bootstrap-server.sh), [lib/bootstrap.sh](https://github.com/reisguilherme/homelab-mediaserver/blob/2cffa20798574b3b0916458e11b3461ffe8d58b3/scripts/lib/bootstrap.sh), [README.md](../../README.md). Ação: separar pré-requisitos explícitos, preparação do host e instalação da aplicação; implementar fresh/adopt idempotentes, com simulação e verificação. Não automatizar formatação nem reescrever `fstab` ou políticas de energia existentes.
 
 ### A06 — P1 — Deploy e rollback não completam a troca operacional
 
 `deploy.sh` valida/extrai o artefato e troca `current`; não constrói/obtém imagens, ativa a stack, executa migração, exige backup prévio ou confirma readiness. `rollback.sh` também troca apenas o link. `validate-release.py` verifica formato de digests e checksum do tar, mas não cruza as imagens efetivas/configurações com o manifesto nem executa a política `requires_backup`.
 
-Evidência: [deploy.sh](../../scripts/deploy.sh), [rollback.sh](../../scripts/rollback.sh), [validate-release.py](../../scripts/validate-release.py), [release.schema.json](../../config/release.schema.json). Ação: pipeline completo e único para execução local e CI, com imagens imutáveis, schema compatível, backup quando necessário, ativação, smoke e recuperação de falhas. Não prometer rollback de banco incompatível apenas trocando o symlink.
+Evidência: [deploy.sh](https://github.com/reisguilherme/homelab-mediaserver/blob/2cffa20798574b3b0916458e11b3461ffe8d58b3/scripts/deploy.sh), [rollback.sh](https://github.com/reisguilherme/homelab-mediaserver/blob/2cffa20798574b3b0916458e11b3461ffe8d58b3/scripts/rollback.sh), [validate-release.py](https://github.com/reisguilherme/homelab-mediaserver/blob/2cffa20798574b3b0916458e11b3461ffe8d58b3/scripts/validate-release.py), [release.schema.json](https://github.com/reisguilherme/homelab-mediaserver/blob/2cffa20798574b3b0916458e11b3461ffe8d58b3/config/release.schema.json). Ação: pipeline completo e único para execução local e CI, com imagens imutáveis, schema compatível, backup quando necessário, ativação, smoke e recuperação de falhas. Não prometer rollback de banco incompatível apenas trocando o symlink.
 
 ### A07 — P1 — Política de reinício inconsistente e recuperação parcial de falhas
 
@@ -119,13 +129,13 @@ O backup de produção usa Restic e para a stack durante a captura, o que é uma
 
 O pull externo usa rsync do repositório, exclui locks e aplica retenção/prune independente no destino. Há risco de corrida com alterações/prune da origem e a sincronização não se torna atômica por terminar com `restic check`. Não foi constatada corrupção; falta teste e coordenação. A chave atual restrita a rsync também precisa ser considerada ao mudar o transporte.
 
-Evidência: [backup-restic.sh](../../scripts/backup-restic.sh), [pull-backup-wsl.sh](../../scripts/pull-backup-wsl.sh), [restore.sh](../../scripts/restore.sh), [test_backup_restore.py](../../tests/integration/test_backup_restore.py), [runbook](../runbooks/backup-restore.md). Ação: testar o caminho Restic real, usar cópia de snapshots entre repositórios ou espelho coordenado, parametrizar retenção/horários e realizar ensaio isolado. A documentação oficial prevê [cópia de snapshots entre repositórios](https://restic.readthedocs.io/en/stable/045_working_with_repos.html#copying-snapshots-between-repositories).
+Evidência: [backup-restic.sh](https://github.com/reisguilherme/homelab-mediaserver/blob/2cffa20798574b3b0916458e11b3461ffe8d58b3/scripts/backup-restic.sh), [pull-backup-wsl.sh](https://github.com/reisguilherme/homelab-mediaserver/blob/2cffa20798574b3b0916458e11b3461ffe8d58b3/scripts/pull-backup-wsl.sh), [restore.sh](https://github.com/reisguilherme/homelab-mediaserver/blob/2cffa20798574b3b0916458e11b3461ffe8d58b3/scripts/restore.sh), [test_backup_restore.py](https://github.com/reisguilherme/homelab-mediaserver/blob/2cffa20798574b3b0916458e11b3461ffe8d58b3/tests/integration/test_backup_restore.py), [runbook](../runbooks/backup-restore.md). Ação: testar o caminho Restic real, usar cópia de snapshots entre repositórios ou espelho coordenado, parametrizar retenção/horários e realizar ensaio isolado. A documentação oficial prevê [cópia de snapshots entre repositórios](https://restic.readthedocs.io/en/stable/045_working_with_repos.html#copying-snapshots-between-repositories).
 
 ### A09 — P1 — Portabilidade depende do hardware, caminhos e contas atuais
 
 Paths `/srv`, `/etc/homeserver` e `/opt/homeserver`, usuário do backup, dispositivo Intel e portas estão espalhados. O Compose produção exige mapeamento de render device mesmo em máquina sem GPU Intel. O exemplo de inventário assume serviço Lenovo; dashboard aceita especificamente hostname Tailscale e usa portas fixas.
 
-Evidência: [server.example.yaml](../../config/server.example.yaml), [compose.prod.yaml](../../deploy/compose.prod.yaml), [pull-backup-wsl.sh](../../scripts/pull-backup-wsl.sh), [telemetry/app.py](../../services/telemetry/src/homeserver_telemetry/app.py). Ação: baseline Ubuntu/amd64 com reprodução por CPU; Intel opcional e validado; caminhos, UID/GID, rede e URLs derivados do `.env`. Preservar configuração de energia já existente no Legion sem torná-la obrigatória em outra máquina.
+Evidência: [server.example.yaml](https://github.com/reisguilherme/homelab-mediaserver/blob/2cffa20798574b3b0916458e11b3461ffe8d58b3/config/server.example.yaml), [compose.prod.yaml](https://github.com/reisguilherme/homelab-mediaserver/blob/2cffa20798574b3b0916458e11b3461ffe8d58b3/deploy/compose.prod.yaml), [pull-backup-wsl.sh](https://github.com/reisguilherme/homelab-mediaserver/blob/2cffa20798574b3b0916458e11b3461ffe8d58b3/scripts/pull-backup-wsl.sh), [telemetry/app.py](../../services/telemetry/src/homeserver_telemetry/app.py). Ação: baseline Ubuntu/amd64 com reprodução por CPU; Intel opcional e validado; caminhos, UID/GID, rede e URLs derivados do `.env`. Preservar configuração de energia já existente no Legion sem torná-la obrigatória em outra máquina.
 
 ### A10 — P1 — Preparação para publicação ainda incompleta
 

@@ -1,19 +1,21 @@
-# Alertas e telemetria
+# Alertas
 
-O painel HTTP e os snapshots do host funcionam sem CYD ou broker MQTT.
-Consulte [status](status-dashboard.md) e [guia do operador](../operator-guide.md).
+O painel e as métricas funcionam sem display CYD ou broker MQTT.
+Consulte [status](status-dashboard.md) e [operação](../operator-guide.md).
 
-Alertas são opcionais: configure `HOMESERVER_ALERTS_ENABLED=true` e
-`HOMESERVER_ALERT_WEBHOOK_URL` no `.env` privado. O supervisor envia um POST
-JSON somente a esse destino explicitamente configurado, usando timeout
-`HTTP_TIMEOUT_SECONDS`. Não há integração Telegram implícita.
+Alertas são opcionais. No `.env` privado:
 
-A outbox SQLite persistente em `APPDATA_ROOT/telemetry/notifications.sqlite`
-deduplica por evento, objeto e geração. Retry exponencial começa em
-`ALERT_RETRY_SECONDS` e é limitado a uma hora. Stack bloqueada/degradada e
-backup ausente/antigo produzem alertas; falha de entrega não impede reprodução.
-`BACKUP_STALE_HOURS` define a idade máxima; zero desabilita o limiar de idade.
+```dotenv
+HOMESERVER_ALERTS_ENABLED="true"
+HOMESERVER_ALERT_WEBHOOK_URL="https://seu-destino/endpoint"
+HOMESERVER_ALERT_RETRY_SECONDS="60"
+```
 
-Payloads e logs ocultam credenciais. Um timeout após o destinatário aceitar
-pode duplicar a entrega; o destinatário deve tratar geração como idempotente.
-Falha de webhook é observada na outbox sem publicar a URL secreta em logs.
+O supervisor envia JSON somente ao destino configurado. A outbox SQLite
+persistente deduplica eventos e faz retry exponencial; falha de entrega não
+impede reprodução. Reinicie os consumidores após o apply conforme
+[o guia do operador](../operator-guide.md#aplicar-uma-mudança).
+
+Payloads/logs ocultam credenciais. Timeout após aceitação pelo destino pode
+gerar nova entrega, então o destinatário deve tratar a identidade/geração
+do evento de forma idempotente.

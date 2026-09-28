@@ -1,44 +1,25 @@
-# Desenvolvimento e contribuições
+# Desenvolvimento
 
-Use Ubuntu 24.04 ou WSL2, Python 3.12, uv 0.8.0 e Docker Compose. O projeto
-não concede uma licença de redistribuição; a escolha de licença cabe ao
-proprietário. Dependências e imagens mantêm suas próprias licenças.
+O projeto é pessoal. Use Linux/WSL2, Python 3.12, uv e Docker Compose.
+A licença de redistribuição ainda não foi escolhida pelo proprietário.
 
 ```bash
-git clone https://github.com/reisguilherme/homelab-mediaserver.git
-cd homelab-mediaserver
 uv sync --frozen
-uv run scripts/homeserver env init --env-file .env.dev --mode dev
 uv run make lint test-unit test-contract test-integration smoke
-uv run make compose-check test-config test-install test-restic
+uv run make compose-check
 ```
 
-As verificações de instalação e restauração usam fixtures locais, SQLite e
-repositórios Restic temporários. O teste de primeiro boot exige Docker e
-imagens CPU compiladas; consulte os targets do Makefile e a CI.
+O [guia de desenvolvimento](docs/development.md) detalha dependências dos checks.
+Testes usam fixtures locais e diretórios temporários. Não copie bancos, mídia
+ou credenciais do servidor para o checkout.
 
-Faça alterações numa branch, descreva o comportamento resultante e registre
-as verificações relevantes no pull request. Testes de política precisam cobrir
-falhas, reinícios e efeitos externos quando estes mudarem. Fixtures nunca
-devem carregar bancos ou mídia de produção. Operações de filesystem, rede,
-GPU e reprodução precisam de validação Linux ou no hardware correspondente.
+Configuração editável pertence à lista de parâmetros/credenciais do `.env`.
+Portas, paths, URLs internas e demais defaults técnicos pertencem ao código
+ou Compose. Não criar outra camada de deploy, release, backup ou CI/CD.
 
-O catálogo e `.env.example` vêm de `homeserver_common.settings.FIELDS`.
-Ao adicionar configuração, declare tipo, unidade, consumidor e aplicação;
-conecte seu consumidor e regenere o exemplo. Mudança de preferência nativa
-precisa de plan, apply e leitura de confirmação.
+Mudanças de política devem preservar qualidade, importação sequencial de séries, capacidade
+real, importação e exclusão explícita. Cubra efeitos externos e falhas relevantes
+quando esse comportamento mudar. Registre o comando e resultado realmente obtidos.
 
-Prefira os contratos existentes para qualidade, idioma e importação. Áudio de
-release só recebe preferência com metadados declarados; títulos não comprovam
-idioma. Sonarr/Radarr devem manter importação automática desabilitada e
-hardlinks habilitados. Alterar essas guardas muda ownership e capacidade do
-fluxo; consulte [configuração](docs/configuration.md) e
-[arquitetura](docs/architecture.md) antes de modificá-las.
-
-Nunca publique `.env`, credenciais, bancos, mídia ou inventário bruto. Use
-`config show --redacted` e siga [SECURITY.md](SECURITY.md) para vulnerabilidades.
-Não execute `.env` como shell. Builds e releases de produção usam checkout
-limpo, SHA completa, imagem por digest e deploy manual.
-Registre ambiente, comando e resultado real no
-[aceite](docs/evidence/productization-acceptance.md). Testes ignorados, fixtures
-e primeiro boot em containers não comprovam reboot físico ou uma VM vazia.
+Nunca publique `.env`, tokens, dumps ou inventário bruto. Consulte
+[SECURITY.md](SECURITY.md) e a [arquitetura](docs/architecture.md).

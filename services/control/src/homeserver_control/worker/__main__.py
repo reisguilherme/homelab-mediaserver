@@ -14,6 +14,7 @@ from pathlib import Path
 
 import httpx
 
+from homeserver_common.filesystem import filesystem_identity as _media_filesystem_id
 from homeserver_control.adapters.seerr import SeerrAdapter
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
@@ -77,12 +78,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     repository = ReservationRepository(database)
     repository.initialize()
     deletion_jobs = DeletionJobStore(database)
-    key_file = os.environ.get("HOMESERVER_SUBDL_API_KEY_FILE")
-    subdl_key = os.environ.get("HOMESERVER_SUBDL_API_KEY") or (
-        Path(key_file).read_text(encoding="utf-8").strip() if key_file else None
-    )
-    if key_file and not subdl_key:
-        raise ValueError("SubDL key file is empty")
+    subdl_key = os.environ.get("HOMESERVER_SUBDL_API_KEY")
     subtitle_store = SubtitleArtifactStore(database) if subdl_key else None
     torrent_store = TorrentArtifactStore(database)
     subtitle_policy = SubtitlePolicy.from_environment(os.environ)
@@ -242,6 +238,8 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
             retry_seconds=retry_seconds,
             source_retry_seconds=source_retry_seconds,
             search_timeout_seconds=search_timeout,
+            download_window=int(os.environ.get("HOMESERVER_SERIES_DOWNLOAD_WINDOW", "4")),
+            max_active_downloads=int(os.environ.get("HOMESERVER_DOWNLOAD_MAX_ACTIVE", "4")),
         )
         if arr_token:
             series_finalizer_client = httpx.AsyncClient(timeout=httpx.Timeout(http_timeout))
@@ -268,7 +266,10 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 subtitle_policy=subtitle_policy,
             )
     jellyfin_key = os.environ.get("HOMESERVER_JELLYFIN_API_KEY")
-    media_uuid = os.environ.get("HOMESERVER_MEDIA_UUID")
+    media_uuid = _media_filesystem_id(
+        Path(os.environ.get("HOMESERVER_MEDIA_ROOT", "/data")),
+        os.environ.get("HOMESERVER_MEDIA_UUID"),
+    )
     deletion_coordinator = None
     if all(
         (

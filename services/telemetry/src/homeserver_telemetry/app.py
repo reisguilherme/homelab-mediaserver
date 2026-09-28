@@ -6,7 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from .status import StatusProvider
@@ -67,13 +67,15 @@ def create_app(
         )
 
     @app.get("/ui/status", response_class=HTMLResponse)
-    def status_page() -> HTMLResponse:
+    def status_page(request: Request) -> HTMLResponse:
         template = Path(__file__).parent / "templates" / "status.html"
         page = template.read_text(encoding="utf-8")
-        hostname = _service_hostname()
+        hostname = _service_hostname() or request.url.hostname
+        if hostname and ":" in hostname:
+            hostname = f"[{hostname}]"
         page = page.replace(
             "{{SERVICE_ACCESS_STATE}}",
-            "Painéis via Tailscale" if hostname else "Hostname Tailscale não configurado",
+            "Painéis dos serviços",
         )
         for name, key, port in (
             ("JELLYFIN", "JELLYFIN", 8096),

@@ -1,4 +1,4 @@
-"""Authorize one inspected Sonarr episode at a time under a season reservation."""
+"""Prefetch a bounded episode window while reserving each torrent's actual bytes."""
 
 from __future__ import annotations
 
@@ -48,6 +48,17 @@ def _episode_tag(season: int, episode: int) -> str:
 def _single_episode_name(value: str, season: int, episode: int) -> bool:
     tag = _episode_tag(season, episode)
     return bool(re.search(rf"(?<![a-z0-9]){tag}(?![a-z0-9]|[-_. ]?e[0-9])", value, re.I))
+
+
+def _episode_aired(item: dict[str, object]) -> bool | None:
+    """Known future episodes are excluded; unknown dates cannot justify a download."""
+    air_date = item.get("airDateUtc")
+    if not isinstance(air_date, str):
+        return None
+    try:
+        return datetime.fromisoformat(air_date.replace("Z", "+00:00")) <= datetime.now(UTC)
+    except (ValueError, TypeError):
+        return None
 
 
 def _series_rank(
@@ -107,7 +118,14 @@ class SeriesAcquirer(MovieAcquirer):
         subtitle_policy: SubtitlePolicy | None = None,
         source_retry_seconds: float = 300,
         search_timeout_seconds: float = 90,
+        download_window: int = 4,
+        max_active_downloads: int = 4,
     ) -> None:
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 1
+            for value in (download_window, max_active_downloads)
+        ):
+            raise ValueError("series download window and global download limit must be positive")
         super().__init__(
             repository=repository,
             permits=permits,
@@ -136,6 +154,8 @@ class SeriesAcquirer(MovieAcquirer):
         self.gateway_url = gateway_url.rstrip("/") if gateway_url else None
         self.arr_token = arr_token
         self.is_tombstoned = is_tombstoned or (lambda _key: False)
+        # qBittorrent additionally enforces the global active limit across all media.
+        self.download_window = min(download_window, max_active_downloads)
 
     def _rank(self, release, *, original_language=None):
         return _series_rank(release, self.release_policy, original_language=original_language)
@@ -146,7 +166,7 @@ class SeriesAcquirer(MovieAcquirer):
         episodes: list[dict[str, object]],
         season: int,
         reservation_id: str,
-        active_episode_id: int | None,
+        active_episode_ids: set[int],
         imported_episode_ids: set[int],
     ) -> str | None:
         if self.gateway_url is None or self.arr_token is None:
@@ -165,7 +185,7 @@ class SeriesAcquirer(MovieAcquirer):
                 continue
             if self.health_store is not None and self.health_store.is_protected(permit.infohash):
                 continue
-            action = "start" if item["id"] == active_episode_id else "stop"
+            action = "start" if item["id"] in active_episode_ids else "stop"
             changes.append((action, permit.token, permit.infohash))
         # Stop later torrents before considering a capacity-checked start.
         for action, token, infohash in sorted(changes, key=lambda item: item[0] != "stop"):
@@ -447,9 +467,6 @@ class SeriesAcquirer(MovieAcquirer):
             for item in chronological
             if self._episode_imported(item, reservations_by_season, tmdb_id)
         }
-        first_missing = next(
-            (item for item in chronological if item["id"] not in imported_episode_ids), None
-        )
         episode_rows = sorted(
             (
                 item
@@ -457,62 +474,48 @@ class SeriesAcquirer(MovieAcquirer):
                 if isinstance(item, dict)
                 and item.get("seasonNumber") == season
                 and isinstance(item.get("episodeNumber"), int)
+                and not isinstance(item["episodeNumber"], bool)
+                and item["episodeNumber"] > 0
                 and isinstance(item.get("id"), int)
+                and not isinstance(item["id"], bool)
                 and item.get("monitored") is True
             ),
             key=lambda item: item["episodeNumber"],
         )
-        now_utc = datetime.now(UTC)
-        pending: list[dict[str, object]] = []
-        future = False
-        for item in episode_rows:
-            air_date = item.get("airDateUtc")
-            if not isinstance(air_date, str):
-                future = True
-                continue
-            try:
-                aired = datetime.fromisoformat(air_date.replace("Z", "+00:00")) <= now_utc
-            except ValueError:
-                future = True
-                continue
-            if not aired:
-                future = True
-            elif item["id"] not in imported_episode_ids:
-                pending.append(item)
-        active_episode_id = (
-            first_missing["id"]
-            if earlier_catalog_complete
-            and first_missing is not None
-            and first_missing["seasonNumber"] == season
-            and pending
-            and pending[0]["id"] == first_missing["id"]
-            else None
-        )
+        pending = [
+            item for item in chronological
+            if item.get("monitored") is True
+            and _episode_aired(item) is True
+            and item["id"] not in imported_episode_ids
+        ]
+        window = pending[:self.download_window] if earlier_catalog_complete else []
+        active_episode_ids = {item["id"] for item in window}
         queue_status = await self._reconcile_existing_queue(
             episodes=chronological,
             season=season,
             reservation_id=reservation_id,
-            active_episode_id=active_episode_id,
+            active_episode_ids=active_episode_ids,
             imported_episode_ids=imported_episode_ids,
         )
         if queue_status is not None:
             return queue_status
-        if (
-            not earlier_catalog_complete
-            or first_missing is not None
-            and first_missing["seasonNumber"] < season
-        ):
+        if not earlier_catalog_complete:
             return "waiting_previous_season"
         if not episode_rows:
             return "season_not_monitored"
-        if not pending:
+        season_pending = [item for item in pending if item["seasonNumber"] == season]
+        future = any(_episode_aired(item) is not True for item in episode_rows)
+        if not season_pending:
             return "waiting_episodes" if future else "already_imported"
-        if active_episode_id is None:
-            return "waiting_episodes"
+        selected = [item for item in window if item["seasonNumber"] == season]
+        if not selected:
+            return "waiting_previous_season" if window and window[0]["seasonNumber"] < season else (
+                "waiting_download_window"
+            )
         waiting_space = False
         no_source = False
-        # A later episode can start only after Sonarr has imported the earliest missing one.
-        for item in pending[:1]:
+        # Downloads may overlap; SeriesFinalizer alone controls ordered library publication.
+        for item in selected:
             number = item["episodeNumber"]
             scope = _episode_tag(season, number)
             existing = self.permits.get_for_reservation(reservation_id, scope_key=scope)
@@ -527,7 +530,7 @@ class SeriesAcquirer(MovieAcquirer):
             replacement_reason = None
             old_health = None
             if item.get("hasFile") is True:
-                return "waiting_episodes"
+                continue
             if existing is not None and existing.state == "confirmed":
                 probe_state = await self._monitor_probe(existing)
                 if probe_state is not None:

@@ -1,4 +1,4 @@
-"""Single typed registry for operator configuration."""
+"""Typed preferences and fixed defaults for the personal Docker installation."""
 
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -15,11 +15,11 @@ class Field:
     choices: tuple = ()
     minimum: float | None = None
     application: str = "restart"
+    editable: bool = True
 
 
 FIELDS: dict[str, Field] = {}
 PRODUCTION_REQUIRED = (
-    "media_uuid",
     "arr_token",
     "admin_token",
     "csrf_token",
@@ -28,8 +28,6 @@ PRODUCTION_REQUIRED = (
     "sonarr_api_key",
     "radarr_api_key",
     "prowlarr_api_key",
-    "seerr_api_key",
-    "jellyfin_api_key",
     "bazarr_api_key",
 )
 
@@ -39,22 +37,22 @@ def register(names, default, kind="str", consumer="render", **kwargs):
         FIELDS[name.lower()] = Field(default, kind, consumer, **kwargs)
 
 
-register("CONFIG_VERSION", 1, "int", "loader", minimum=1)
-register("ENVIRONMENT", "prod", choices=("dev", "prod"))
-register("INSTANCE_NAME", "homeserver")
+register("CONFIG_VERSION", 1, "int", "loader", minimum=1, editable=False)
+register("ENVIRONMENT", "prod", choices=("dev", "prod"), editable=False)
+register("INSTANCE_NAME", "homeserver", editable=False)
 register("TIMEZONE", "America/Sao_Paulo")
 for key, value in {
-    "INSTALL_ROOT": "/opt/homeserver",
     "APPDATA_ROOT": "/srv/appdata",
     "MEDIA_ROOT": "/srv/data",
     "TRANSCODE_ROOT": "/srv/transcode",
-    "BACKUP_STAGING_ROOT": "/srv/backup-staging",
     "RUN_ROOT": "/run/homeserver",
 }.items():
-    register(key, value, "path")
-register("MEDIA_UUID", "", consumer="mount_guard")
-register("QBIT_GATEWAY_URL", "http://download-gateway:8081", "url", "native_config")
-register("QBIT_QUEUEING_ENABLED", True, "bool", "qbittorrent")
+    register(key, value, "path", editable=False)
+register("MEDIA_UUID", "", consumer="mount_guard", editable=False)
+register(
+    "QBIT_GATEWAY_URL", "http://download-gateway:8081", "url", "native_config", editable=False
+)
+register("QBIT_QUEUEING_ENABLED", True, "bool", "qbittorrent", editable=False)
 register(
     "UPLOAD_LIMIT_BYTES DOWNLOAD_LIMIT_BYTES",
     -1,
@@ -62,12 +60,13 @@ register(
     "qbittorrent",
     unit="bytes/s; -1 derives from Mbit/s",
     minimum=-1,
+    editable=False,
 )
-register("SERVICE_UID SERVICE_GID RENDER_GID VIDEO_GID", 1000, "int", minimum=0)
-register("NETWORK_INTERFACE", "auto", consumer="metrics")
-register("ACCESS_MODE", "tailscale", choices=("tailscale", "lan", "both"))
-register("LAN_BIND_IP TAILSCALE_BIND_IP QBIT_PEER_BIND_IP", "127.0.0.1", "ip")
-register("TAILSCALE_HOSTNAME", "")
+register("SERVICE_UID SERVICE_GID RENDER_GID VIDEO_GID", 1000, "int", minimum=0, editable=False)
+register("NETWORK_INTERFACE", "auto", consumer="metrics", editable=False)
+register("ACCESS_MODE", "tailscale", choices=("tailscale", "lan", "both"), editable=False)
+register("LAN_BIND_IP TAILSCALE_BIND_IP QBIT_PEER_BIND_IP", "127.0.0.1", "ip", editable=False)
+register("TAILSCALE_HOSTNAME", "", editable=False)
 PORTS = dict(
     jellyfin=8096,
     seerr=5055,
@@ -80,18 +79,20 @@ PORTS = dict(
     qbit_monitor=18080,
 )
 for service, port in PORTS.items():
-    register(service.upper() + "_PORT", port, "port", minimum=1)
-    register(service.upper() + "_PUBLIC_URL", "", "url", "dashboard")
+    register(service.upper() + "_PORT", port, "port", minimum=1, editable=False)
+    register(service.upper() + "_PUBLIC_URL", "", "url", "dashboard", editable=False)
 for service, port in {**PORTS, "qbit": 8080}.items():
     if service in ("control", "status", "qbit_monitor"):
         continue
     host = "qbittorrent" if service == "qbit" else service
-    register(service.upper() + "_URL", f"http://{host}:{port}", "url", "native_config")
+    register(
+        service.upper() + "_URL", f"http://{host}:{port}", "url", "native_config", editable=False
+    )
     if service != "qbit":
         register(service.upper() + "_API_KEY", "", consumer="native_config", secret=True)
-register("QBIT_PEER_PORT", 6881, "port", minimum=1)
-register("TRANSCODE_MODE", "cpu", choices=("cpu", "intel"))
-register("INTEL_RENDER_DEVICE", "/dev/dri/renderD128", "path")
+register("QBIT_PEER_PORT", 6881, "port", minimum=1, editable=False)
+register("TRANSCODE_MODE", "cpu", choices=("cpu", "intel"), editable=False)
+register("INTEL_RENDER_DEVICE", "/dev/dri/renderD128", "path", editable=False)
 register("TRANSCODE_THREADS", 0, "int", "jellyfin", minimum=0)
 register("JELLYFIN_ENABLE_MEDIA_DELETION", "", "optionalbool", "jellyfin")
 for name, default in {
@@ -116,8 +117,9 @@ register(
     unit="minutes",
     minimum=-1,
 )
-register("MOVIE_QUEUE_PRIORITY", "seeders", consumer="worker", choices=("seeders",))
-register("SERIES_ORDER", "sequential", consumer="worker", choices=("sequential",))
+register("MOVIE_QUEUE_PRIORITY", "seeders", consumer="worker", choices=("seeders",), editable=False)
+register("SERIES_ORDER", "sequential", consumer="worker", choices=("sequential",), editable=False)
+register("SERIES_DOWNLOAD_WINDOW", 4, "int", "worker", minimum=1)
 for name, value in {
     "WORKER_INTERVAL_SECONDS": 5,
     "SEARCH_RETRY_SECONDS": 300,
@@ -131,15 +133,37 @@ for name, value in {
     "WORKER_CYCLE_TIMEOUT_SECONDS": 900,
     "CAPACITY_SNAPSHOT_MAX_AGE_SECONDS": 30,
 }.items():
-    register(name, value, "float", "worker", unit="seconds", minimum=0.001)
+    register(
+        name,
+        value,
+        "float",
+        "worker",
+        unit="seconds",
+        minimum=0.001,
+        editable=name
+        not in {
+            "MOVIE_PRIORITY_INTERVAL_SECONDS",
+            "HTTP_TIMEOUT_SECONDS",
+            "SEARCH_TIMEOUT_SECONDS",
+            "WORKER_CYCLE_TIMEOUT_SECONDS",
+            "CAPACITY_SNAPSHOT_MAX_AGE_SECONDS",
+        },
+    )
 register("SOURCE_MIN_RATE_KIB", 1024, "float", "worker", unit="KiB/s", minimum=0)
 register("SOURCE_MIN_TIME_GAIN_PERCENT", 20, "float", "worker", unit="percent", minimum=0)
 register("SOURCE_PROBE_ENABLED", True, "bool", "worker")
-register("SOURCE_PROTECTED_HASHES", (), "hashlist", consumer="worker", unit="SHA1 infohash")
-register("WORKER_HEARTBEAT_MAX_AGE_SECONDS", 90, "float", "health", unit="seconds", minimum=1)
-register("SUPERVISOR_INTERVAL_SECONDS", 15, "float", "supervisor", unit="seconds", minimum=1)
-register("SUPERVISOR_MAX_RESTARTS", 5, "int", "supervisor", minimum=1)
-register("SUPERVISOR_RESTART_WINDOW_SECONDS", 300, "float", "supervisor", unit="seconds", minimum=1)
+register(
+    "SOURCE_PROTECTED_HASHES",
+    (),
+    "hashlist",
+    consumer="worker",
+    unit="SHA1 infohash",
+    editable=False,
+)
+register(
+    "WORKER_HEARTBEAT_MAX_AGE_SECONDS", 90, "float", "health", unit="seconds", minimum=1,
+    editable=False,
+)
 register("MEDIA_RESOLUTIONS", ("2160", "1080"), "list", "quality", choices=("720", "1080", "2160"))
 register(
     "MEDIA_SOURCES",
@@ -199,10 +223,10 @@ register(
     consumer="control",
     secret=True,
 )
-register("ADMIN_USERNAME QBIT_USERNAME", "admin", consumer="native_config")
+register("ADMIN_USERNAME QBIT_USERNAME", "root", consumer="native_config")
 register("PROWLARR_INDEXERS", (), "json", "prowlarr", secret=True)
 register("BYPARR_ENABLED", False, "bool")
-register("BYPARR_URL", "http://byparr:8191", "url", "prowlarr")
+register("BYPARR_URL", "http://byparr:8191", "url", "prowlarr", editable=False)
 register("METRICS_INTERVAL_SECONDS", 5, "float", "metrics", unit="seconds", minimum=0.001)
 register("METRICS_MAX_AGE_SECONDS", 90, "float", "metrics", unit="seconds", minimum=0.001)
 register(
@@ -213,33 +237,8 @@ register(
 )
 register("LOG_MAX_SIZE_MB", 10, "int", minimum=1, unit="MB")
 register("LOG_MAX_FILES", 3, "int", minimum=1)
-register("BACKUP_ENABLED ALERTS_ENABLED", False, "bool", "operations")
-register("BACKUP_SCHEDULE", "daily", consumer="backup")
-register(
-    "BACKUP_EXCLUDE_DIRS",
-    (".venv", "__pycache__", "logs", "cache"),
-    "dirnamelist",
-    "backup",
-    unit="directory basenames; empty includes all directories",
-)
-register(
-    "BACKUP_REPOSITORY BACKUP_TARGET_REPOSITORY BACKUP_SSH_HOST "
-    "BACKUP_SSH_USER BACKUP_SSH_KEY_FILE",
-    "",
-    consumer="backup",
-)
-register("BACKUP_PASSWORD BACKUP_TARGET_PASSWORD", "", consumer="backup", secret=True)
-for name, value in {
-    "BACKUP_KEEP_LAST": 3,
-    "BACKUP_KEEP_DAILY": 7,
-    "BACKUP_KEEP_WEEKLY": 4,
-    "BACKUP_KEEP_MONTHLY": 6,
-    "BACKUP_STALE_HOURS": 48,
-    "BACKUP_STAGING_MAX_GIB": 100,
-    "RELEASE_KEEP_COUNT": 3,
-    "ALERT_RETRY_SECONDS": 60,
-}.items():
-    register(name, value, "int", "operations", minimum=0)
+register("ALERTS_ENABLED", False, "bool", "operations")
+register("ALERT_RETRY_SECONDS", 60, "int", "operations", minimum=0)
 register("ALERT_WEBHOOK_URL", "", "url", "alerts", secret=True)
 
 
