@@ -162,16 +162,28 @@ class StorageBreakdown:
 
 
 class StatusProvider:
-    def __init__(self, *, host_path: Path, capacity_path: Path, media_root: Path) -> None:
+    def __init__(
+        self,
+        *,
+        host_path: Path,
+        capacity_path: Path,
+        media_root: Path,
+        host_max_age_seconds: float = 45,
+        capacity_max_age_seconds: float = 30,
+        expected_filesystem_id: str | None = None,
+    ) -> None:
         self.host_path = host_path
         self.capacity_path = capacity_path
         self.storage = StorageBreakdown(media_root)
+        self.host_max_age_seconds = host_max_age_seconds
+        self.capacity_max_age_seconds = capacity_max_age_seconds
+        self.expected_filesystem_id = expected_filesystem_id
 
     def __call__(self) -> dict[str, Any]:
         now = time.time()
         host_snapshot = _read_json(self.host_path) or {}
         host_timestamp = _timestamp(host_snapshot.get("generated_at"))
-        host_state = _state(host_timestamp, now=now, fresh_seconds=45)
+        host_state = _state(host_timestamp, now=now, fresh_seconds=self.host_max_age_seconds)
         host = host_snapshot.get("host") if host_state != "unavailable" else None
         network = host_snapshot.get("network") if host_state != "unavailable" else None
         host = host if isinstance(host, dict) else {}
@@ -179,12 +191,18 @@ class StatusProvider:
 
         capacity_snapshot = _read_json(self.capacity_path) or {}
         capacity_timestamp = _timestamp(capacity_snapshot.get("measured_at"))
-        capacity_state = _state(capacity_timestamp, now=now, fresh_seconds=30)
+        capacity_state = _state(
+            capacity_timestamp, now=now, fresh_seconds=self.capacity_max_age_seconds
+        )
         total = _number(capacity_snapshot.get("total_bytes"))
         free = _number(capacity_snapshot.get("free_bytes"))
         if (
             capacity_state == "unavailable"
             or not capacity_snapshot.get("filesystem_id")
+            or (
+                self.expected_filesystem_id is not None
+                and capacity_snapshot.get("filesystem_id") != self.expected_filesystem_id
+            )
             or type(total) is not int
             or type(free) is not int
             or total <= 0
@@ -203,7 +221,10 @@ class StatusProvider:
                         used = host_used
 
         interface = network.get("interface")
+        backup = host_snapshot.get("backup") if host_state == "ok" else None
+        backup = backup if isinstance(backup, dict) else {}
         return {
+            "schema_version": 2,
             "generated_at": datetime.fromtimestamp(now, UTC).isoformat(),
             "host": {
                 "state": host_state,
@@ -234,4 +255,11 @@ class StatusProvider:
                 "used_bytes": used,
             },
             "storage": self.storage.snapshot(used_bytes=used),
+            "backup": {
+                "state": backup.get("state") if backup.get("state") in {
+                    "ok", "stale", "missing", "disabled", "unavailable"
+                } else "unavailable",
+                "age_seconds": _number(backup.get("age_seconds")),
+                "completed_at": _number(backup.get("completed_at")),
+            },
         }

@@ -7,7 +7,9 @@ from typing import Any
 
 
 def _sanitize(value: Any, key: str | None = None) -> Any:
-    if key and key.lower() in {"token", "password", "secret", "authorization", "api_key"}:
+    if key and key.lower().replace("_", "") in {
+        "token", "password", "secret", "authorization", "apikey", "accesskey"
+    }:
         return "<redacted>"
     if isinstance(value, dict):
         return {str(k): _sanitize(v, str(k)) for k, v in value.items()}
@@ -15,7 +17,8 @@ def _sanitize(value: Any, key: str | None = None) -> Any:
         return [_sanitize(item) for item in value]
     if isinstance(value, str):
         return re.sub(
-            r"([?&])(?:token|key|secret|password)=[^&\s]+", r"\1<redacted>", value, flags=re.I
+            r"([?&])(?:token|key|api_?key|secret|password)=[^&\s]+",
+            r"\1<redacted>", value, flags=re.I,
         )
     return value
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ from homeserver_control.api.deletion_capture import DeletionAdmission, DeletionC
 from homeserver_control.domain.deletion_plan import DeletionPlanError, DeletionPlanner
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.deletion_jobs import DeletionJobStore
+from homeserver_control.persistence.heartbeat import WorkerHeartbeatStore
 from homeserver_control.recovery import recovery_mode_blocks
 
 CapacityProvider = Callable[[], dict[str, Any]]
@@ -34,7 +36,7 @@ def _default_capacity() -> dict[str, Any]:
     }
 
 
-def _capacity_from_snapshot(path: Path) -> dict[str, Any]:
+def _capacity_from_snapshot(path: Path, *, max_age_seconds: float = 30) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
@@ -51,12 +53,23 @@ def _capacity_from_snapshot(path: Path) -> dict[str, Any]:
             or free < 0
             or free > total
             or type(measured) not in (int, float)
-            or not 0 <= time.time() - measured <= 30
+            or not 0 <= time.time() - measured <= max_age_seconds
         ):
             return _default_capacity()
         return payload
     except (OSError, ValueError, TypeError):
         return _default_capacity()
+
+
+def _host_status_from_environment() -> dict[str, Any]:
+    path = Path(os.environ.get("HOMESERVER_HOST_SNAPSHOT", "/run/homeserver/host.json"))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or not isinstance(payload.get("host"), dict):
+        raise ValueError("invalid host snapshot")
+    return {
+        key: payload.get(key)
+        for key in ("schema_version", "generated_at", "host", "network", "storage")
+    }
 
 
 @dataclass
@@ -82,10 +95,13 @@ class ControlState:
     planner: DeletionPlanner | None = field(init=False, default=None)
     operations: dict[str, dict[str, Any]] = field(default_factory=dict)
     events: list[dict[str, Any]] = field(default_factory=list)
-    acknowledged_event_id: int = 0
-    seed_limit: dict[str, Any] = field(default_factory=dict)
     repository: ReservationRepository | None = field(init=False, default=None)
     deletion_admission: DeletionAdmission | None = None
+    worker_health_required: bool = False
+    worker_max_age_seconds: float = 90
+    maintenance_path: str | Path | None = None
+    expected_filesystem_id: str | None = None
+    capacity_max_age_seconds: float = 30
 
     def __post_init__(self) -> None:
         if self.media_roots:
@@ -106,15 +122,6 @@ class DeletionConfirmRequest(BaseModel):
     operation_id: str = Field(min_length=1, max_length=128)
 
 
-class EventAckRequest(BaseModel):
-    sequence: int = Field(ge=0)
-
-
-class SeedLimitRequest(BaseModel):
-    bytes_per_second: int = Field(ge=0, le=2_500_000)
-    reason: str = Field(min_length=1, max_length=100)
-
-
 def _configured(value: str) -> bool:
     return bool(value) and value != "unconfigured"
 
@@ -128,18 +135,29 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
             media_roots=roots,
             admin_token=os.environ.get("HOMESERVER_ADMIN_TOKEN", "unconfigured"),
             csrf_token=os.environ.get("HOMESERVER_CSRF_TOKEN", "unconfigured"),
-            collector_token=os.environ.get("HOMESERVER_COLLECTOR_TOKEN", "unconfigured"),
             db_path=os.environ.get("HOMESERVER_DB_PATH"),
             recovery_mode_path=os.environ.get(
                 "HOMESERVER_RECOVERY_MODE", "/var/lib/homeserver/RECOVERY_MODE"
             ),
+            worker_health_required=True,
+            expected_filesystem_id=os.environ.get("HOMESERVER_MEDIA_UUID") or None,
+            capacity_max_age_seconds=float(
+                os.environ.get("HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS", "30")
+            ),
+            worker_max_age_seconds=float(
+                os.environ.get("HOMESERVER_WORKER_HEARTBEAT_MAX_AGE_SECONDS", "90")
+            ),
+            maintenance_path=Path(os.environ.get("HOMESERVER_RUN_ROOT", "/run/homeserver"))
+            / "maintenance",
             capacity_provider=lambda: _capacity_from_snapshot(
                 Path(
-                    os.environ.get(
-                        "HOMESERVER_CAPACITY_SNAPSHOT", "/run/homeserver/capacity.json"
-                    )
-                )
+                    os.environ.get("HOMESERVER_CAPACITY_SNAPSHOT", "/run/homeserver/capacity.json")
+                ),
+                max_age_seconds=float(
+                    os.environ.get("HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS", "30")
+                ),
             ),
+            telemetry_provider=lambda: _host_status_from_environment(),
         )
         media_uuid = os.environ.get("HOMESERVER_MEDIA_UUID", "")
         if media_uuid and state.db_path is not None:
@@ -157,12 +175,30 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
                 radarr_api_key=os.environ.get("HOMESERVER_RADARR_API_KEY", ""),
                 sonarr_url=os.environ.get("HOMESERVER_SONARR_URL", ""),
                 sonarr_api_key=os.environ.get("HOMESERVER_SONARR_API_KEY", ""),
+                http_timeout_seconds=float(os.environ.get("HOMESERVER_HTTP_TIMEOUT_SECONDS", "15")),
             )
 
     app = FastAPI(title="HomeServer control API", version="1")
 
+    def worker_is_ready() -> bool:
+        if not state.worker_health_required:
+            return True
+        if state.db_path is None:
+            return False
+        try:
+            return WorkerHeartbeatStore(state.db_path).ready(
+                now=time.time(), max_age=state.worker_max_age_seconds
+            )
+        except (OSError, ValueError, sqlite3.Error):
+            return False
+
     def admission_enabled() -> bool:
-        return state.admission_enabled and not recovery_mode_blocks(state.recovery_mode_path)
+        return (
+            state.admission_enabled
+            and not recovery_mode_blocks(state.recovery_mode_path)
+            and not (state.maintenance_path is not None and Path(state.maintenance_path).exists())
+            and worker_is_ready()
+        )
 
     def require_admin(
         x_admin_token: str | None,
@@ -174,12 +210,6 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
             raise HTTPException(status_code=401, detail="invalid admin credential")
         if mutation and csrf != state.csrf_token:
             raise HTTPException(status_code=403, detail="csrf token required")
-        if mutation and not admission_enabled():
-            raise HTTPException(status_code=503, detail="admission blocked by recovery mode")
-
-    def require_collector(x_collector_token: str | None, *, mutation: bool = False) -> None:
-        if not _configured(state.collector_token) or x_collector_token != state.collector_token:
-            raise HTTPException(status_code=401, detail="invalid collector credential")
         if mutation and not admission_enabled():
             raise HTTPException(status_code=503, detail="admission blocked by recovery mode")
 
@@ -202,16 +232,23 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
             and type(capacity.get("free_bytes")) is int
             and capacity["free_bytes"] >= 0
             and type(capacity.get("measured_at")) in (int, float)
-            and 0 <= time.time() - capacity["measured_at"] <= 30
+            and capacity["free_bytes"] <= capacity["total_bytes"]
+            and (
+                state.expected_filesystem_id is None
+                or capacity["filesystem_id"] == state.expected_filesystem_id
+            )
+            and 0 <= time.time() - capacity["measured_at"] <= state.capacity_max_age_seconds
         )
+        worker_ready = worker_is_ready()
         ready = (
             admission_enabled()
             and _configured(state.admin_token)
-            and _configured(state.collector_token)
+            and _configured(state.csrf_token)
             and bool(state.media_roots)
             and state.planner is not None
             and state.repository is not None
             and capacity_ready
+            and worker_ready
         )
         if not ready:
             return JSONResponse(
@@ -257,16 +294,18 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
         require_admin(x_admin_token)
         if state.deletion_admission is None:
             raise HTTPException(status_code=503, detail="coordinated deletion unavailable")
-        return {"items": [
-            {
-                "item_id": job["item_id"],
-                "item_type": job["item_type"],
-                "stage": job["stage"],
-                "error": job["error"],
-                "updated_at": job["updated_at"],
-            }
-            for job in state.deletion_admission.jobs.list()
-        ]}
+        return {
+            "items": [
+                {
+                    "item_id": job["item_id"],
+                    "item_type": job["item_type"],
+                    "stage": job["stage"],
+                    "error": job["error"],
+                    "updated_at": job["updated_at"],
+                }
+                for job in state.deletion_admission.jobs.list()
+            ]
+        }
 
     @app.get("/ui/queue", response_class=HTMLResponse)
     def queue_page(x_admin_token: str | None = Header(default=None)) -> Response:
@@ -380,36 +419,6 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
             return state.telemetry_provider()
         except Exception as error:
             raise HTTPException(status_code=503, detail="telemetry unavailable") from error
-
-    @app.get("/internal/v1/events")
-    def events(
-        x_collector_token: str | None = Header(default=None),
-        after_id: int = Query(default=0, ge=0),
-        limit: int = Query(default=100, ge=1, le=1000),
-    ) -> dict[str, Any]:
-        require_collector(x_collector_token)
-        selected = [event for event in state.events if int(event.get("id", 0)) > after_id]
-        return {"events": selected[:limit], "next_id": after_id + len(selected[:limit])}
-
-    @app.post("/internal/v1/events/ack")
-    def events_ack(
-        payload: EventAckRequest,
-        x_collector_token: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        require_collector(x_collector_token, mutation=True)
-        if payload.sequence < state.acknowledged_event_id:
-            raise HTTPException(status_code=409, detail="acknowledgement moved backwards")
-        state.acknowledged_event_id = payload.sequence
-        return {"acknowledged": state.acknowledged_event_id}
-
-    @app.post("/internal/v1/seed-limit")
-    def seed_limit(
-        payload: SeedLimitRequest,
-        x_collector_token: str | None = Header(default=None),
-    ) -> dict[str, Any]:
-        require_collector(x_collector_token, mutation=True)
-        state.seed_limit = payload.model_dump()
-        return state.seed_limit
 
     return app
 

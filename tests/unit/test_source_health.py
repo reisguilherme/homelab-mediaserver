@@ -22,7 +22,7 @@ def test_zero_peer_stall_retries_after_five_minutes_and_survives_restart(tmp_pat
 
 
 def test_progress_and_queue_pause_reset_stall_window(tmp_path):
-    store = SourceHealthStore(tmp_path / "control.sqlite")
+    store = SourceHealthStore(tmp_path / "control.sqlite", slow_seconds=3600)
     assert store.observe("permit-1", _health(), now=1000) is None
     assert store.observe("permit-1", _health(downloaded=10, left=99_999_990_000), now=2700) is None
     assert store.observe("permit-1", _health(downloaded=10, left=99_999_990_000), now=2999) is None
@@ -35,7 +35,7 @@ def test_progress_and_queue_pause_reset_stall_window(tmp_path):
 
 
 def test_slow_progress_uses_hour_average_not_instantaneous_speed(tmp_path):
-    store = SourceHealthStore(tmp_path / "control.sqlite")
+    store = SourceHealthStore(tmp_path / "control.sqlite", slow_seconds=3600)
     assert store.observe("permit-1", _health(seeds=2, state="downloading"), now=1000) is None
     assert store.observe("permit-1", _health(downloaded=2_000_000_000,
                                               left=98_000_000_000,
@@ -45,6 +45,17 @@ def test_slow_progress_uses_hour_average_not_instantaneous_speed(tmp_path):
                                               left=98_000_000_000,
                                               seeds=2, state="downloading",
                                               speed=0), now=4600) == "slow"
+
+
+def test_default_slow_window_is_five_minutes_and_uses_progress(tmp_path):
+    store = SourceHealthStore(tmp_path / "control.sqlite")
+    assert store.observe("p", _health(seeds=5, state="downloading"), now=1000) is None
+    assert store.observe("p", _health(downloaded=29_900_000, left=99_970_100_000,
+                                     seeds=5, speed=5_000_000, state="downloading"),
+                         now=1299) is None
+    assert store.observe("p", _health(downloaded=30_000_000, left=99_970_000_000,
+                                     seeds=5, speed=5_000_000, state="downloading"),
+                         now=1300) == "slow"
 
 
 def test_fast_progress_and_completed_torrent_never_trigger_failover(tmp_path):

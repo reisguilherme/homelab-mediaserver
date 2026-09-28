@@ -31,7 +31,6 @@ class MoviePrioritizer:
         response = await self.client.post(
             f"{self.gateway_url}/internal/prioritize-movies",
             headers={"X-Arr-Token": self.arr_token},
-            timeout=10.0,
         )
         response.raise_for_status()
         result = response.json()

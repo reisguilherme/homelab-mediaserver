@@ -1,3 +1,0 @@
-# Template only. The broker address, CA and credentials come from secrets.yaml.
-# The final package must subscribe only to homeserver/v1/server/snapshot and
-# homeserver/v1/server/availability.

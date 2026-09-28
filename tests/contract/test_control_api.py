@@ -86,42 +86,39 @@ def test_deletion_requires_csrf_and_confirmation_is_idempotent(client: TestClien
     assert confirmed.json()["operation_id"] == "delete-operation-1"
     repeated = client.post("/api/v1/deletions", headers=_admin_headers(), json=payload)
     assert repeated.status_code == 202
-    operation = client.get(
-        "/api/v1/operations/delete-operation-1", headers=_admin_headers()
-    ).json()
+    operation = client.get("/api/v1/operations/delete-operation-1", headers=_admin_headers()).json()
     assert operation["state"] == "authorized"
 
 
-def test_internal_collector_routes_do_not_accept_admin_token(client: TestClient) -> None:
+def test_removed_cyd_routes_are_unavailable(client: TestClient) -> None:
     assert (
         client.get("/internal/v1/events", headers={"X-Collector-Token": "admin-token"}).status_code
-        == 401
+        == 404
     )
     response = client.post(
         "/internal/v1/seed-limit",
         headers={"X-Collector-Token": "collector-token"},
         json={"bytes_per_second": 625_000, "reason": "remote_playback"},
     )
-    assert response.status_code == 200
-    assert response.json()["bytes_per_second"] == 625_000
+    assert response.status_code == 404
 
 
 def test_recovery_mode_exposes_blocked_admission_at_top_level() -> None:
-    root = Path('.runtime') / f'recovery-{uuid4().hex}'
+    root = Path(".runtime") / f"recovery-{uuid4().hex}"
     root.mkdir(parents=True)
-    media = root / 'media'
+    media = root / "media"
     media.mkdir()
     state = ControlState(
         media_roots=(media,),
-        admin_token='admin-token',
-        csrf_token='csrf-token',
-        collector_token='collector-token',
+        admin_token="admin-token",
+        csrf_token="csrf-token",
+        collector_token="collector-token",
         admission_enabled=False,
     )
     try:
-        response = TestClient(create_app(state=state)).get('/health/ready')
+        response = TestClient(create_app(state=state)).get("/health/ready")
         assert response.status_code == 503
-        assert response.json()['admission_enabled'] is False
+        assert response.json()["admission_enabled"] is False
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -197,30 +194,30 @@ def test_recovery_marker_added_after_start_blocks_readiness_and_mutations() -> N
             headers={"X-Collector-Token": "collector-token"},
             json={"bytes_per_second": 625_000, "reason": "remote_playback"},
         )
-        assert seed_limit.status_code == 503
+        assert seed_limit.status_code == 404
         assert item.exists()
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
 
 def test_readiness_requires_persistent_state_and_valid_capacity() -> None:
-    root = Path('.runtime') / f'readiness-{uuid4().hex}'
+    root = Path(".runtime") / f"readiness-{uuid4().hex}"
     root.mkdir(parents=True)
-    media = root / 'media'
+    media = root / "media"
     media.mkdir()
     try:
         state = ControlState(
             media_roots=(media,),
-            admin_token='admin-token',
-            collector_token='collector-token',
+            admin_token="admin-token",
+            collector_token="collector-token",
             capacity_provider=lambda: {
-                'filesystem_id': None,
-                'total_bytes': 0,
-                'free_bytes': 0,
-                'measured_at': None,
+                "filesystem_id": None,
+                "total_bytes": 0,
+                "free_bytes": 0,
+                "measured_at": None,
             },
         )
-        response = TestClient(create_app(state=state)).get('/health/ready')
+        response = TestClient(create_app(state=state)).get("/health/ready")
         assert response.status_code == 503
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -269,8 +266,14 @@ def test_default_app_readiness_uses_capacity_file(
     monkeypatch.setenv("HOMESERVER_DB_PATH", str(tmp_path / "control.sqlite"))
     monkeypatch.setenv("HOMESERVER_ADMIN_TOKEN", "admin-token")
     monkeypatch.setenv("HOMESERVER_COLLECTOR_TOKEN", "collector-token")
+    monkeypatch.setenv("HOMESERVER_CSRF_TOKEN", "csrf-token")
     monkeypatch.setenv("HOMESERVER_CAPACITY_SNAPSHOT", str(snapshot))
     monkeypatch.setenv("HOMESERVER_RECOVERY_MODE", str(tmp_path / "RECOVERY_MODE"))
+    from homeserver_control.persistence.heartbeat import WorkerHeartbeatStore
+
+    WorkerHeartbeatStore(tmp_path / "control.sqlite").write(
+        now=datetime.now(UTC).timestamp(), initialized=True, state="running", success=True
+    )
     client = TestClient(create_app())
     assert client.get("/health/ready").status_code == 200
     snapshot.unlink()

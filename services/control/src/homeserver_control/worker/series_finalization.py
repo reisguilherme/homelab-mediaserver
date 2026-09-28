@@ -21,11 +21,12 @@ from .finalization import (
 from .series_acquisition import _episode_tag, _single_episode_name
 from .subdl import SubDLSource
 from .subtitle_language import (
-    audio_is_brazilian_portuguese,
+    SubtitlePolicy,
     has_embedded_english_subtitle,
     is_brazilian_portuguese_subtitle,
     is_english_subtitle,
 )
+from .subtitle_recovery import recover_subtitle
 from .validation import ValidationError, validate_media
 
 _SEASON_KEY = re.compile(r"season:tmdb:([1-9][0-9]*):([0-9]+)")
@@ -33,24 +34,39 @@ _SEASON_KEY = re.compile(r"season:tmdb:([1-9][0-9]*):([0-9]+)")
 
 class SeriesFinalizer(MovieFinalizer):
     def __init__(
-        self, *, repository: ReservationRepository, permits: PermitRegistry,
-        torrent_root: str | Path, gateway_url: str, arr_token: str,
-        sonarr_url: str, sonarr_api_key: str,
+        self,
+        *,
+        repository: ReservationRepository,
+        permits: PermitRegistry,
+        torrent_root: str | Path,
+        gateway_url: str,
+        arr_token: str,
+        sonarr_url: str,
+        sonarr_api_key: str,
         media_root: str | Path = "/data/media/tv",
         client: httpx.AsyncClient | None = None,
         subtitle_source: SubDLSource | None = None,
+        subtitle_policy: SubtitlePolicy | None = None,
         capacity_provider: Callable[[], Awaitable[CapacityEvidence]] | None = None,
         import_uid: int | None = None,
         import_gid: int | None = None,
         is_tombstoned: Callable[[str], bool] | None = None,
     ) -> None:
         super().__init__(
-            repository=repository, permits=permits, torrent_root=torrent_root,
-            gateway_url=gateway_url, arr_token=arr_token,
-            radarr_url=sonarr_url, radarr_api_key=sonarr_api_key,
-            media_root=media_root, client=client, subtitle_source=subtitle_source,
+            repository=repository,
+            permits=permits,
+            torrent_root=torrent_root,
+            gateway_url=gateway_url,
+            arr_token=arr_token,
+            radarr_url=sonarr_url,
+            radarr_api_key=sonarr_api_key,
+            media_root=media_root,
+            client=client,
+            subtitle_source=subtitle_source,
+            subtitle_policy=subtitle_policy,
             capacity_provider=capacity_provider,
-            import_uid=import_uid, import_gid=import_gid,
+            import_uid=import_uid,
+            import_gid=import_gid,
         )
         self.sonarr_url = sonarr_url.rstrip("/")
         self.is_tombstoned = is_tombstoned or (lambda _key: False)
@@ -64,15 +80,21 @@ class SeriesFinalizer(MovieFinalizer):
         if not isinstance(series, list):
             raise ValidationError("Sonarr series lookup is invalid")
         match = next(
-            (item for item in series if isinstance(item, dict)
-             and item.get("tmdbId") == tmdb_id and isinstance(item.get("id"), int)),
+            (
+                item
+                for item in series
+                if isinstance(item, dict)
+                and item.get("tmdbId") == tmdb_id
+                and isinstance(item.get("id"), int)
+            ),
             None,
         )
         if match is None:
             return []
         response = await self.client.get(
             f"{self.sonarr_url}/api/v3/episode",
-            params={"seriesId": match["id"]}, headers=self.radarr_headers,
+            params={"seriesId": match["id"]},
+            headers=self.radarr_headers,
         )
         response.raise_for_status()
         episodes = response.json()
@@ -95,14 +117,14 @@ class SeriesFinalizer(MovieFinalizer):
         return seasons
 
     def _episode_imported(
-        self, episode: dict[str, object], reservations_by_season: dict[int, str],
+        self,
+        episode: dict[str, object],
+        reservations_by_season: dict[int, str],
         series_tmdb_id: int,
     ) -> bool:
         season = episode["seasonNumber"]
         number = episode["episodeNumber"]
-        if self.is_tombstoned(
-            f"episode:tmdb:{series_tmdb_id}:{_episode_tag(season, number)}"
-        ):
+        if self.is_tombstoned(f"episode:tmdb:{series_tmdb_id}:{_episode_tag(season, number)}"):
             return True
         if episode.get("hasFile") is not True:
             return False
@@ -113,7 +135,8 @@ class SeriesFinalizer(MovieFinalizer):
             reservation_id, scope_key=_episode_tag(season, number)
         )
         return (
-            permit is None or permit.state != "confirmed"
+            permit is None
+            or permit.state != "confirmed"
             or self.repository.episode_import_state(permit.permit_id) == "complete"
         )
 
@@ -131,7 +154,7 @@ class SeriesFinalizer(MovieFinalizer):
         prefix = "/data/media/tv/"
         if not isinstance(raw, str) or not raw.startswith(prefix):
             raise ValidationError("Sonarr episode file is outside the TV library")
-        relative = PurePosixPath(raw[len(prefix):])
+        relative = PurePosixPath(raw[len(prefix) :])
         if any(part in {"..", ".", ""} for part in relative.parts):
             raise ValidationError("Sonarr episode file path is invalid")
         root = self.media_root.resolve(strict=True)
@@ -150,9 +173,7 @@ class SeriesFinalizer(MovieFinalizer):
         self._ensure_subtitle_for_video(video, permit, permit.scope_key)
 
     @staticmethod
-    def _validate_selected_episode_subtitles(
-        permit: Permit, *, season: int, number: int
-    ) -> None:
+    def _validate_selected_episode_subtitles(permit: Permit, *, season: int, number: int) -> None:
         if any(
             PurePosixPath(name).suffix.lower() in _SUBTITLE
             and not _single_episode_name(PurePosixPath(name).name, season, number)
@@ -165,15 +186,19 @@ class SeriesFinalizer(MovieFinalizer):
     ) -> tuple[str, bool, bool, bool, str | None] | None:
         response = await self.client.get(
             f"{self.gateway_url}/api/v2/torrents/info",
-            params={"hashes": permit.infohash}, headers=self.gateway_headers,
+            params={"hashes": permit.infohash},
+            headers=self.gateway_headers,
         )
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, list):
             raise ValidationError("gateway torrent response is invalid")
         torrent = next(
-            (item for item in payload if isinstance(item, dict)
-             and item.get("hash", "").lower() == permit.infohash),
+            (
+                item
+                for item in payload
+                if isinstance(item, dict) and item.get("hash", "").lower() == permit.infohash
+            ),
             None,
         )
         if torrent is None:
@@ -186,21 +211,22 @@ class SeriesFinalizer(MovieFinalizer):
         content = self._local_path(content_path)
         response = await self.client.get(
             f"{self.gateway_url}/api/v2/torrents/files",
-            params={"hash": permit.infohash}, headers=self.gateway_headers,
+            params={"hash": permit.infohash},
+            headers=self.gateway_headers,
         )
         response.raise_for_status()
         files = response.json()
         if not isinstance(files, list):
             raise ValidationError("gateway file response is invalid")
         sizes = {
-            item["name"]: item["size"] for item in files
-            if isinstance(item, dict) and isinstance(item.get("name"), str)
+            item["name"]: item["size"]
+            for item in files
+            if isinstance(item, dict)
+            and isinstance(item.get("name"), str)
             and isinstance(item.get("size"), int)
         }
         selected = []
-        self._validate_selected_episode_subtitles(
-            permit, season=season, number=number
-        )
+        self._validate_selected_episode_subtitles(permit, season=season, number=number)
         for relative in permit.selected_files:
             path = self._local_path(f"/data/torrents/{relative}")
             if relative not in sizes or path.stat().st_size != sizes[relative]:
@@ -210,38 +236,44 @@ class SeriesFinalizer(MovieFinalizer):
             selected.append(path)
         videos = [path for path in selected if path.suffix.lower() in _VIDEO]
         subtitle_files = [path for path in selected if path.suffix.lower() in _SUBTITLE]
-        if any(
-            not (is_brazilian_portuguese_subtitle(str(path))
-                 or is_english_subtitle(str(path)))
-            for path in subtitle_files
-        ):
+        if any(not self.subtitle_policy.matches(str(path)) for path in subtitle_files):
             raise ValidationError("selected subtitle is not Brazilian Portuguese or English")
         brazilian_subtitles = [
-            path for path in subtitle_files
-            if is_brazilian_portuguese_subtitle(str(path))
+            path for path in subtitle_files if is_brazilian_portuguese_subtitle(str(path))
         ]
-        english_subtitles = [
-            path for path in subtitle_files if is_english_subtitle(str(path))
-        ]
-        if (
-            len(videos) != 1 or not _single_episode_name(videos[0].name, season, number)
-        ):
+        english_subtitles = [path for path in subtitle_files if is_english_subtitle(str(path))]
+        if len(videos) != 1 or not _single_episode_name(videos[0].name, season, number):
             raise ValidationError("episode video or Brazilian Portuguese subtitle is missing")
         validated = validate_media(videos[0], maximum_bytes=permit.budget_bytes)
         if not validated.probe.audio_languages:
             raise ValidationError("episode has no audio stream")
         if subtitle_files and any(not _subtitle_has_content(path) for path in subtitle_files):
             raise ValidationError("selected subtitle content is not valid")
-        brazilian_ready = bool(brazilian_subtitles) or self.subtitle_store.get(
-            permit.reservation_id, permit.scope_key, permit.infohash, language="BR_PT"
-        ) is not None
-        english_ready = bool(english_subtitles) or self.subtitle_store.get(
-            permit.reservation_id, permit.scope_key, permit.infohash, language="EN"
-        ) is not None or has_embedded_english_subtitle(validated.probe)
-        original_ptbr = audio_is_brazilian_portuguese(validated.probe)
+        brazilian_ready = (
+            bool(brazilian_subtitles)
+            or self.subtitle_store.get(
+                permit.reservation_id, permit.scope_key, permit.infohash, language="BR_PT"
+            )
+            is not None
+        )
+        english_ready = (
+            bool(english_subtitles)
+            or self.subtitle_store.get(
+                permit.reservation_id, permit.scope_key, permit.infohash, language="EN"
+            )
+            is not None
+            or (
+                self.subtitle_policy.allow_generic_english
+                and has_embedded_english_subtitle(validated.probe)
+            )
+        )
+        original_ptbr = self.subtitle_policy.waives_subtitles(validated.probe)
         name = torrent.get("name")
         return (
-            content_path, brazilian_ready, english_ready, original_ptbr,
+            content_path,
+            brazilian_ready,
+            english_ready,
+            original_ptbr,
             name if isinstance(name, str) else None,
         )
 
@@ -257,34 +289,41 @@ class SeriesFinalizer(MovieFinalizer):
         reservations_by_season = self._requested_seasons(tmdb_id)
         reservations_by_season.setdefault(season, reservation_id)
         chronological = sorted(
-            (item for item in episodes
-             if isinstance(item.get("seasonNumber"), int)
-             and not isinstance(item["seasonNumber"], bool)
-             and item["seasonNumber"] in reservations_by_season
-             and isinstance(item.get("episodeNumber"), int)
-             and not isinstance(item["episodeNumber"], bool)
-             and item["episodeNumber"] > 0),
+            (
+                item
+                for item in episodes
+                if isinstance(item.get("seasonNumber"), int)
+                and not isinstance(item["seasonNumber"], bool)
+                and item["seasonNumber"] in reservations_by_season
+                and isinstance(item.get("episodeNumber"), int)
+                and not isinstance(item["episodeNumber"], bool)
+                and item["episodeNumber"] > 0
+            ),
             key=lambda item: (item["seasonNumber"], item["episodeNumber"]),
         )
         known_seasons = {item["seasonNumber"] for item in chronological}
         prior_season_missing = any(
-            number < season and number not in known_seasons
-            for number in reservations_by_season
+            number < season and number not in known_seasons for number in reservations_by_season
         )
         first_missing = next(
-            (item for item in chronological
-             if not self._episode_imported(item, reservations_by_season, tmdb_id)), None
+            (
+                item
+                for item in chronological
+                if not self._episode_imported(item, reservations_by_season, tmdb_id)
+            ),
+            None,
         )
         seen_complete = False
         for episode in sorted(
-            (item for item in episodes if item.get("seasonNumber") == season
-             and isinstance(item.get("episodeNumber"), int)),
+            (
+                item
+                for item in episodes
+                if item.get("seasonNumber") == season and isinstance(item.get("episodeNumber"), int)
+            ),
             key=lambda item: item["episodeNumber"],
         ):
             number = episode["episodeNumber"]
-            if self.is_tombstoned(
-                f"episode:tmdb:{tmdb_id}:{_episode_tag(season, number)}"
-            ):
+            if self.is_tombstoned(f"episode:tmdb:{tmdb_id}:{_episode_tag(season, number)}"):
                 continue
             permit = self.permits.get_for_reservation(
                 reservation_id, scope_key=_episode_tag(season, number)
@@ -294,7 +333,8 @@ class SeriesFinalizer(MovieFinalizer):
             if prior_season_missing:
                 return "waiting_previous_season"
             if first_missing is not None and (
-                first_missing["seasonNumber"], first_missing["episodeNumber"]
+                first_missing["seasonNumber"],
+                first_missing["episodeNumber"],
             ) < (season, number):
                 return (
                     "waiting_previous_season"
@@ -320,46 +360,47 @@ class SeriesFinalizer(MovieFinalizer):
                 return "complete"
             if episode.get("hasFile") is True:
                 return "already_imported_without_validation"
-            validated_download = await self._validate_download(
-                permit, season=season, number=number
-            )
+            validated_download = await self._validate_download(permit, season=season, number=number)
             if validated_download is None:
                 return "downloading"
             content_path, brazilian_ready, english_ready, original_ptbr, title = validated_download
-            if not original_ptbr and not brazilian_ready:
-                if self.subtitle_source is not None and title:
-                    found = await self.subtitle_source.fetch(
-                        tmdb_id=int(match.group(1)), release_title=title,
-                        season=season, episode=number,
-                    )
-                    if found is not None:
-                        self.subtitle_store.put(
-                            reservation_id, permit.scope_key, permit.infohash, found
-                        )
-                        brazilian_ready = True
-            if not original_ptbr and not brazilian_ready and not english_ready:
-                if self.subtitle_source is not None and title:
-                    found = await self.subtitle_source.fetch(
-                        tmdb_id=int(match.group(1)), release_title=title,
-                        season=season, episode=number, language="EN",
-                    )
-                    if found is not None:
-                        self.subtitle_store.put(
-                            reservation_id, permit.scope_key, permit.infohash, found,
-                            language="EN",
-                        )
-                        english_ready = True
-                if not english_ready:
+
+            async def fetch_subtitle(language, match_mode, title=title, number=number):
+                if self.subtitle_source is None or not title:
+                    return None
+                return await self.subtitle_source.fetch(
+                    tmdb_id=int(match.group(1)),
+                    release_title=title,
+                    season=season,
+                    episode=number,
+                    language=language,
+                    match_mode=match_mode,
+                )
+
+            if not original_ptbr:
+                present = {"BR_PT": brazilian_ready, "EN": english_ready}
+                result = await recover_subtitle(
+                    self.subtitle_policy,
+                    fetch_subtitle,
+                    already_present=present.get,
+                )
+                if result is None:
                     return "waiting_subtitles"
+                if result.content:
+                    self.subtitle_store.put(
+                        reservation_id,
+                        permit.scope_key,
+                        permit.infohash,
+                        result.content,
+                        language=result.language,
+                        replace_language=True,
+                    )
             if not await self._hardlink_import_enabled():
                 return "import_guard"
             selected = [
-                self._local_path(f"/data/torrents/{relative}")
-                for relative in permit.selected_files
+                self._local_path(f"/data/torrents/{relative}") for relative in permit.selected_files
             ]
-            video = next(
-                (path for path in selected if path.suffix.lower() in _VIDEO), None
-            )
+            video = next((path for path in selected if path.suffix.lower() in _VIDEO), None)
             if video is None:
                 raise ValidationError("permit does not identify one episode video")
             hardlink_ready = self._can_hardlink_video(video)
@@ -373,8 +414,10 @@ class SeriesFinalizer(MovieFinalizer):
                 f"{self.sonarr_url}/api/v3/command",
                 headers=self.radarr_headers,
                 json={
-                    "name": "DownloadedEpisodesScan", "path": content_path,
-                    "downloadClientId": permit.infohash.upper(), "importMode": "Copy",
+                    "name": "DownloadedEpisodesScan",
+                    "path": content_path,
+                    "downloadClientId": permit.infohash.upper(),
+                    "importMode": "Copy",
                 },
             )
             response.raise_for_status()

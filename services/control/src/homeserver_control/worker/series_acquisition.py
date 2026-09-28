@@ -27,10 +27,12 @@ from .acquisition import (
     _queue_only_rejection,
 )
 from .capacity_evidence import CapacityEvidence
-from .release_quality import release_rank, release_seeders
+from .release_quality import media_runtime_minutes, release_rank, release_seeders
 from .source_health import SourceHealthStore
+from .source_probe import canonical_quality
 from .subdl import SubDLSource
-from .subtitle_language import is_brazilian_portuguese_subtitle, is_english_subtitle
+from .subtitle_language import SubtitlePolicy, is_brazilian_portuguese_subtitle, is_english_subtitle
+from .subtitle_recovery import recover_subtitle
 
 LOGGER = logging.getLogger(__name__)
 _SEASON_KEY = re.compile(r"season:tmdb:([1-9][0-9]*):([0-9]+)")
@@ -48,7 +50,9 @@ def _single_episode_name(value: str, season: int, episode: int) -> bool:
     return bool(re.search(rf"(?<![a-z0-9]){tag}(?![a-z0-9]|[-_. ]?e[0-9])", value, re.I))
 
 
-def _series_rank(release: dict[str, object]) -> tuple[int, int, int, int, int, int] | None:
+def _series_rank(
+    release: dict[str, object], policy=None, *, original_language=None
+) -> tuple[int, int, int, int, int, int, int] | None:
     quality = release.get("quality")
     detail = quality.get("quality") if isinstance(quality, dict) else None
     title = release.get("title")
@@ -61,36 +65,70 @@ def _series_rank(release: dict[str, object]) -> tuple[int, int, int, int, int, i
         if not (_WEB_DL.search(title) or _WEB.search(title)):
             return None
         normalized.update(source="webdl", modifier="none")
-    elif detail.get("source") == "bluray":
-        normalized["modifier"] = "remux" if _REMUX.search(title) else "none"
-    return release_rank({**release, "quality": {"quality": normalized}})
+    elif detail.get("source") in ("bluray", "blurayRaw"):
+        normalized.update(
+            source="bluray",
+            modifier="remux"
+            if detail.get("source") == "blurayRaw" or _REMUX.search(title)
+            else "none",
+        )
+    release = {**release, "quality": {"quality": normalized}}
+    return (
+        policy.rank(release, original_language=original_language)
+        if policy
+        else release_rank(release, original_language=original_language)
+    )
 
 
 class SeriesAcquirer(MovieAcquirer):
     """Use MovieAcquirer's bounded torrent fetch, with Sonarr episode policy."""
 
     def __init__(
-        self, *, repository: ReservationRepository, permits: PermitRegistry,
-        sonarr_url: str, sonarr_api_key: str, prowlarr_url: str,
-        client: httpx.AsyncClient | None = None, retry_seconds: int = 900,
+        self,
+        *,
+        repository: ReservationRepository,
+        permits: PermitRegistry,
+        sonarr_url: str,
+        sonarr_api_key: str,
+        prowlarr_url: str,
+        client: httpx.AsyncClient | None = None,
+        retry_seconds: int = 900,
         subtitle_source: SubDLSource | None = None,
         subtitle_store: SubtitleArtifactStore | None = None,
         torrent_store: TorrentArtifactStore | None = None,
         capacity_provider: Callable[[], Awaitable[CapacityEvidence]] | None = None,
-        gateway_url: str | None = None, arr_token: str | None = None,
+        gateway_url: str | None = None,
+        arr_token: str | None = None,
         health_store: SourceHealthStore | None = None,
         is_tombstoned: Callable[[str], bool] | None = None,
         availability_probe: Callable[[bytes, str], Awaitable[int | None]] | None = None,
+        live_source_probes: bool = False,
+        release_policy=None,
+        subtitle_policy: SubtitlePolicy | None = None,
+        source_retry_seconds: float = 300,
+        search_timeout_seconds: float = 90,
     ) -> None:
         super().__init__(
-            repository=repository, permits=permits, radarr_url=sonarr_url,
-            radarr_api_key=sonarr_api_key, prowlarr_url=prowlarr_url,
-            client=client, retry_seconds=retry_seconds,
-            subtitle_source=subtitle_source, subtitle_store=subtitle_store,
+            repository=repository,
+            permits=permits,
+            radarr_url=sonarr_url,
+            radarr_api_key=sonarr_api_key,
+            prowlarr_url=prowlarr_url,
+            client=client,
+            retry_seconds=retry_seconds,
+            subtitle_source=subtitle_source,
+            subtitle_store=subtitle_store,
             torrent_store=torrent_store,
             capacity_provider=capacity_provider,
-            health_store=health_store, gateway_url=gateway_url, arr_token=arr_token,
+            health_store=health_store,
+            gateway_url=gateway_url,
+            arr_token=arr_token,
             availability_probe=availability_probe,
+            live_source_probes=live_source_probes,
+            release_policy=release_policy,
+            subtitle_policy=subtitle_policy,
+            source_retry_seconds=source_retry_seconds,
+            search_timeout_seconds=search_timeout_seconds,
         )
         self.sonarr_url = sonarr_url.rstrip("/")
         if bool(gateway_url) != bool(arr_token):
@@ -99,9 +137,16 @@ class SeriesAcquirer(MovieAcquirer):
         self.arr_token = arr_token
         self.is_tombstoned = is_tombstoned or (lambda _key: False)
 
+    def _rank(self, release, *, original_language=None):
+        return _series_rank(release, self.release_policy, original_language=original_language)
+
     async def _reconcile_existing_queue(
-        self, *, episodes: list[dict[str, object]], season: int,
-        reservation_id: str, active_episode_id: int | None,
+        self,
+        *,
+        episodes: list[dict[str, object]],
+        season: int,
+        reservation_id: str,
+        active_episode_id: int | None,
         imported_episode_ids: set[int],
     ) -> str | None:
         if self.gateway_url is None or self.arr_token is None:
@@ -117,6 +162,8 @@ class SeriesAcquirer(MovieAcquirer):
             seen_scopes.add(scope)
             permit = self.permits.get_for_reservation(reservation_id, scope_key=scope)
             if permit is None or permit.state != "confirmed":
+                continue
+            if self.health_store is not None and self.health_store.is_protected(permit.infohash):
                 continue
             action = "start" if item["id"] == active_episode_id else "stop"
             changes.append((action, permit.token, permit.infohash))
@@ -167,14 +214,14 @@ class SeriesAcquirer(MovieAcquirer):
         return seasons
 
     def _episode_imported(
-        self, item: dict[str, object], reservations_by_season: dict[int, str],
+        self,
+        item: dict[str, object],
+        reservations_by_season: dict[int, str],
         series_tmdb_id: int,
     ) -> bool:
         season = item["seasonNumber"]
         episode = item["episodeNumber"]
-        if self.is_tombstoned(
-            f"episode:tmdb:{series_tmdb_id}:{_episode_tag(season, episode)}"
-        ):
+        if self.is_tombstoned(f"episode:tmdb:{series_tmdb_id}:{_episode_tag(season, episode)}"):
             return True
         if item.get("hasFile") is not True:
             return False
@@ -192,52 +239,81 @@ class SeriesAcquirer(MovieAcquirer):
 
     @staticmethod
     def _eligible_episode_manifest(
-        torrent: bytes, *, season: int, episode: int,
+        torrent: bytes,
+        *,
+        season: int,
+        episode: int,
         allow_external_subtitle: bool = False,
+        subtitle_policy: SubtitlePolicy | None = None,
     ) -> tuple[str, str, tuple[str, ...], int] | None:
         try:
             inspected = inspect_torrent(torrent)
         except TorrentBytesError:
             return None
-        videos = [item for item in inspected.files
-                  if PurePosixPath(item.path).suffix.lower() in _VIDEO_SUFFIXES
-                  and not _is_sample_video(item.path)]
-        pt_br_subtitles = [item for item in inspected.files
-                           if PurePosixPath(item.path).suffix.lower() in _SUBTITLE_SUFFIXES
-                           and is_brazilian_portuguese_subtitle(item.path)
-                           and _single_episode_name(
-                               PurePosixPath(item.path).name, season, episode
-                           )]
-        english_subtitles = [item for item in inspected.files
-                             if PurePosixPath(item.path).suffix.lower() in _SUBTITLE_SUFFIXES
-                             and is_english_subtitle(item.path)
-                             and _single_episode_name(
-                                 PurePosixPath(item.path).name, season, episode
-                             )]
-        subtitles = pt_br_subtitles or english_subtitles
+        videos = [
+            item
+            for item in inspected.files
+            if PurePosixPath(item.path).suffix.lower() in _VIDEO_SUFFIXES
+            and not _is_sample_video(item.path)
+        ]
+        pt_br_subtitles = [
+            item
+            for item in inspected.files
+            if PurePosixPath(item.path).suffix.lower() in _SUBTITLE_SUFFIXES
+            and is_brazilian_portuguese_subtitle(item.path)
+            and _single_episode_name(PurePosixPath(item.path).name, season, episode)
+        ]
+        english_subtitles = [
+            item
+            for item in inspected.files
+            if PurePosixPath(item.path).suffix.lower() in _SUBTITLE_SUFFIXES
+            and is_english_subtitle(item.path)
+            and _single_episode_name(PurePosixPath(item.path).name, season, episode)
+        ]
+        policy = subtitle_policy or SubtitlePolicy()
+        by_language = {"pt-BR": pt_br_subtitles, "en-US": english_subtitles}
+        subtitles = next(
+            (
+                [item for item in by_language[language] if policy.matches(item.path)]
+                for language in policy.languages
+                if any(policy.matches(item.path) for item in by_language[language])
+            ),
+            [],
+        )
         if (
-            len(videos) != 1 or videos[0].length <= 0
+            len(videos) != 1
+            or videos[0].length <= 0
             or not _single_episode_name(PurePosixPath(videos[0].path).name, season, episode)
-            or not subtitles and not allow_external_subtitle
+            or not subtitles
+            and not allow_external_subtitle
         ):
             return None
         return (
-            inspected.infohash, inspected.metadata_sha256,
+            inspected.infohash,
+            inspected.metadata_sha256,
             tuple(item.path for item in (*videos, *subtitles)),
             inspected.total_bytes,
         )
 
     async def _eligible_releases(
-        self, *, series_id: int, episode_id: int, season: int, episode: int,
+        self,
+        *,
+        series_id: int,
+        episode_id: int,
+        season: int,
+        episode: int,
         tmdb_id: int,
         replacement_reason: str | None = None,
         excluded_infohashes: set[str] | None = None,
+        runtime_minutes: float | None = None,
+        original_language=None,
     ) -> AsyncIterator[AcquisitionCandidate]:
         excluded_infohashes = excluded_infohashes or set()
         response = await self.client.get(
             f"{self.sonarr_url}/api/v3/release",
             params={"seriesId": series_id, "episodeId": episode_id},
-            headers=self.headers, timeout=90.0,
+            headers=self.headers,
+            timeout=self.search_timeout_seconds,
         )
         response.raise_for_status()
         releases = response.json()
@@ -245,15 +321,15 @@ class SeriesAcquirer(MovieAcquirer):
             raise ValueError("Sonarr release response is invalid")
         ranked = sorted(
             (item for item in releases if isinstance(item, dict)),
-            key=lambda item: _series_rank(item) or (0, 0, 0, 0, 0, 0),
+            key=lambda item: self._rank(item, original_language=original_language)
+            or (0, 0, 0, 0, 0, 0, 0),
             reverse=True,
         )
         for release in ranked:
             if (
-                release.get("rejected") is not False and not (
-                    replacement_reason and _queue_only_rejection(release)
-                )
-                or _series_rank(release) is None
+                release.get("rejected") is not False
+                and not (replacement_reason and _queue_only_rejection(release))
+                or self._rank(release) is None
                 or not isinstance(release.get("title"), str)
                 or not _single_episode_name(release["title"], season, episode)
                 or not isinstance(release.get("size"), int)
@@ -268,13 +344,34 @@ class SeriesAcquirer(MovieAcquirer):
             if torrent is None:
                 continue
             manifest = self._eligible_episode_manifest(
-                torrent, season=season, episode=episode,
+                torrent,
+                season=season,
+                episode=episode,
                 allow_external_subtitle=self.subtitle_source is not None,
+                subtitle_policy=self.subtitle_policy,
             )
             if manifest is None:
                 continue
-            if manifest[0] in excluded_infohashes or claimed and (
-                not isinstance(claimed, str) or claimed.lower() != manifest[0]
+            # Sonarr names its WEB-DL source "web"; use the same normalized quality
+            # as ranking while enforcing the size of the inspected main video.
+            quality = dict(release["quality"]["quality"])
+            if quality.get("source") == "web":
+                quality.update(source="webdl", modifier="none")
+            elif quality.get("source") in ("bluray", "blurayRaw"):
+                quality.update(
+                    source="bluray",
+                    modifier="remux"
+                    if quality.get("source") == "blurayRaw" or _REMUX.search(release["title"])
+                    else "none",
+                )
+            if not self._acceptable_video_size(
+                release | {"quality": {"quality": quality}}, torrent, runtime_minutes
+            ):
+                continue
+            if (
+                manifest[0] in excluded_infohashes
+                or claimed
+                and (not isinstance(claimed, str) or claimed.lower() != manifest[0])
             ):
                 continue
             yield release, manifest, None, torrent
@@ -303,16 +400,22 @@ class SeriesAcquirer(MovieAcquirer):
         if not isinstance(series_payload, list):
             raise ValueError("Sonarr series response is invalid")
         series = next(
-            (item for item in series_payload if isinstance(item, dict)
-             and item.get("tmdbId") == tmdb_id and item.get("monitored") is True
-             and isinstance(item.get("id"), int)),
+            (
+                item
+                for item in series_payload
+                if isinstance(item, dict)
+                and item.get("tmdbId") == tmdb_id
+                and item.get("monitored") is True
+                and isinstance(item.get("id"), int)
+            ),
             None,
         )
         if series is None:
             return "series_not_monitored"
         episodes_response = await self.client.get(
             f"{self.sonarr_url}/api/v3/episode",
-            params={"seriesId": series["id"]}, headers=self.headers,
+            params={"seriesId": series["id"]},
+            headers=self.headers,
         )
         episodes_response.raise_for_status()
         episodes_payload = episodes_response.json()
@@ -321,14 +424,18 @@ class SeriesAcquirer(MovieAcquirer):
         reservations_by_season = self._requested_seasons(tmdb_id)
         reservations_by_season.setdefault(season, reservation_id)
         chronological = sorted(
-            (item for item in episodes_payload if isinstance(item, dict)
-             and isinstance(item.get("seasonNumber"), int)
-             and not isinstance(item["seasonNumber"], bool)
-             and item["seasonNumber"] in reservations_by_season
-             and isinstance(item.get("episodeNumber"), int)
-             and not isinstance(item["episodeNumber"], bool)
-             and item["episodeNumber"] > 0
-             and isinstance(item.get("id"), int)),
+            (
+                item
+                for item in episodes_payload
+                if isinstance(item, dict)
+                and isinstance(item.get("seasonNumber"), int)
+                and not isinstance(item["seasonNumber"], bool)
+                and item["seasonNumber"] in reservations_by_season
+                and isinstance(item.get("episodeNumber"), int)
+                and not isinstance(item["episodeNumber"], bool)
+                and item["episodeNumber"] > 0
+                and isinstance(item.get("id"), int)
+            ),
             key=lambda item: (item["seasonNumber"], item["episodeNumber"]),
         )
         known_seasons = {item["seasonNumber"] for item in chronological}
@@ -336,18 +443,23 @@ class SeriesAcquirer(MovieAcquirer):
             number in known_seasons for number in reservations_by_season if number < season
         )
         imported_episode_ids = {
-            item["id"] for item in chronological
+            item["id"]
+            for item in chronological
             if self._episode_imported(item, reservations_by_season, tmdb_id)
         }
         first_missing = next(
             (item for item in chronological if item["id"] not in imported_episode_ids), None
         )
         episode_rows = sorted(
-            (item for item in episodes_payload if isinstance(item, dict)
-             and item.get("seasonNumber") == season
-             and isinstance(item.get("episodeNumber"), int)
-             and isinstance(item.get("id"), int)
-             and item.get("monitored") is True),
+            (
+                item
+                for item in episodes_payload
+                if isinstance(item, dict)
+                and item.get("seasonNumber") == season
+                and isinstance(item.get("episodeNumber"), int)
+                and isinstance(item.get("id"), int)
+                and item.get("monitored") is True
+            ),
             key=lambda item: item["episodeNumber"],
         )
         now_utc = datetime.now(UTC)
@@ -369,13 +481,17 @@ class SeriesAcquirer(MovieAcquirer):
                 pending.append(item)
         active_episode_id = (
             first_missing["id"]
-            if earlier_catalog_complete and first_missing is not None
+            if earlier_catalog_complete
+            and first_missing is not None
             and first_missing["seasonNumber"] == season
-            and pending and pending[0]["id"] == first_missing["id"]
+            and pending
+            and pending[0]["id"] == first_missing["id"]
             else None
         )
         queue_status = await self._reconcile_existing_queue(
-            episodes=chronological, season=season, reservation_id=reservation_id,
+            episodes=chronological,
+            season=season,
+            reservation_id=reservation_id,
             active_episode_id=active_episode_id,
             imported_episode_ids=imported_episode_ids,
         )
@@ -383,7 +499,8 @@ class SeriesAcquirer(MovieAcquirer):
             return queue_status
         if (
             not earlier_catalog_complete
-            or first_missing is not None and first_missing["seasonNumber"] < season
+            or first_missing is not None
+            and first_missing["seasonNumber"] < season
         ):
             return "waiting_previous_season"
         if not episode_rows:
@@ -405,15 +522,16 @@ class SeriesAcquirer(MovieAcquirer):
             ):
                 self.permits.retire_expired_authorized(reservation_id, scope_key=scope)
                 existing = self.permits.get_for_reservation(reservation_id, scope_key=scope)
-            if existing is None and self.permits.had_superseded(
-                reservation_id, scope_key=scope
-            ):
+            if existing is None and self.permits.had_superseded(reservation_id, scope_key=scope):
                 return "replacement_missing_manual"
             replacement_reason = None
             old_health = None
             if item.get("hasFile") is True:
                 return "waiting_episodes"
             if existing is not None and existing.state == "confirmed":
+                probe_state = await self._monitor_probe(existing)
+                if probe_state is not None:
+                    return probe_state
                 replacement_reason, old_health = await self._source_status(existing)
                 if replacement_reason is None:
                     continue
@@ -431,42 +549,79 @@ class SeriesAcquirer(MovieAcquirer):
             if time.monotonic() < self._next_search.get(f"{reservation_id}:{scope}", 0):
                 continue
             self._next_search[f"{reservation_id}:{scope}"] = time.monotonic() + (
-                min(self.retry_seconds, 300) if replacement_reason else self.retry_seconds
+                self.source_retry_seconds if replacement_reason else self.retry_seconds
             )
             found_candidate = False
-            excluded = {source.infohash for source in self.permits.list_source_history(
-                reservation_id, scope_key=scope
-            )} if replacement_reason else set()
+            excluded = (
+                {
+                    source.infohash
+                    for source in self.permits.list_source_history(reservation_id, scope_key=scope)
+                }
+                if replacement_reason
+                else set()
+            )
             candidates = self._eligible_releases(
-                series_id=series["id"], episode_id=item["id"],
-                season=season, episode=number, tmdb_id=tmdb_id,
+                series_id=series["id"],
+                episode_id=item["id"],
+                season=season,
+                episode=number,
+                tmdb_id=tmdb_id,
                 replacement_reason=replacement_reason,
                 excluded_infohashes=excluded,
+                runtime_minutes=media_runtime_minutes(item.get("runtime"), series.get("runtime")),
+                original_language=series.get("originalLanguage"),
             )
             async for candidate in self._prioritize_replacements(
-                candidates, old=existing, reason=replacement_reason, health=old_health,
-                rank=_series_rank,
+                candidates,
+                old=existing,
+                reason=replacement_reason,
+                health=old_health,
+                rank=lambda release: self._rank(
+                    release, original_language=series.get("originalLanguage")
+                ),
             ):
                 found_candidate = True
                 release, (infohash, digest, files, bytes_total), external, torrent = candidate
-                if not any(PurePosixPath(name).suffix.lower() in _SUBTITLE_SUFFIXES
-                           for name in files):
+                recovered = None
+                if not any(
+                    PurePosixPath(name).suffix.lower() in _SUBTITLE_SUFFIXES for name in files
+                ):
                     assert self.subtitle_source is not None
-                    external = await self.subtitle_source.fetch(
-                        tmdb_id=tmdb_id, release_title=release["title"],
-                        season=season, episode=number,
-                    )
+
+                    async def fetch(language, mode, title=release["title"], episode_number=number):
+                        return await self.subtitle_source.fetch(
+                            tmdb_id=tmdb_id,
+                            release_title=title,
+                            season=season,
+                            episode=episode_number,
+                            language=language,
+                            match_mode=mode,
+                        )
+
+                    recovered = await recover_subtitle(self.subtitle_policy, fetch)
+                    external = recovered.content if recovered else None
                 if external is not None:
                     assert self.subtitle_store is not None
-                    self.subtitle_store.put(reservation_id, scope, infohash, external)
+                    self.subtitle_store.put(
+                        reservation_id,
+                        scope,
+                        infohash,
+                        external,
+                        language=recovered.language if recovered else "BR_PT",
+                        replace_language=True,
+                    )
                 if replacement_reason is not None:
                     assert existing is not None
                     try:
                         return await self._dispatch_replacement(
-                            old=existing, infohash=infohash,
-                            metadata_sha256=digest, selected_files=files,
-                            exact_bytes=bytes_total, torrent=torrent,
+                            old=existing,
+                            infohash=infohash,
+                            metadata_sha256=digest,
+                            selected_files=files,
+                            exact_bytes=bytes_total,
+                            torrent=torrent,
                             reported_seeders=release_seeders(release),
+                            quality_rank=canonical_quality(release),
                         )
                     except PermissionError as error:
                         if str(error) == "waiting_space":
@@ -488,10 +643,14 @@ class SeriesAcquirer(MovieAcquirer):
                             await self.capacity_provider() if self.capacity_provider else None
                         )
                         chosen_permit = self.permits.issue(
-                            infohash=infohash, metadata_sha256=digest,
-                            destination="/data/torrents", category="sonarr",
-                            reservation_id=reservation_id, scope_key=scope,
-                            selected_files=files, budget_bytes=bytes_total,
+                            infohash=infohash,
+                            metadata_sha256=digest,
+                            destination="/data/torrents",
+                            category="sonarr",
+                            reservation_id=reservation_id,
+                            scope_key=scope,
+                            selected_files=files,
+                            budget_bytes=bytes_total,
                             capacity=capacity,
                             expires_at=datetime.now(UTC) + timedelta(minutes=30),
                             reported_seeders=release_seeders(release),
@@ -504,12 +663,16 @@ class SeriesAcquirer(MovieAcquirer):
                     except sqlite3.IntegrityError:
                         return "already_permitted"
                 if self.torrent_store is not None:
+                    quality = canonical_quality(release)
+                    if quality is not None:
+                        self.permits.set_quality(chosen_permit.token, quality)
                     self.torrent_store.put(chosen_permit, torrent)
                 if self.permits.had_superseded(reservation_id, scope_key=scope):
                     retried = await self._retry_replacement(chosen_permit)
                     return retried or "replacement_metadata_unavailable"
                 response = await self.client.post(
-                    f"{self.sonarr_url}/api/v3/release", headers=self.headers,
+                    f"{self.sonarr_url}/api/v3/release",
+                    headers=self.headers,
                     json={**release, "downloadClientId": 1},
                 )
                 response.raise_for_status()

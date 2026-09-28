@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 import re
 from collections.abc import Callable
@@ -10,12 +9,9 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from .models import TelemetrySnapshot
 from .status import StatusProvider
 
-_TAILSCALE_HOSTNAME_PATTERN = re.compile(
-    r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){2,}ts\.net"
-)
+_TAILSCALE_HOSTNAME_PATTERN = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){2,}ts\.net")
 
 
 def _service_hostname() -> str | None:
@@ -27,7 +23,7 @@ def _service_hostname() -> str | None:
 
 def create_app(
     *,
-    snapshot_provider: Callable[[], dict[str, Any]],
+    snapshot_provider: Callable[[], dict[str, Any]] | None = None,
     status_provider: Callable[[], dict[str, Any]] | None = None,
 ) -> FastAPI:
     if status_provider is None:
@@ -37,6 +33,11 @@ def create_app(
                 os.environ.get("HOMESERVER_CAPACITY_SNAPSHOT", "/run/homeserver/capacity.json")
             ),
             media_root=Path(os.environ.get("HOMESERVER_MEDIA_ROOT", "/data")),
+            expected_filesystem_id=os.environ.get("HOMESERVER_MEDIA_UUID") or None,
+            host_max_age_seconds=float(os.environ.get("HOMESERVER_METRICS_MAX_AGE_SECONDS", "90")),
+            capacity_max_age_seconds=float(
+                os.environ.get("HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS", "30")
+            ),
         )
     app = FastAPI(title="HomeServer telemetry", version="1")
 
@@ -45,13 +46,6 @@ def create_app(
         return {"status": "ok"}
 
     @app.get("/api/v1/telemetry")
-    def telemetry() -> dict[str, Any]:
-        try:
-            snapshot = TelemetrySnapshot.model_validate(snapshot_provider())
-        except Exception as error:
-            raise HTTPException(status_code=503, detail="telemetry unavailable") from error
-        return snapshot.model_dump(mode="json")
-
     @app.get("/api/v1/status")
     def status() -> JSONResponse:
         try:
@@ -59,6 +53,18 @@ def create_app(
         except Exception as error:
             raise HTTPException(status_code=503, detail="status unavailable") from error
         return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+    @app.get("/health/ready")
+    def ready():
+        try:
+            payload = status_provider()
+            available = payload["host"]["state"] == "ok" and payload["capacity"]["state"] == "ok"
+        except Exception:
+            available = False
+        return JSONResponse(
+            {"status": "ready" if available else "unavailable"},
+            status_code=200 if available else 503,
+        )
 
     @app.get("/ui/status", response_class=HTMLResponse)
     def status_page() -> HTMLResponse:
@@ -69,16 +75,29 @@ def create_app(
             "{{SERVICE_ACCESS_STATE}}",
             "Painéis via Tailscale" if hostname else "Hostname Tailscale não configurado",
         )
-        for name, port in (
-            ("JELLYFIN", 8096),
-            ("SEERR", 5055),
-            ("SONARR", 8989),
-            ("RADARR", 7878),
-            ("QBITTORRENT", 18080),
+        for name, key, port in (
+            ("JELLYFIN", "JELLYFIN", 8096),
+            ("SEERR", "SEERR", 5055),
+            ("SONARR", "SONARR", 8989),
+            ("RADARR", "RADARR", 7878),
+            ("QBITTORRENT", "QBIT_MONITOR", 18080),
+            ("PROWLARR", "PROWLARR", 9696),
+            ("BAZARR", "BAZARR", 6767),
         ):
+            from html import escape
+            from urllib.parse import urlsplit
+
+            url = os.environ.get(f"HOMESERVER_{key}_PUBLIC_URL", "")
+            parsed = urlsplit(url)
+            if not (parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username):
+                url = (
+                    f"http://{hostname}:{os.environ.get(f'HOMESERVER_{key}_PORT', str(port))}/"
+                    if hostname
+                    else ""
+                )
             attributes = (
-                f'href="http://{hostname}:{port}/" target="_blank" rel="noopener noreferrer"'
-                if hostname
+                f'href="{escape(url, quote=True)}" target="_blank" rel="noopener noreferrer"'
+                if url
                 else 'aria-disabled="true"'
             )
             page = page.replace(f"{{{{SERVICE_{name}_LINK}}}}", attributes)
@@ -96,12 +115,4 @@ def create_app(
     return app
 
 
-def _snapshot_from_file() -> dict[str, Any]:
-    path = Path(os.environ.get("HOMESERVER_TELEMETRY_SNAPSHOT", "/run/homeserver/snapshot.json"))
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, OSError, json.JSONDecodeError) as error:
-        raise RuntimeError("telemetry snapshot is unavailable") from error
-
-
-app = create_app(snapshot_provider=_snapshot_from_file)
+app = create_app()

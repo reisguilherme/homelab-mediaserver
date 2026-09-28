@@ -36,6 +36,7 @@ class DeletionAdmission:
         sonarr_url: str,
         sonarr_api_key: str,
         client: httpx.AsyncClient | None = None,
+        http_timeout_seconds: float = 15,
     ) -> None:
         self.jobs = jobs
         self.media_root = Path(media_root)
@@ -47,13 +48,14 @@ class DeletionAdmission:
         self.sonarr_url = sonarr_url.rstrip("/")
         self.sonarr_api_key = sonarr_api_key
         self.client = client
+        self.http_timeout_seconds = http_timeout_seconds
 
     async def _get_json(
         self, url: str, *, headers: dict[str, str], params: dict[str, str] | None = None
     ) -> Any:
         async def request(client: httpx.AsyncClient) -> Any:
             try:
-                response = await client.get(url, headers=headers, params=params, timeout=15)
+                response = await client.get(url, headers=headers, params=params)
             except httpx.HTTPError as error:
                 raise DeletionCaptureError(503, "media service unavailable") from error
             if response.status_code in (401, 403):
@@ -69,7 +71,7 @@ class DeletionAdmission:
 
         if self.client is not None:
             return await request(self.client)
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=self.http_timeout_seconds) as client:
             return await request(client)
 
     def _check_mount(self) -> None:

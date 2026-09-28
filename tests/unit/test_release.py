@@ -1,4 +1,6 @@
+import hashlib
 import importlib.util
+import json
 import tarfile
 from pathlib import Path
 
@@ -51,3 +53,28 @@ def test_extract_artifact_rejects_root_member(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="unsafe archive path"):
         _module().extract_artifact(artifact, tmp_path / "out")
+
+
+def test_validation_checks_declared_configuration_inside_artifact(tmp_path: Path) -> None:
+    artifact = tmp_path / "release.tar"
+    source = tmp_path / "source"
+    (source / "deploy").mkdir(parents=True)
+    (source / "deploy/compose.yaml").write_text("services: {}\n")
+    with tarfile.open(artifact, "w") as archive:
+        archive.add(source / "deploy", arcname="deploy")
+    manifest = tmp_path / "release.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "git_commit": "1" * 40,
+                "images": {"control": "sha256:" + "a" * 64},
+                "database_schema": 7,
+                "requires_backup": True,
+                "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                "config_checksums": {"deploy/compose.yaml": "0" * 64},
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="configuration checksum"):
+        _module().validate(manifest, artifact, "1" * 40)

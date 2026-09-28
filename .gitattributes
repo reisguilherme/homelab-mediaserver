@@ -5,3 +5,6 @@ Dockerfile* text eol=lf
 Makefile text eol=lf
 *.py text eol=lf
 *.json text eol=lf
+scripts/homeserver text eol=lf
+*.env text eol=lf
+.env.example text eol=lf

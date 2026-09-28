@@ -12,9 +12,12 @@ def _compose_services(overlay: str) -> dict:
     docker = shutil.which("docker.exe") or shutil.which("docker")
     if docker is None:
         pytest.skip("Docker Compose is unavailable")
-    if subprocess.run(
-        [docker, "compose", "version"], capture_output=True, text=True, check=False
-    ).returncode != 0:
+    if (
+        subprocess.run(
+            [docker, "compose", "version"], capture_output=True, text=True, check=False
+        ).returncode
+        != 0
+    ):
         pytest.skip("Docker Compose is unavailable")
 
     env = os.environ.copy()
@@ -29,8 +32,8 @@ def _compose_services(overlay: str) -> dict:
         HOMESERVER_RADARR_API_KEY="test-radarr-key",
         HOMESERVER_SONARR_URL="http://sonarr:8989",
         HOMESERVER_SONARR_API_KEY="test-sonarr-key",
-        LAN_BIND_IP="192.0.2.10",
-        TAILSCALE_BIND_IP="100.64.1.2",
+        HOMESERVER_LAN_BIND_IP="192.0.2.10",
+        HOMESERVER_TAILSCALE_BIND_IP="100.64.1.2",
     )
     if os.name != "nt" and docker.endswith(".exe"):
         # WSL must explicitly pass fixture variables to the Windows Compose CLI.
@@ -45,8 +48,8 @@ def _compose_services(overlay: str) -> dict:
             "HOMESERVER_RADARR_API_KEY",
             "HOMESERVER_SONARR_URL",
             "HOMESERVER_SONARR_API_KEY",
-            "LAN_BIND_IP",
-            "TAILSCALE_BIND_IP",
+            "HOMESERVER_LAN_BIND_IP",
+            "HOMESERVER_TAILSCALE_BIND_IP",
         )
         env["WSLENV"] = ":".join([env.get("WSLENV", ""), *(f"{name}/w" for name in variables)])
     result = subprocess.run(
@@ -86,14 +89,12 @@ def test_only_proxy_publishes_jellyfin_port(overlay: str, expected_ports: set[tu
 
     assert not jellyfin.get("ports")
     assert {
-        (port["host_ip"], int(port["published"]), port["target"])
-        for port in proxy["ports"]
+        (port["host_ip"], int(port["published"]), port["target"]) for port in proxy["ports"]
     } == expected_ports
     assert "apps" in proxy["networks"]
     assert "edge_control" in proxy["networks"]
     assert any(
-        mount["target"] == "/data/media" and mount["read_only"]
-        for mount in jellyfin["volumes"]
+        mount["target"] == "/data/media" and mount["read_only"] for mount in jellyfin["volumes"]
     )
     assert any(
         mount["target"] == "/etc/nginx/nginx.conf" and mount["read_only"]

@@ -1,23 +1,30 @@
-# Releases, smoke e retorno
+# Releases e rollback
 
-Uma release é identificada pelo SHA de 40 caracteres, pelo checksum do artefato e por um manifesto que contém digests imutáveis das imagens. O script valida tudo antes de criar `/opt/homeserver/releases/<sha>` e trocar o apontador `current`; appdata, secrets e `/srv/data` ficam fora da release.
+Release é a SHA Git de 40 caracteres, artefato verificado e manifesto schema2
+com todas as imagens por digest. Appdata, mídia e `.env` ficam fora da release.
+Build exige checkout limpo e acesso ao registry; não cria tags de produção a
+partir de arquivos modificados.
 
 ```bash
-bash scripts/deploy.sh --release SHA --artifact release.tar --manifest release.json --config /etc/homeserver/deploy.env
-bash scripts/smoke.sh --config /etc/homeserver/deploy.env --environment prod
-bash scripts/rollback.sh --release PREVIOUS_SHA --config /etc/homeserver/deploy.env
+bash scripts/build-release.sh --image-prefix ghcr.io/SEU_NAMESPACE/homeserver --output /tmp/homeserver-release
+sudo bash scripts/deploy.sh --env-file /etc/homeserver/.env \
+  --release SHA_DE_40_HEXADECIMAIS \
+  --artifact /tmp/homeserver-release/homeserver-SHA.tar \
+  --manifest /tmp/homeserver-release/homeserver-SHA.json
+sudo bash scripts/smoke.sh --env-file /etc/homeserver/.env
+sudo bash scripts/rollback.sh --env-file /etc/homeserver/.env --release SHA_ANTERIOR
 ```
 
-Deploys concorrentes são recusados por lock. Falha de smoke mantém o registro da tentativa; retorno de imagem não desfaz migrações de banco. Quando o schema não é compatível, restaurar primeiro um snapshot consistente em modo isolado.
-## Estado atual do extrator
+Troque os placeholders pelos arquivos/SHA realmente produzidos. O fluxo valida
+checksum, caminhos tar, digests, labels, schema e configuração antes de
+ativar. Para os escritores sob manutenção, migra o SQLite, troca `current`
+atomicamente, configura serviços e verifica saúde antes de liberar admissões.
 
-O artefato recebido por `scripts/deploy.sh` é um tarball da raiz do checkout e
-precisa conter `deploy/compose.yaml`, `scripts/check-mount.sh` e
-`scripts/smoke.sh`. O script valida o SHA, o manifesto e o checksum antes de
-extrair. Caminhos absolutos, `..`, links e arquivos especiais no tarball são
-recusados; o symlink `current` só muda depois que a estrutura extraída passa
-essas verificações.
+Falhas deixam diagnóstico sanitizado e tentam retorno somente quando compatível.
+Rollback restaura runtime/configuração e preserva segredos atuais; não reverte
+bancos implicitamente. Schema incompatível entra em RECOVERY_MODE e requer
+[restore isolado](backup-restore.md) seguido de [reconciliação](recovery.md).
+Nenhum prune pode remover release necessária ao retorno/recuperação.
 
-O primeiro incremento ainda não inicia/paralisa a unidade systemd nem executa
-migrações ou smoke contra um Legion real. Essas etapas permanecem parte do
-fechamento de O02 e exigem ambiente Linux de produção validado.
+[GitHub Actions](github-actions.md) executa os mesmos scripts a partir de um
+artefato autenticado associado à CI aprovada.

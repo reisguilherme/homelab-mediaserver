@@ -1,0 +1,15 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Deterministic local fixture credentials and documented placeholders"
+paths = ['''^tests/fixtures/''']
+regexes = ['''(?i)(?:fixture|example|changeme|unconfigured|test-secret|a{32,}|b{32,})''']
+condition = "AND"
+
+[[allowlists]]
+description = "Historical CYD example contains an explicit nonfunctional key placeholder"
+paths = ['''^firmware/cyd/secrets\.example\.yaml$''']
+regexTarget = "secret"
+regexes = ['''^replace-with-32-byte-key$''']
+condition = "AND"

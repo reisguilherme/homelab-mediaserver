@@ -40,7 +40,7 @@ def test_compose_check_fails_when_docker_is_unavailable(tmp_path: Path) -> None:
     assert result.returncode != 0
 
 
-def test_smoke_requires_health_url(tmp_path: Path) -> None:
+def test_smoke_requires_reachable_ready_runtime(tmp_path: Path) -> None:
     config = tmp_path / "smoke.env"
     config.write_text("\n", encoding="utf-8")
     result = subprocess.run(
@@ -55,8 +55,11 @@ def test_smoke_checks_readiness_not_only_liveness(tmp_path: Path) -> None:
     if shutil.which("curl") is None:
         pytest.skip("curl is unavailable")
 
+    requests = []
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
+            requests.append(self.path)
             self.send_response(200 if self.path == "/health/live" else 503)
             self.end_headers()
 
@@ -69,7 +72,7 @@ def test_smoke_checks_readiness_not_only_liveness(tmp_path: Path) -> None:
     try:
         config = tmp_path / "smoke.env"
         config.write_text(
-            f"HOMESERVER_HEALTH_URL=http://127.0.0.1:{server.server_port}\n",
+            f"HOMESERVER_CONTROL_PORT={server.server_port}\n",
             encoding="utf-8",
         )
         result = subprocess.run(
@@ -78,6 +81,7 @@ def test_smoke_checks_readiness_not_only_liveness(tmp_path: Path) -> None:
             text=True,
         )
         assert result.returncode != 0
+        assert requests == ["/health/ready"]
     finally:
         server.shutdown()
         thread.join(timeout=2)
@@ -91,7 +95,9 @@ def test_capacity_collector_publishes_only_with_matching_mount(tmp_path: Path) -
     fake_bin.mkdir()
     findmnt = fake_bin / "findmnt"
     findmnt.write_text(
-        '#!/bin/sh\nprintf "%s\\t%s\\trw\\n" "$FAKE_TARGET" "$FAKE_UUID"\n',
+        '#!/bin/sh\nprintf \'{"filesystems":['
+        '{"target":"%s","uuid":"%s","options":"rw"}]}\\n\' '
+        '"$FAKE_TARGET" "$FAKE_UUID"\n',
         encoding="utf-8",
     )
     findmnt.chmod(0o755)
@@ -101,8 +107,14 @@ def test_capacity_collector_publishes_only_with_matching_mount(tmp_path: Path) -
         "FAKE_UUID": "uuid-test",
     }
     command = [
-        "python3", "scripts/capacity-snapshot.py", "--output", str(output),
-        "--media-path", str(media), "--media-uuid", "uuid-test",
+        "python3",
+        "scripts/capacity-snapshot.py",
+        "--output",
+        str(output),
+        "--media-path",
+        str(media),
+        "--media-uuid",
+        "uuid-test",
     ]
     result = subprocess.run(command, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

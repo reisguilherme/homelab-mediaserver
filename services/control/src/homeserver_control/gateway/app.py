@@ -7,10 +7,13 @@ import os
 import re
 import secrets
 import time
+from collections.abc import Callable
 from hashlib import sha256
+from pathlib import Path
 from threading import Lock
 from typing import Any, Protocol
 
+import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
 
@@ -18,8 +21,11 @@ from homeserver_control.adapters.http import ContractError, EffectUncertain
 from homeserver_control.adapters.qbittorrent import QBittorrentAdapter
 from homeserver_control.domain.magnet import magnet_infohash
 from homeserver_control.domain.torrent_bytes import TorrentBytesError, inspect_torrent
+from homeserver_control.persistence.heartbeat import WorkerHeartbeatStore
 from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 from homeserver_control.recovery import recovery_mode_blocks
+from homeserver_control.worker.capacity_evidence import CapacityEvidence, capacity_from_queue
+from homeserver_control.worker.source_health import SourceHealthStore
 
 from .allowlist import GatewayAllowlist
 from .auth import token_matches
@@ -69,6 +75,9 @@ def create_app(
     allowlist: GatewayAllowlist | None = None,
     torrent_store: TorrentArtifactStore | None = None,
     recovery_mode_path: str | os.PathLike[str] | None = None,
+    capacity_provider: Callable[[], CapacityEvidence] | None = None,
+    worker_health_provider: Callable[[], bool] | None = None,
+    protected_source_provider: Callable[[str], bool] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="HomeServer download gateway", version="1")
     routes = allowlist or GatewayAllowlist()
@@ -90,13 +99,46 @@ def create_app(
     def require_admission() -> None:
         if recovery_mode_blocks(recovery_mode_path):
             raise HTTPException(status_code=503, detail="admission blocked by recovery mode")
+        if worker_health_provider is not None:
+            try:
+                worker_ready = worker_health_provider()
+            except Exception:
+                worker_ready = False
+            if not worker_ready:
+                raise HTTPException(status_code=503, detail="admission blocked by worker health")
+
+    def source_is_protected(infohash: str) -> bool:
+        if protected_source_provider is None:
+            return False
+        try:
+            protected = protected_source_provider(infohash)
+        except Exception:
+            raise HTTPException(status_code=503, detail="source protection unavailable") from None
+        if not isinstance(protected, bool):
+            raise HTTPException(status_code=503, detail="source protection unavailable")
+        return protected
+
+    def require_source_mutable(infohash: str) -> None:
+        if source_is_protected(infohash):
+            raise HTTPException(status_code=403, detail="source protected by operator")
+
+    def require_permit_mutable(permit: Permit) -> None:
+        require_source_mutable(permit.infohash)
+        parent = permits.pending_handover(permit.token)
+        if permit.probe_parent_id is not None:
+            parent = permits.get_for_reservation(permit.reservation_id, scope_key=permit.scope_key)
+            if parent is None or parent.permit_id != permit.probe_parent_id:
+                raise HTTPException(status_code=409, detail="primary source changed")
+        if parent is not None:
+            require_source_mutable(parent.infohash)
 
     def source_permit(token: str | None, header_token: str | None) -> Permit:
         if arr_token == "unconfigured" or not token_matches(header_token, arr_token):
             raise HTTPException(status_code=403, detail="worker credential required")
         permit = permits.get(token) if isinstance(token, str) else None
         if (
-            permit is None or permit.state != "confirmed"
+            permit is None
+            or permit.state != "confirmed"
             or permit.category not in {"sonarr", "radarr"}
             or permit.reservation_id is None
             or permit.destination != "/data/torrents"
@@ -105,10 +147,7 @@ def create_app(
             or (permit.category == "radarr" and permit.scope_key is not None)
         ):
             raise HTTPException(status_code=403, detail="confirmed source permit required")
-        active = permits.get_for_reservation(
-            permit.reservation_id, scope_key=permit.scope_key
-        )
-        if active is None or active.permit_id != permit.permit_id:
+        if not permits.active_source(permit):
             raise HTTPException(status_code=403, detail="active source permit required")
         return permit
 
@@ -117,7 +156,9 @@ def create_app(
         if not isinstance(entries, list):
             raise HTTPException(status_code=502, detail="invalid torrent list")
         matches = [
-            entry for entry in entries if isinstance(entry, dict)
+            entry
+            for entry in entries
+            if isinstance(entry, dict)
             and isinstance(entry.get("hash"), str)
             and entry["hash"].lower() == permit.infohash
         ]
@@ -145,9 +186,7 @@ def create_app(
             body = await request.json()
         except ValueError as error:
             raise HTTPException(status_code=422, detail="invalid JSON body") from error
-        if not isinstance(body, dict) or set(body) != {
-            "permit_token", "media_key", "scope_key"
-        }:
+        if not isinstance(body, dict) or set(body) != {"permit_token", "media_key", "scope_key"}:
             raise HTTPException(status_code=422, detail="exact media source required")
         if (
             not isinstance(body["permit_token"], str)
@@ -157,7 +196,8 @@ def create_app(
             raise HTTPException(status_code=422, detail="invalid media source identity")
         try:
             permit = permits.deletion_source(
-                token=body["permit_token"], media_key=body["media_key"],
+                token=body["permit_token"],
+                media_key=body["media_key"],
                 scope_key=body["scope_key"],
             )
         except PermissionError as error:
@@ -185,8 +225,9 @@ def create_app(
         if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
             raise HTTPException(status_code=502, detail="invalid torrent list")
         matches = [
-            item for item in entries if isinstance(item.get("hash"), str)
-            and item["hash"].lower() == permit.infohash
+            item
+            for item in entries
+            if isinstance(item.get("hash"), str) and item["hash"].lower() == permit.infohash
         ]
         if not matches:
             return {"state": "missing"}
@@ -206,9 +247,14 @@ def create_app(
         for item in files:
             name, size, priority = (item.get(key) for key in ("name", "size", "priority"))
             if (
-                not isinstance(name, str) or not name
-                or isinstance(size, bool) or not isinstance(size, int) or size <= 0
-                or isinstance(priority, bool) or not isinstance(priority, int) or priority <= 0
+                not isinstance(name, str)
+                or not name
+                or isinstance(size, bool)
+                or not isinstance(size, int)
+                or size <= 0
+                or isinstance(priority, bool)
+                or not isinstance(priority, int)
+                or priority <= 0
             ):
                 raise HTTPException(status_code=409, detail="torrent files changed")
             actual_files.add((name, size))
@@ -218,7 +264,8 @@ def create_app(
         # Recheck the persistent permit immediately before the destructive call.
         try:
             current_permit = permits.deletion_source(
-                token=body["permit_token"], media_key=body["media_key"],
+                token=body["permit_token"],
+                media_key=body["media_key"],
                 scope_key=body["scope_key"],
             )
         except (PermissionError, ValueError) as error:
@@ -246,8 +293,11 @@ def create_app(
         progress = current.get("progress")
         state = current.get("state")
         if (
-            isinstance(progress, bool) or not isinstance(progress, (int, float))
-            or not 0 <= progress <= 1 or not isinstance(state, str) or not state
+            isinstance(progress, bool)
+            or not isinstance(progress, (int, float))
+            or not 0 <= progress <= 1
+            or not isinstance(state, str)
+            or not state
             or any(
                 isinstance(current.get(field), bool)
                 or not isinstance(current.get(field), int)
@@ -257,12 +307,133 @@ def create_app(
         ):
             raise HTTPException(status_code=502, detail="invalid torrent health")
         return {
-            "hash": permit.infohash, "progress": progress,
+            "hash": permit.infohash,
+            "progress": progress,
             "downloaded": current["downloaded"],
             "amount_left": current["amount_left"],
             "num_seeds": current["num_seeds"],
-            "dlspeed": current["dlspeed"], "state": state,
+            "dlspeed": current["dlspeed"],
+            "state": state,
+            **({"name": current["name"]} if isinstance(current.get("name"), str) else {}),
         }
+
+    @app.post("/internal/probe-decision")
+    async def probe_decision(request: Request, x_arr_token: str | None = Header(default=None)):
+        if arr_token == "unconfigured" or not token_matches(x_arr_token, arr_token):
+            raise HTTPException(status_code=403, detail="worker credential required")
+        try:
+            body = await request.json()
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail="invalid JSON body") from error
+        if (
+            not isinstance(body, dict)
+            or set(body) != {"permit_token", "decision"}
+            or body["decision"] not in {"promote", "reject"}
+        ):
+            raise HTTPException(status_code=422, detail="probe token and decision required")
+        candidate = permits.get(body["permit_token"])
+        if candidate is None:
+            raise HTTPException(status_code=403, detail="probe required")
+        parent = permits.pending_handover(candidate.token)
+        if parent is None:
+            if candidate.probe_parent_id is None or not permits.active_source(candidate):
+                raise HTTPException(status_code=403, detail="active probe required")
+            primary = permits.get_for_reservation(
+                candidate.reservation_id, scope_key=candidate.scope_key
+            )
+            if primary is None:
+                raise HTTPException(status_code=409, detail="primary source unavailable")
+            parent = primary
+        require_source_mutable(candidate.infohash)
+        require_source_mutable(parent.infohash)
+        if body["decision"] == "reject":
+            if candidate.probe_parent_id is None:
+                raise HTTPException(status_code=409, detail="handover already committed")
+            entries = upstream.read("/api/v2/torrents/info", {"hashes": candidate.infohash})
+            if isinstance(entries, list) and not entries:
+                permits.reject_probe(candidate.token)
+                return {"state": "rejected"}
+            source_info(candidate)
+            upstream.set_running(candidate.infohash, running=False)
+            # Keep partial payload; automatic media deletion is never part of a probe.
+            for attempt in range(26):
+                if source_info(candidate).get("state") in {
+                    "stoppedDL",
+                    "stoppedUP",
+                    "pausedDL",
+                    "pausedUP",
+                }:
+                    permits.reject_probe(candidate.token)
+                    return {"state": "rejected"}
+                if attempt < 25:
+                    await asyncio.sleep(0.2)
+            raise HTTPException(status_code=409, detail="probe stop unconfirmed")
+        require_admission()
+        current = source_info(candidate)
+        previous = source_info(parent)
+        if not permits.probe_reservation_active(candidate):
+            upstream.set_running(candidate.infohash, running=False)
+            if candidate.probe_parent_id is None and permits.probe_cancelled(candidate):
+                # A cancelled pending handover may stop both; it may never restart either.
+                upstream.set_running(parent.infohash, running=False)
+                stopped_states = {"stoppedDL", "stoppedUP", "pausedDL", "pausedUP"}
+                if (
+                    source_info(parent).get("state") in stopped_states
+                    and source_info(candidate).get("state") in stopped_states
+                ):
+                    permits.complete_handover(candidate.token)
+                    return {"state": "cancelled"}
+            raise HTTPException(status_code=409, detail="acquisition cancelled or tombstoned")
+        if capacity_provider is None:
+            raise HTTPException(status_code=503, detail="fresh filesystem evidence required")
+        try:
+            capacity = capacity_provider()
+            if permits.pending_bytes(capacity) > capacity.free_bytes:
+                raise ValueError("waiting_space")
+        except (ValueError, OSError):
+            raise HTTPException(status_code=503, detail="filesystem evidence unavailable") from None
+        if current.get("state") not in {"downloading", "forcedDL", "uploading", "stalledUP"}:
+            # Hold the old transfer through uncertain/paused candidate state, including retries.
+            raise HTTPException(status_code=409, detail="candidate is not running")
+        if candidate.probe_parent_id is not None and previous.get("state") not in {
+            "downloading",
+            "forcedDL",
+            "stalledDL",
+        }:
+            raise HTTPException(status_code=409, detail="original is not actively downloading")
+        if candidate.probe_parent_id is not None:
+            if previous.get("amount_left") == 0 or previous.get("progress") == 1:
+                raise HTTPException(status_code=409, detail="original source completed")
+            slow_threshold = float(os.environ.get("HOMESERVER_SOURCE_MIN_RATE_KIB", "1024")) * 1024
+            if slow_threshold > 0 and previous.get("dlspeed", 0) >= slow_threshold:
+                raise HTTPException(status_code=409, detail="original source recovered")
+            if (
+                candidate.state != "confirmed"
+                or not permits.probe_verified_faster(candidate.permit_id)
+                or current.get("state") not in {"downloading", "forcedDL", "uploading", "stalledUP"}
+                or not isinstance(current.get("downloaded"), int)
+                or current["downloaded"] <= 0
+            ):
+                raise HTTPException(status_code=409, detail="candidate speed not verified")
+            try:
+                candidate = permits.promote_probe(candidate.token)
+            except PermissionError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+        # This durable handover remains pending if qBit or the process fails here.
+        # The next worker cycle retries exactly this stop, without another admission.
+        upstream.set_running(parent.infohash, running=False)
+        for attempt in range(26):
+            if source_info(parent).get("state") in {
+                "stoppedDL",
+                "stoppedUP",
+                "pausedDL",
+                "pausedUP",
+            }:
+                permits.complete_handover(candidate.token)
+                return {"state": "promoted"}
+            if attempt < 25:
+                await asyncio.sleep(0.2)
+        raise HTTPException(status_code=409, detail="old source stop unconfirmed")
 
     @app.post("/internal/source-state")
     async def source_state(
@@ -280,15 +451,20 @@ def create_app(
         if action not in {"start", "stop"}:
             raise HTTPException(status_code=422, detail="unsupported source action")
         permit = source_permit(body["permit_token"], x_arr_token)
+        require_source_mutable(permit.infohash)
         if action == "start":
             require_admission()
+            if permits._db_path is not None and not permits.probe_reservation_active(permit):
+                raise HTTPException(status_code=409, detail="acquisition cancelled or tombstoned")
         current = source_info(permit)
         progress = current.get("progress")
         left = current.get("amount_left")
         state = current.get("state")
         if (
-            isinstance(progress, bool) or not isinstance(progress, (int, float))
-            or isinstance(left, bool) or not isinstance(left, int)
+            isinstance(progress, bool)
+            or not isinstance(progress, (int, float))
+            or isinstance(left, bool)
+            or not isinstance(left, int)
             or not isinstance(state, str)
         ):
             raise HTTPException(status_code=502, detail="invalid torrent state")
@@ -332,22 +508,20 @@ def create_app(
         token = body["permit_token"]
         permit = permits.get(token) if isinstance(token, str) else None
         if (
-            permit is None or permit.state not in {
-                "authorized", "dispatching", "unknown", "confirmed"
-            }
+            permit is None
+            or permit.state not in {"authorized", "dispatching", "unknown", "confirmed"}
             or permit.reservation_id is None
             or permit.category not in {"sonarr", "radarr"}
             or permit.destination != "/data/torrents"
             or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
-            or (permit.state == "authorized" and not permits.had_superseded(
-                permit.reservation_id, scope_key=permit.scope_key
-            ))
+            or (
+                permit.state == "authorized"
+                and permit.probe_parent_id is None
+                and not permits.had_superseded(permit.reservation_id, scope_key=permit.scope_key)
+            )
         ):
             raise HTTPException(status_code=403, detail="reconcilable source permit required")
-        active = permits.get_for_reservation(
-            permit.reservation_id, scope_key=permit.scope_key
-        )
-        if active is None or active.permit_id != permit.permit_id:
+        if not permits.active_source(permit):
             raise HTTPException(status_code=403, detail="active source permit required")
         if torrent_store is None:
             raise HTTPException(status_code=503, detail="torrent metadata store unavailable")
@@ -361,8 +535,9 @@ def create_app(
         if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
             raise HTTPException(status_code=502, detail="invalid torrent list")
         matches = [
-            item for item in entries if isinstance(item.get("hash"), str)
-            and item["hash"].lower() == permit.infohash
+            item
+            for item in entries
+            if isinstance(item.get("hash"), str) and item["hash"].lower() == permit.infohash
         ]
         if not matches:
             return {"state": "missing"}
@@ -402,21 +577,26 @@ def create_app(
         token = body["permit_token"]
         permit = permits.get(token) if isinstance(token, str) else None
         if (
-            permit is None or permit.state != "confirmed"
-            or permit.category != "sonarr" or permit.reservation_id is None
+            permit is None
+            or permit.state != "confirmed"
+            or permit.category != "sonarr"
+            or permit.reservation_id is None
             or not isinstance(permit.scope_key, str)
             or not re.fullmatch(r"S[0-9]{2,}E[0-9]{2,}", permit.scope_key)
             or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
             or permit.destination != "/data/torrents"
         ):
             raise HTTPException(status_code=403, detail="confirmed episode permit required")
+        require_source_mutable(permit.infohash)
         if action == "start":
             require_admission()
         entries = upstream.read("/api/v2/torrents/info", {"hashes": permit.infohash})
         if not isinstance(entries, list):
             raise HTTPException(status_code=502, detail="invalid torrent list")
         matches = [
-            entry for entry in entries if isinstance(entry, dict)
+            entry
+            for entry in entries
+            if isinstance(entry, dict)
             and isinstance(entry.get("hash"), str)
             and entry["hash"].lower() == permit.infohash
         ]
@@ -460,40 +640,50 @@ def create_app(
         permit = permits.get(token) if isinstance(token, str) else None
         if permit is None or permit.state != "confirmed":
             raise HTTPException(status_code=403, detail="confirmed permit required")
+        require_permit_mutable(permit)
         metadata = torrent_store.get(permit)
         if metadata is None:
             raise HTTPException(status_code=409, detail="verified metadata unavailable")
 
         def torrent_info() -> dict[str, Any] | None:
-            entries = upstream.read(
-                "/api/v2/torrents/info", {"hashes": permit.infohash}
-            )
+            entries = upstream.read("/api/v2/torrents/info", {"hashes": permit.infohash})
             if not isinstance(entries, list):
                 raise HTTPException(status_code=502, detail="invalid torrent list")
             return next(
-                (entry for entry in entries if isinstance(entry, dict)
-                 and entry.get("hash", "").lower() == permit.infohash), None
+                (
+                    entry
+                    for entry in entries
+                    if isinstance(entry, dict) and entry.get("hash", "").lower() == permit.infohash
+                ),
+                None,
             )
 
         current = torrent_info()
         if (
-            current is None or not isinstance(current.get("total_size"), int)
-            or current["total_size"] > 0 or current.get("downloaded") != 0
+            current is None
+            or not isinstance(current.get("total_size"), int)
+            or current["total_size"] > 0
+            or current.get("downloaded") != 0
             or current.get("progress") != 0
         ):
             raise HTTPException(status_code=409, detail="torrent is not metadata-stalled")
         try:
-            upstream.add_torrent({
-                "infohash": permit.infohash, "savepath": permit.destination,
-                "category": permit.category, "torrent_bytes": metadata,
-            })
+            upstream.add_torrent(
+                {
+                    "infohash": permit.infohash,
+                    "savepath": permit.destination,
+                    "category": permit.category,
+                    "torrent_bytes": metadata,
+                }
+            )
         except (ContractError, EffectUncertain):
             # qBittorrent can apply metadata to an existing magnet while
             # answering "Fails." for the duplicate add. Inspect the state.
             pass
         updated = torrent_info()
         if (
-            updated is None or not isinstance(updated.get("total_size"), int)
+            updated is None
+            or not isinstance(updated.get("total_size"), int)
             or updated["total_size"] <= 0
         ):
             raise HTTPException(status_code=409, detail="metadata remains unavailable")
@@ -515,7 +705,8 @@ def create_app(
                 "amount_left": entry.get("amount_left"),
                 "state": entry.get("state"),
                 "admitted": permits.is_admitted(entry["hash"])
-                if isinstance(entry.get("hash"), str) else False,
+                if isinstance(entry.get("hash"), str)
+                else False,
             }
             for entry in result
         ]
@@ -539,8 +730,10 @@ def create_app(
             result: dict[str, Permit] = {}
             for permit in permits.list_active_confirmed_movies():
                 if (
-                    permit.state != "confirmed" or permit.category != "radarr"
-                    or permit.reservation_id is None or permit.scope_key is not None
+                    permit.state != "confirmed"
+                    or permit.category != "radarr"
+                    or permit.reservation_id is None
+                    or permit.scope_key is not None
                     or permit.destination != "/data/torrents"
                     or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
                 ):
@@ -560,15 +753,20 @@ def create_app(
                 if (
                     not isinstance(series_key, str)
                     or not series_key
-                    or match is None or permit.state != "confirmed"
-                    or permit.category != "sonarr" or permit.reservation_id is None
+                    or match is None
+                    or permit.state != "confirmed"
+                    or permit.category != "sonarr"
+                    or permit.reservation_id is None
                     or permit.destination != "/data/torrents"
                     or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
                 ):
                     continue
-                groups.setdefault(series_key, []).append((
-                    (int(match[1]), int(match[2])), permit,
-                ))
+                groups.setdefault(series_key, []).append(
+                    (
+                        (int(match[1]), int(match[2])),
+                        permit,
+                    )
+                )
             first: dict[str, Permit] = {}
             hashes: set[str] = set(movie_permits)
             for series_key, episodes in groups.items():
@@ -586,9 +784,7 @@ def create_app(
 
         def torrent_list() -> list[dict[str, Any]]:
             result = upstream.read("/api/v2/torrents/info")
-            if not isinstance(result, list) or any(
-                not isinstance(item, dict) for item in result
-            ):
+            if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
                 raise HTTPException(status_code=502, detail="invalid torrent list")
             return result
 
@@ -601,13 +797,18 @@ def create_app(
                 and item.get("save_path") == "/data/torrents"
                 and item.get("state") in {"downloading", "stalledDL", "queuedDL"}
                 and item.get("force_start") is False
-                and isinstance(progress, (int, float)) and not isinstance(progress, bool)
+                and isinstance(progress, (int, float))
+                and not isinstance(progress, bool)
                 and 0 <= progress < 1
-                and isinstance(left, int) and not isinstance(left, bool) and left > 0
-                and isinstance(priority, int) and not isinstance(priority, bool)
+                and isinstance(left, int)
+                and not isinstance(left, bool)
+                and left > 0
+                and isinstance(priority, int)
+                and not isinstance(priority, bool)
                 and priority > 0
                 and isinstance(item.get("hash"), str)
                 and item["hash"].lower() == infohash
+                and not source_is_protected(infohash)
             )
 
         snapshot = torrent_list()
@@ -625,8 +826,10 @@ def create_app(
                 raise HTTPException(status_code=409, detail="duplicate movie torrent")
             movie_hashes.add(infohash)
             observed = [
-                item[field] for field in ("num_complete", "num_seeds")
-                if isinstance(item.get(field), int) and not isinstance(item[field], bool)
+                item[field]
+                for field in ("num_complete", "num_seeds")
+                if isinstance(item.get(field), int)
+                and not isinstance(item[field], bool)
                 and item[field] >= 0
             ]
             score = max(observed, default=-1)
@@ -641,17 +844,22 @@ def create_app(
         episode_candidates: list[tuple[int, int, str, str]] = []
         for series_key, permit in first_episodes.items():
             matches = [
-                (index, item) for index, item in enumerate(snapshot)
-                if isinstance(item.get("hash"), str)
-                and item["hash"].lower() == permit.infohash
+                (index, item)
+                for index, item in enumerate(snapshot)
+                if isinstance(item.get("hash"), str) and item["hash"].lower() == permit.infohash
             ]
             if len(matches) != 1:
                 continue
             index, item = matches[0]
             if eligible(item, permit.infohash, "sonarr"):
-                episode_candidates.append((
-                    item["priority"], index, permit.infohash, series_key,
-                ))
+                episode_candidates.append(
+                    (
+                        item["priority"],
+                        index,
+                        permit.infohash,
+                        series_key,
+                    )
+                )
 
         current = sorted(candidates)
         desired = sorted(current, key=lambda item: (-item[2], item[0], item[1]))
@@ -660,7 +868,8 @@ def create_app(
         episode_candidates.sort()
         episode_hashes = [item[2] for item in episode_candidates]
         current_global = [
-            item[2] for item in sorted(
+            item[2]
+            for item in sorted(
                 [(item[0], item[1], item[3]) for item in current]
                 + [(item[0], item[1], item[2]) for item in episode_candidates]
             )
@@ -671,15 +880,16 @@ def create_app(
 
         if current_hashes != desired_hashes:
             for infohash in reversed(desired_hashes):
+                require_source_mutable(infohash)
                 upstream.top_priority(infohash)
         for infohash in reversed(episode_hashes):
+            require_source_mutable(infohash)
             upstream.top_priority(infohash)
 
         expected = set(desired_global)
         for attempt in range(5):
             active_permits = {
-                infohash: permit.permit_id
-                for infohash, permit in active_movie_permits().items()
+                infohash: permit.permit_id for infohash, permit in active_movie_permits().items()
             }
             if any(
                 active_permits.get(infohash) != movie_permits[infohash].permit_id
@@ -699,7 +909,8 @@ def create_app(
                 if isinstance(item.get("hash"), str)
                 and item["hash"].lower() in expected
                 and eligible(
-                    item, item["hash"].lower(),
+                    item,
+                    item["hash"].lower(),
                     "radarr" if item["hash"].lower() in movie_hashes else "sonarr",
                 )
             ]
@@ -750,8 +961,14 @@ def create_app(
             if not isinstance(result, dict):
                 raise HTTPException(status_code=502, detail="invalid qBittorrent preferences")
             safe = {
-                "save_path", "queueing_enabled", "max_ratio_enabled", "max_ratio",
-                "max_seeding_time_enabled", "max_seeding_time", "max_ratio_act", "dht",
+                "save_path",
+                "queueing_enabled",
+                "max_ratio_enabled",
+                "max_ratio",
+                "max_seeding_time_enabled",
+                "max_seeding_time",
+                "max_ratio_act",
+                "dht",
             }
             return {key: value for key, value in result.items() if key in safe}
         if not isinstance(result, str):
@@ -827,10 +1044,7 @@ def create_app(
             except (AssertionError, ValueError) as error:
                 raise HTTPException(status_code=422, detail="invalid multipart body") from error
             stopped = form.get("stopped", "false")
-            if (
-                not isinstance(stopped, str)
-                or stopped.lower() != "false"
-            ):
+            if not isinstance(stopped, str) or stopped.lower() != "false":
                 raise HTTPException(status_code=422, detail="unsupported torrent state")
             destination = form.get("savepath", "/data/torrents")
             category = form.get("category", "")
@@ -848,7 +1062,9 @@ def create_app(
                     raise HTTPException(status_code=422, detail="invalid destination")
                 try:
                     matched = permits.find_for_magnet(
-                        infohash=infohash, destination=destination, category=category,
+                        infohash=infohash,
+                        destination=destination,
+                        category=category,
                     )
                 except PermissionError as error:
                     raise HTTPException(status_code=403, detail=str(error)) from error
@@ -860,10 +1076,14 @@ def create_app(
                         status_code=403, detail="verified torrent metadata required"
                     )
                 payload = {
-                    "infohash": infohash, "savepath": destination,
+                    "infohash": infohash,
+                    "savepath": destination,
                     "category": category,
-                    **({"torrent_bytes": verified} if verified is not None
-                       else {"magnet_url": magnet}),
+                    **(
+                        {"torrent_bytes": verified}
+                        if verified is not None
+                        else {"magnet_url": magnet}
+                    ),
                 }
                 if verified is not None:
                     total_bytes = inspect_torrent(verified).total_bytes
@@ -927,12 +1147,22 @@ def create_app(
             raise HTTPException(status_code=422, detail="invalid destination")
         if not permit_token:
             raise HTTPException(status_code=403, detail="admission permit required")
+        require_source_mutable(infohash)
+        permit = permits.get(permit_token)
+        if permit is not None:
+            require_permit_mutable(permit)
         if total_bytes is not None:
-            permit = permits.get(permit_token)
             if permit is None or permit.budget_bytes is None or total_bytes > permit.budget_bytes:
                 raise HTTPException(status_code=403, detail="torrent exceeds reserved budget")
 
         def dispatch(_permit: Permit) -> dict[str, Any]:
+            require_permit_mutable(_permit)
+            if _permit.probe_parent_id is not None:
+                if capacity_provider is None:
+                    raise PermissionError("fresh_filesystem_evidence_required")
+                capacity = capacity_provider()
+                if permits.pending_bytes(capacity) > capacity.free_bytes:
+                    raise PermissionError("waiting_space")
             return upstream.add_torrent({**payload, "infohash": infohash, "savepath": destination})
 
         try:
@@ -957,29 +1187,91 @@ def create_app(
 
 
 def _configured_upstream() -> QbitClient:
+    username = os.environ.get("HOMESERVER_QBIT_USERNAME")
+    password = os.environ.get("HOMESERVER_QBIT_PASSWORD")
+    if username and password:
+        return QBittorrentAdapter(
+            base_url=os.environ.get("HOMESERVER_QBIT_URL", "http://qbittorrent:8080"),
+            username=username,
+            password=password,
+            client=httpx.Client(
+                timeout=float(os.environ.get("HOMESERVER_HTTP_TIMEOUT_SECONDS", "15")),
+                trust_env=False,
+            ),
+        )
     credentials_file = os.environ.get("HOMESERVER_QBIT_CREDENTIALS_FILE")
     if not credentials_file:
         return UnconfiguredQbitClient()
-    credentials: dict[str, str] = {}
-    with open(credentials_file, encoding="utf-8") as handle:
-        for line in handle:
-            if "=" in line and not line.lstrip().startswith("#"):
-                key, value = line.strip().split("=", 1)
-                credentials[key] = value
+    from homeserver_common.env import parse_env
+
+    credentials = parse_env(Path(credentials_file).read_text(encoding="utf-8"))
     return QBittorrentAdapter(
         base_url=os.environ.get("HOMESERVER_QBIT_URL", "http://qbittorrent:8080"),
         username=credentials["QBIT_USERNAME"],
         password=credentials["QBIT_PASSWORD"],
+        client=httpx.Client(
+            timeout=float(os.environ.get("HOMESERVER_HTTP_TIMEOUT_SECONDS", "15")),
+            trust_env=False,
+        ),
     )
 
 
 _database_path = os.environ.get("HOMESERVER_DB_PATH")
+_production_permits = PermitRegistry(_database_path)
+_production_upstream = _configured_upstream()
+_production_source_health = SourceHealthStore(_database_path) if _database_path else None
+
+
+def _configured_capacity():
+    entries = _production_upstream.read("/api/v2/torrents/info")
+    if not isinstance(entries, list):
+        raise ValueError("invalid queue evidence")
+    payload = [
+        {**entry, "admitted": _production_permits.is_admitted(entry.get("hash", ""))}
+        for entry in entries
+        if isinstance(entry, dict)
+    ]
+    return capacity_from_queue(
+        snapshot_path=Path(
+            os.environ.get("HOMESERVER_CAPACITY_SNAPSHOT", "/run/homeserver/capacity.json")
+        ),
+        data_root=Path("/data"),
+        payload=payload,
+        expected_filesystem_id=os.environ.get("HOMESERVER_MEDIA_UUID") or None,
+        max_age_seconds=float(os.environ.get("HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS", "30")),
+    )
+
+
+def _configured_worker_health() -> bool:
+    return bool(
+        _database_path
+        and WorkerHeartbeatStore(_database_path).ready(
+            now=time.time(),
+            max_age=float(os.environ.get("HOMESERVER_WORKER_HEARTBEAT_MAX_AGE_SECONDS", "90")),
+        )
+    )
+
+
+def _configured_protected_source(infohash: str) -> bool:
+    configured = {
+        value.strip().lower()
+        for value in os.environ.get("HOMESERVER_SOURCE_PROTECTED_HASHES", "").split(",")
+        if value.strip()
+    }
+    if infohash.lower() in configured:
+        return True
+    return bool(_production_source_health and _production_source_health.is_protected(infohash))
+
+
 app = create_app(
-    permits=PermitRegistry(os.environ.get("HOMESERVER_DB_PATH")),
-    upstream=_configured_upstream(),
+    permits=_production_permits,
+    upstream=_production_upstream,
+    capacity_provider=_configured_capacity,
     torrent_store=TorrentArtifactStore(_database_path) if _database_path else None,
     arr_token=os.environ.get("HOMESERVER_ARR_TOKEN", "unconfigured"),
     recovery_mode_path=os.environ.get(
         "HOMESERVER_RECOVERY_MODE", "/var/lib/homeserver/RECOVERY_MODE"
     ),
+    worker_health_provider=_configured_worker_health,
+    protected_source_provider=_configured_protected_source,
 )

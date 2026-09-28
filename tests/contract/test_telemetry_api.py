@@ -49,17 +49,20 @@ def _snapshot() -> dict:
 
 
 def test_telemetry_endpoint_returns_versioned_snapshot() -> None:
-    client = TestClient(create_app(snapshot_provider=lambda: _snapshot()))
+    client = TestClient(
+        create_app(status_provider=lambda: {"schema_version": 2, "host": {"state": "ok"}})
+    )
     response = client.get("/api/v1/telemetry")
     assert response.status_code == 200
-    assert response.json()["schema_version"] == 1
+    assert response.json()["schema_version"] == 2
+    assert response.json() == client.get("/api/v1/status").json()
 
 
 def test_telemetry_endpoint_returns_503_when_provider_fails() -> None:
     def failed_provider() -> dict:
         raise RuntimeError("controller unavailable")
 
-    client = TestClient(create_app(snapshot_provider=failed_provider))
+    client = TestClient(create_app(status_provider=failed_provider))
     response = client.get("/api/v1/telemetry")
     assert response.status_code == 503
 
@@ -125,7 +128,7 @@ def test_status_dashboard_links_native_services_through_tailscale(monkeypatch) -
 
 def test_status_dashboard_disables_links_without_valid_tailscale_hostname(monkeypatch) -> None:
     client = TestClient(create_app(snapshot_provider=lambda: _snapshot()))
-    for hostname in (None, "https://server.example.ts.net/\" onmouseover=\"alert(1)"):
+    for hostname in (None, 'https://server.example.ts.net/" onmouseover="alert(1)'):
         if hostname is None:
             monkeypatch.delenv("HOMESERVER_TAILSCALE_HOSTNAME", raising=False)
         else:

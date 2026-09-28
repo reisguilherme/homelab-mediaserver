@@ -43,6 +43,21 @@ def _write_snapshots(root: Path, *, generated_at: datetime) -> tuple[Path, Path]
     return host, capacity
 
 
+def test_stale_host_cannot_report_backup_as_current(tmp_path):
+    from homeserver_telemetry.status import StatusProvider
+
+    host, capacity = _write_snapshots(
+        tmp_path, generated_at=datetime.now(UTC) - timedelta(days=2)
+    )
+    snapshot = json.loads(host.read_text())
+    snapshot["backup"] = {"state": "ok", "age_seconds": 60, "completed_at": time.time() - 60}
+    host.write_text(json.dumps(snapshot))
+    provider = StatusProvider(host_path=host, capacity_path=capacity, media_root=tmp_path)
+    assert provider()["backup"] == {
+        "state": "unavailable", "age_seconds": None, "completed_at": None,
+    }
+
+
 def test_status_combines_recent_host_metrics_and_deduplicated_storage(tmp_path: Path) -> None:
     from homeserver_telemetry.status import StatusProvider
 

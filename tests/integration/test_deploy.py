@@ -52,7 +52,11 @@ def test_deploy_rejects_manifest_without_image_digests(local_tmp: Path) -> None:
     )
     config = tmp_path / "deploy.env"
 
-    config.write_text(f"HOMESERVER_ROOT={_bash_path(tmp_path / 'homeserver')}\n", encoding="utf-8")
+    config.write_text(
+        "HOMESERVER_ENVIRONMENT=dev\n"
+        f"HOMESERVER_INSTALL_ROOT={_bash_path(tmp_path / 'homeserver')}\n",
+        encoding="utf-8",
+    )
     result = subprocess.run(
         [
             bash,
@@ -74,7 +78,7 @@ def test_deploy_rejects_manifest_without_image_digests(local_tmp: Path) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="release extraction test runs in Linux")
-def test_deploy_extracts_release_before_switching_current(local_tmp: Path) -> None:
+def test_deploy_rejects_legacy_manifest_without_activating(local_tmp: Path) -> None:
     tmp_path = local_tmp
     artifact = tmp_path / "release.tar"
     source = tmp_path / "source"
@@ -104,7 +108,11 @@ def test_deploy_extracts_release_before_switching_current(local_tmp: Path) -> No
         encoding="utf-8",
     )
     config = tmp_path / "deploy.env"
-    config.write_text(f"HOMESERVER_ROOT={_bash_path(tmp_path / 'homeserver')}\n", encoding="utf-8")
+    config.write_text(
+        "HOMESERVER_ENVIRONMENT=dev\n"
+        f"HOMESERVER_INSTALL_ROOT={_bash_path(tmp_path / 'homeserver')}\n",
+        encoding="utf-8",
+    )
 
     result = subprocess.run(
         [
@@ -123,8 +131,7 @@ def test_deploy_extracts_release_before_switching_current(local_tmp: Path) -> No
         capture_output=True,
     )
 
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0
+    assert "schema v2" in result.stderr
     current = tmp_path / "homeserver" / "current"
-    assert current.is_symlink()
-    assert (current / "deploy" / "compose.yaml").exists()
-    assert (current / "COMMIT").read_text(encoding="utf-8").strip() == release
+    assert not current.exists()

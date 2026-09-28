@@ -63,8 +63,8 @@ def test_capture_and_restore_uses_isolated_target(local_tmp: Path) -> None:
         ),
         encoding="utf-8",
     )
-    script = _bash_path(Path("scripts/backup.sh"))
-    restore_script = _bash_path(Path("scripts/restore.sh"))
+    script = _bash_path(Path("tests/helpers/legacy-backup.sh"))
+    restore_script = _bash_path(Path("tests/helpers/legacy-restore.sh"))
 
     result = subprocess.run(
         [_bash(), script, "--config", _bash_path(config), "--capture-and-send"],
@@ -94,8 +94,10 @@ def test_capture_and_restore_uses_isolated_target(local_tmp: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert (target / source.name / "control.sqlite3").read_text(encoding="utf-8") == "control"
-    assert (target / "control" / "RECOVERY_MODE").read_text(encoding="utf-8").startswith(
-        "admission_enabled=false\n"
+    assert (
+        (target / "control" / "RECOVERY_MODE")
+        .read_text(encoding="utf-8")
+        .startswith("admission_enabled=false\n")
     )
 
 
@@ -120,7 +122,7 @@ def test_sent_snapshot_is_not_copied_again_from_staging(local_tmp: Path) -> None
         ),
         encoding="utf-8",
     )
-    script = _bash_path(Path("scripts/backup.sh"))
+    script = _bash_path(Path("tests/helpers/legacy-backup.sh"))
     first = subprocess.run(
         [_bash(), script, "--config", _bash_path(config), "--capture-and-send"],
         text=True,
@@ -154,7 +156,7 @@ def test_restore_rejects_production_roots(local_tmp: Path) -> None:
     result = subprocess.run(
         [
             _bash(),
-            _bash_path(Path("scripts/restore.sh")),
+            _bash_path(Path("tests/helpers/legacy-restore.sh")),
             "--config",
             _bash_path(config),
             "--snapshot",
@@ -191,7 +193,7 @@ def test_restore_rejects_paths_that_escape_restore_root(local_tmp: Path) -> None
     result = subprocess.run(
         [
             _bash(),
-            _bash_path(Path("scripts/restore.sh")),
+            _bash_path(Path("tests/helpers/legacy-restore.sh")),
             "--config",
             _bash_path(config),
             "--snapshot",
@@ -236,7 +238,7 @@ def test_restore_rejects_occupied_target_without_overwriting(local_tmp: Path) ->
     result = subprocess.run(
         [
             _bash(),
-            _bash_path(Path("scripts/restore.sh")),
+            _bash_path(Path("tests/helpers/legacy-restore.sh")),
             "--config",
             _bash_path(config),
             "--snapshot",
@@ -263,7 +265,7 @@ def test_restore_rejects_symlink_alias_inside_restore_root(local_tmp: Path) -> N
     result = subprocess.run(
         [
             _bash(),
-            _bash_path(Path("scripts/restore.sh")),
+            _bash_path(Path("tests/helpers/legacy-restore.sh")),
             "--config",
             _bash_path(config),
             "--snapshot",
@@ -288,10 +290,13 @@ def test_restore_rejects_snapshot_path_traversal(local_tmp: Path) -> None:
     result = subprocess.run(
         [
             _bash(),
-            _bash_path(Path("scripts/restore.sh")),
-            "--config", _bash_path(config),
-            "--snapshot", "../outside",
-            "--target", _bash_path(target),
+            _bash_path(Path("tests/helpers/legacy-restore.sh")),
+            "--config",
+            _bash_path(config),
+            "--snapshot",
+            "../outside",
+            "--target",
+            _bash_path(target),
             "--isolated",
         ],
         text=True,

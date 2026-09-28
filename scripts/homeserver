@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""Run checked-out HomeServer tooling without installation or shell evaluation."""
+import sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parent.parent
+for service in ('common', 'control', 'telemetry'):
+    sys.path.insert(0, str(root / 'services' / service / 'src'))
+from homeserver_common.cli import main
+
+raise SystemExit(main())

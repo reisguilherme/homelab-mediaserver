@@ -45,3 +45,22 @@ def test_delivery_sanitizes_secrets_and_retries_transport_failures(
     service.deliver(now=60)
     assert sent[0]["token"] == "<redacted>"
     assert "<redacted>" in sent[0]["url"]
+
+
+def test_retry_interval_is_configurable_and_exponential(outbox):
+    attempts = []
+
+    def transport(payload):
+        attempts.append(payload)
+        raise RuntimeError("offline")
+
+    service = NotificationService(outbox=outbox, transport=transport, retry_seconds=5)
+    service.enqueue(event_type="stack", object_id="server", generation="1", payload={})
+    assert service.deliver(now=0) == 0
+    assert service.deliver(now=4) == 0
+    assert len(attempts) == 1
+    assert service.deliver(now=5) == 0
+    assert service.deliver(now=14) == 0
+    assert len(attempts) == 2
+    assert service.deliver(now=15) == 0
+    assert len(attempts) == 3

@@ -22,11 +22,12 @@ from .capacity_evidence import CapacityEvidence
 from .imports import import_hardlink, probe_hardlink_as
 from .subdl import SubDLSource
 from .subtitle_language import (
-    audio_is_brazilian_portuguese,
+    SubtitlePolicy,
     has_embedded_english_subtitle,
     is_brazilian_portuguese_subtitle,
     is_english_subtitle,
 )
+from .subtitle_recovery import recover_subtitle
 from .validation import ValidationError, validate_media
 
 _VIDEO = {".mkv", ".mp4", ".m4v", ".avi", ".mov"}
@@ -75,7 +76,10 @@ def _write_external_subtitle(
     temporary: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="wb", prefix=f".{suffix}-", suffix=".tmp", dir=target.parent,
+            mode="wb",
+            prefix=f".{suffix}-",
+            suffix=".tmp",
+            dir=target.parent,
             delete=False,
         ) as output:
             temporary = output.name
@@ -108,6 +112,7 @@ class MovieFinalizer:
         media_root: str | Path = "/data/media/movies",
         client: httpx.AsyncClient | None = None,
         subtitle_source: SubDLSource | None = None,
+        subtitle_policy: SubtitlePolicy | None = None,
         capacity_provider: Callable[[], Awaitable[CapacityEvidence]] | None = None,
         import_uid: int | None = None,
         import_gid: int | None = None,
@@ -125,6 +130,7 @@ class MovieFinalizer:
         self.radarr_headers = {"X-Api-Key": radarr_api_key}
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(15.0))
         self.subtitle_source = subtitle_source
+        self.subtitle_policy = subtitle_policy or SubtitlePolicy()
         self.capacity_provider = capacity_provider
         self.import_uid = import_uid
         self.import_gid = import_gid
@@ -153,9 +159,7 @@ class MovieFinalizer:
     def _can_hardlink_video(self, video: Path) -> bool:
         if self.import_uid is None or self.import_gid is None:
             return False
-        return probe_hardlink_as(
-            video, self.media_root, uid=self.import_uid, gid=self.import_gid
-        )
+        return probe_hardlink_as(video, self.media_root, uid=self.import_uid, gid=self.import_gid)
 
     def _import_matches_source(self, video: Path, permit: Permit, *, copy_allowed: bool) -> bool:
         sources = [
@@ -167,13 +171,9 @@ class MovieFinalizer:
             raise ValidationError("permit does not identify one video file")
         source_stat = sources[0].stat()
         video_stat = video.stat()
-        return (
-            source_stat.st_size == video_stat.st_size
-            and (
-                (source_stat.st_dev == video_stat.st_dev
-                 and source_stat.st_ino == video_stat.st_ino)
-                or (copy_allowed and _same_content(sources[0], video))
-            )
+        return source_stat.st_size == video_stat.st_size and (
+            (source_stat.st_dev == video_stat.st_dev and source_stat.st_ino == video_stat.st_ino)
+            or (copy_allowed and _same_content(sources[0], video))
         )
 
     def _local_path(self, raw: str) -> Path:
@@ -194,7 +194,8 @@ class MovieFinalizer:
     async def _radarr_movie(self, media_key: str) -> dict[str, object] | None:
         tmdb_id = media_key.rsplit(":", 1)[-1]
         response = await self.client.get(
-            f"{self.radarr_url}/api/v3/movie", params={"tmdbId": tmdb_id},
+            f"{self.radarr_url}/api/v3/movie",
+            params={"tmdbId": tmdb_id},
             headers=self.radarr_headers,
         )
         response.raise_for_status()
@@ -202,8 +203,11 @@ class MovieFinalizer:
         if not isinstance(payload, list):
             raise ValidationError("Radarr movie lookup is invalid")
         return next(
-            (item for item in payload if isinstance(item, dict)
-             and item.get("tmdbId") == int(tmdb_id)),
+            (
+                item
+                for item in payload
+                if isinstance(item, dict) and item.get("tmdbId") == int(tmdb_id)
+            ),
             None,
         )
 
@@ -221,7 +225,7 @@ class MovieFinalizer:
             or any(part in {"..", "."} for part in PurePosixPath(relative).parts)
         ):
             raise ValidationError("Radarr imported movie path is invalid")
-        folder = self.media_root.joinpath(*PurePosixPath(movie_path[len(prefix) + 1:]).parts)
+        folder = self.media_root.joinpath(*PurePosixPath(movie_path[len(prefix) + 1 :]).parts)
         movie_file_path = folder.joinpath(*PurePosixPath(relative).parts)
         root = self.media_root.resolve(strict=True)
         resolved = movie_file_path.resolve(strict=True)
@@ -232,14 +236,18 @@ class MovieFinalizer:
     def _ensure_subtitle_for_video(
         self, video: Path, permit: Permit, scope_key: str | None
     ) -> None:
-        for language, label, matches in (
-            ("BR_PT", "pt-BR", is_brazilian_portuguese_subtitle),
-            ("EN", "en", is_english_subtitle),
-        ):
+        handlers = {
+            "pt-BR": ("BR_PT", "pt-BR", is_brazilian_portuguese_subtitle),
+            "en-US": ("EN", "en", is_english_subtitle),
+        }
+        for preferred in self.subtitle_policy.languages:
+            language, label, matches = handlers[preferred]
             subtitles = [
                 self._local_path(f"/data/torrents/{name}")
                 for name in permit.selected_files
-                if PurePosixPath(name).suffix.lower() in _SUBTITLE and matches(name)
+                if PurePosixPath(name).suffix.lower() in _SUBTITLE
+                and matches(name)
+                and self.subtitle_policy.matches(name)
             ]
             source = next((path for path in subtitles if _subtitle_has_content(path)), None)
             if subtitles and source is None:
@@ -248,26 +256,34 @@ class MovieFinalizer:
                 self._install_subtitle_file(video, source, label)
                 return
             content = self.subtitle_store.get(
-                permit.reservation_id, scope_key, permit.infohash, language=language,
+                permit.reservation_id,
+                scope_key,
+                permit.infohash,
+                language=language,
                 source=MOVIE_FINALIZER_SOURCE if scope_key is None else "subdl",
             )
             if content is not None:
-                _write_external_subtitle(
-                    video, content, self.media_root, language=language
-                )
+                _write_external_subtitle(video, content, self.media_root, language=language)
                 return
         validated = validate_media(video, maximum_bytes=permit.budget_bytes)
         if not (
-            audio_is_brazilian_portuguese(validated.probe)
-            or has_embedded_english_subtitle(validated.probe)
+            self.subtitle_policy.waives_subtitles(validated.probe)
+            or (
+                "en-US" in self.subtitle_policy.languages
+                and self.subtitle_policy.allow_generic_english
+                and has_embedded_english_subtitle(validated.probe)
+            )
         ):
             raise ValidationError("subtitle vanished after import")
 
     def _install_subtitle_file(self, video: Path, source: Path, label: str) -> None:
         target = video.with_name(f"{video.stem}.{label}{source.suffix.lower()}")
         if target.exists():
-            if (target.is_symlink() or not target.is_file()
-                    or target.read_bytes() != source.read_bytes()):
+            if (
+                target.is_symlink()
+                or not target.is_file()
+                or target.read_bytes() != source.read_bytes()
+            ):
                 raise ValidationError("existing library subtitle differs from verified source")
             return
         root = self.media_root.resolve(strict=True)
@@ -295,7 +311,8 @@ class MovieFinalizer:
             if movie is None or not movie.get("hasFile"):
                 return "import_pending"
             if not self._import_matches_source(
-                self._movie_file(movie), permit,
+                self._movie_file(movie),
+                permit,
                 copy_allowed=import_state == "accepted_copy",
             ):
                 return "import_uncertain"
@@ -305,15 +322,19 @@ class MovieFinalizer:
 
         response = await self.client.get(
             f"{self.gateway_url}/api/v2/torrents/info",
-            params={"hashes": permit.infohash}, headers=self.gateway_headers,
+            params={"hashes": permit.infohash},
+            headers=self.gateway_headers,
         )
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, list):
             raise ValidationError("gateway torrent response is invalid")
         torrent = next(
-            (item for item in payload if isinstance(item, dict)
-             and item.get("hash", "").lower() == permit.infohash),
+            (
+                item
+                for item in payload
+                if isinstance(item, dict) and item.get("hash", "").lower() == permit.infohash
+            ),
             None,
         )
         if torrent is None:
@@ -328,15 +349,18 @@ class MovieFinalizer:
             raise ValidationError("permit has no selected files")
         files_response = await self.client.get(
             f"{self.gateway_url}/api/v2/torrents/files",
-            params={"hash": permit.infohash}, headers=self.gateway_headers,
+            params={"hash": permit.infohash},
+            headers=self.gateway_headers,
         )
         files_response.raise_for_status()
         files = files_response.json()
         if not isinstance(files, list):
             raise ValidationError("gateway file response is invalid")
         sizes = {
-            item["name"]: item["size"] for item in files
-            if isinstance(item, dict) and isinstance(item.get("name"), str)
+            item["name"]: item["size"]
+            for item in files
+            if isinstance(item, dict)
+            and isinstance(item.get("name"), str)
             and isinstance(item.get("size"), int)
         }
         selected: list[Path] = []
@@ -349,19 +373,12 @@ class MovieFinalizer:
             selected.append(path)
         videos = [path for path in selected if path.suffix.lower() in _VIDEO]
         subtitle_files = [path for path in selected if path.suffix.lower() in _SUBTITLE]
-        if any(
-            not (is_brazilian_portuguese_subtitle(str(path))
-                 or is_english_subtitle(str(path)))
-            for path in subtitle_files
-        ):
+        if any(not self.subtitle_policy.matches(str(path)) for path in subtitle_files):
             raise ValidationError("selected subtitle is not Brazilian Portuguese or English")
         brazilian_subtitles = [
-            path for path in subtitle_files
-            if is_brazilian_portuguese_subtitle(str(path))
+            path for path in subtitle_files if is_brazilian_portuguese_subtitle(str(path))
         ]
-        english_subtitles = [
-            path for path in subtitle_files if is_english_subtitle(str(path))
-        ]
+        english_subtitles = [path for path in subtitle_files if is_english_subtitle(str(path))]
         if len(videos) != 1:
             raise ValidationError("movie video or Brazilian Portuguese subtitle is missing")
         validated = validate_media(videos[0], maximum_bytes=permit.budget_bytes)
@@ -369,13 +386,17 @@ class MovieFinalizer:
             raise ValidationError("movie has no audio stream")
         if subtitle_files and any(not _subtitle_has_content(path) for path in subtitle_files):
             raise ValidationError("selected subtitle content is not valid")
-        release_titles = list(dict.fromkeys(
-            title for title in (
-                videos[0].stem,
-                content.name if content.is_dir() else None,
-                torrent.get("name"),
-            ) if isinstance(title, str) and title
-        ))
+        release_titles = list(
+            dict.fromkeys(
+                title
+                for title in (
+                    videos[0].stem,
+                    content.name if content.is_dir() else None,
+                    torrent.get("name"),
+                )
+                if isinstance(title, str) and title
+            )
+        )
 
         async def fetch_subtitle(language: str, match_mode: str) -> bytes | None:
             if self.subtitle_source is None:
@@ -388,59 +409,68 @@ class MovieFinalizer:
                 movie_duration_seconds=validated.probe.duration_seconds,
             )
 
-        original_ptbr = audio_is_brazilian_portuguese(validated.probe)
-        has_brazilian = bool(brazilian_subtitles) or self.subtitle_store.get(
-            reservation_id, None, permit.infohash, language="BR_PT",
-            source=MOVIE_FINALIZER_SOURCE,
-        ) is not None
-        if not original_ptbr and not has_brazilian:
-            found = await fetch_subtitle("BR_PT", "exact")
-            if found is None:
-                found = await fetch_subtitle("BR_PT", "same_duration")
-            if found is not None:
-                self.subtitle_store.put(
-                    reservation_id, None, permit.infohash, found,
-                    source=MOVIE_FINALIZER_SOURCE,
-                )
-            has_brazilian = self.subtitle_store.get(
-                reservation_id, None, permit.infohash, language="BR_PT",
+        original_ptbr = self.subtitle_policy.waives_subtitles(validated.probe)
+        has_brazilian = (
+            bool(brazilian_subtitles)
+            or self.subtitle_store.get(
+                reservation_id,
+                None,
+                permit.infohash,
+                language="BR_PT",
                 source=MOVIE_FINALIZER_SOURCE,
-            ) is not None
-        if (
-            not original_ptbr and not has_brazilian and not english_subtitles
-            and not has_embedded_english_subtitle(validated.probe)
-        ):
-            has_english = self.subtitle_store.get(
-                reservation_id, None, permit.infohash, language="EN",
+            )
+            is not None
+        )
+        has_english = (
+            bool(english_subtitles)
+            or self.subtitle_store.get(
+                reservation_id,
+                None,
+                permit.infohash,
+                language="EN",
                 source=MOVIE_FINALIZER_SOURCE,
-            ) is not None
-            if not has_english:
-                found = await fetch_subtitle("EN", "exact")
-                if found is None:
-                    found = await fetch_subtitle("EN", "same_duration")
-                if found is not None:
-                    self.subtitle_store.put(
-                        reservation_id, None, permit.infohash, found, language="EN",
-                        source=MOVIE_FINALIZER_SOURCE,
-                    )
-                    has_english = True
-            if not has_english:
+            )
+            is not None
+            or (
+                self.subtitle_policy.allow_generic_english
+                and has_embedded_english_subtitle(validated.probe)
+            )
+        )
+        if not original_ptbr:
+            result = await recover_subtitle(
+                self.subtitle_policy,
+                fetch_subtitle,
+                already_present=lambda language: (
+                    has_brazilian if language == "BR_PT" else has_english
+                ),
+            )
+            if result is None:
                 return "waiting_subtitles"
+            if result.content:
+                self.subtitle_store.put(
+                    reservation_id,
+                    None,
+                    permit.infohash,
+                    result.content,
+                    language=result.language,
+                    source=MOVIE_FINALIZER_SOURCE,
+                    replace_language=True,
+                )
         if not await self._hardlink_import_enabled():
             return "import_guard"
         hardlink_ready = self._can_hardlink_video(videos[0])
         if not hardlink_ready and not await self._copy_fallback_fits(selected):
             return "waiting_space"
-        if not self.repository.claim_movie_import(
-            reservation_id, copy_allowed=not hardlink_ready
-        ):
+        if not self.repository.claim_movie_import(reservation_id, copy_allowed=not hardlink_ready):
             return "import_pending"
         response = await self.client.post(
             f"{self.radarr_url}/api/v3/command",
             headers=self.radarr_headers,
             json={
-                "name": "DownloadedMoviesScan", "path": content_path,
-                "downloadClientId": permit.infohash.upper(), "importMode": "Copy",
+                "name": "DownloadedMoviesScan",
+                "path": content_path,
+                "downloadClientId": permit.infohash.upper(),
+                "importMode": "Copy",
             },
         )
         response.raise_for_status()

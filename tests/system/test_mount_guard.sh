@@ -5,7 +5,7 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 script="$repo_root/scripts/check-mount.sh"
 test_root=$(mktemp -d)
 fake_bin="$test_root/bin"
-mount_path="$test_root/data"
+mount_path="$test_root/data with spaces"
 mkdir -p "$fake_bin" "$mount_path"
 trap 'rm -rf "$test_root"' EXIT
 
@@ -16,9 +16,9 @@ if [[ "${FAKE_FINDMNT_MODE:-mounted}" == "not-mounted" ]]; then
   exit 1
 fi
 if [[ "${FAKE_FINDMNT_MODE:-mounted}" == "wrong-target" ]]; then
-  printf '/\t%s\trw\n' "${FAKE_FINDMNT_UUID:-test-uuid}"
+  printf '{"filesystems":[{"target":"/","uuid":"%s","options":"rw"}]}\n' "${FAKE_FINDMNT_UUID:-test-uuid}"
 else
-  printf '%s\t%s\t%s\n' "$FAKE_FINDMNT_TARGET" "${FAKE_FINDMNT_UUID:-test-uuid}" "${FAKE_FINDMNT_OPTIONS:-rw}"
+  printf '{"filesystems":[{"target":"%s","uuid":"%s","options":"%s"}]}\n' "$FAKE_FINDMNT_TARGET" "${FAKE_FINDMNT_UUID:-test-uuid}" "${FAKE_FINDMNT_OPTIONS:-rw}"
 fi
 FAKE_FINDMNT
 chmod +x "$fake_bin/findmnt"

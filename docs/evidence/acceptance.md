@@ -1,5 +1,9 @@
 # Aceite do HomeServer
 
+> Evidência histórica do incremento inicial. Não descreve a versão atual nem
+> seus requisitos; CYD/MQTT foram retirados do produto. A validação atual está
+> no [aceite de produtização](productization-acceptance.md).
+
 ## Estado desta entrega
 
 Os contratos e testes locais de domínio, SQLite, gateway, API, telemetria,

@@ -45,7 +45,7 @@ async def test_reconciles_uncertain_permits_across_episode_scopes_and_throttles(
         sent.append(request.read().decode())
         return httpx.Response(200, json={"state": "confirmed"})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(timeout=37, transport=httpx.MockTransport(handler)) as client:
         reconciler = SourceReconciler(
             permits=permits, gateway_url="http://download-gateway:8081",
             arr_token="worker-secret", client=client, clock=lambda: now[0],
@@ -71,7 +71,7 @@ async def test_reconciliation_failure_does_not_block_later_permit() -> None:
             return httpx.Response(409, json={"detail": "metadata unavailable"})
         return httpx.Response(200, json={"state": "confirmed"})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(timeout=37, transport=httpx.MockTransport(handler)) as client:
         reconciler = SourceReconciler(
             permits=permits, gateway_url="http://download-gateway:8081",
             arr_token="worker-secret", client=client,
@@ -89,10 +89,10 @@ async def test_reconciliation_rotates_past_ten_persistently_missing_sources() ->
 
     def handler(request: httpx.Request) -> httpx.Response:
         sent.append(request.read().decode())
-        assert request.extensions["timeout"]["read"] == 3.0
+        assert request.extensions["timeout"]["read"] == 37.0
         return httpx.Response(200, json={"state": "missing"})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(timeout=37, transport=httpx.MockTransport(handler)) as client:
         reconciler = SourceReconciler(
             permits=permits, gateway_url="http://download-gateway:8081",
             arr_token="worker-secret", client=client, clock=lambda: now[0],

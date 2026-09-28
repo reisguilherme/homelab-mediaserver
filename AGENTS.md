@@ -8,6 +8,8 @@
 - `make test-integration`: SQLite, filesystem temporário e containers quando disponíveis.
 - `make compose-check`: valida o Compose dev sem segredos de produção.
 - `make smoke`: healthchecks locais e guarda de montagem em modo fixture.
+- `make test-config`, `make test-install`, `make test-restic`: configuração,
+  instalação idempotente e recuperação real com Restic temporário.
 
 Use Python 3.12 e `uv sync --frozen` no ambiente Linux/WSL2. O desktop Windows não substitui os testes de filesystem, GPU, rede, energia, Docker e reprodução no Legion.
 
@@ -20,8 +22,8 @@ Use Python 3.12 e `uv sync --frozen` no ambiente Linux/WSL2. O desktop Windows n
 
 ## Operações proibidas nesta versão
 
-Não formatar ou particionar discos, ativar mergerfs, reativar a RTX, substituir `fstab`, reescrever o serviço Lenovo, abrir portas no roteador, publicar a API do qBittorrent na LAN, liberar downloads sem reserva/gateway ou apagar mídia automaticamente.
+Não formatar ou particionar discos, ativar mergerfs, reativar a RTX, substituir `fstab`, reescrever o serviço Lenovo, abrir portas no roteador, publicar a API do qBittorrent na LAN, liberar downloads sem gateway e checagem de capacidade real ou apagar mídia automaticamente.
 
 ## Estado externo
 
-Os scripts de auditoria e deploy registram `reported`, `verified`, `missing` e `unknown`. Não transformar uma informação fornecida pelo usuário em comprovação física. Validações SSH/Tailscale, Intel UHD, ESP32, SFTP e reprodução exigem o ambiente real.
+Os scripts de auditoria e deploy registram `reported`, `verified`, `missing` e `unknown`. Não transformar uma informação fornecida pelo usuário em comprovação física. Validações SSH/Tailscale, Intel UHD, SFTP e reprodução exigem o ambiente real. CYD e MQTT exclusivo foram retirados; especificações antigas que os mencionem são históricas.

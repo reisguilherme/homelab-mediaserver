@@ -1,0 +1,35 @@
+:8080 {
+	# Reject ambiguous raw paths before Caddy's path matcher normalizes them.
+	# Escapes in query values remain valid (for example, hashes=one%7Ctwo).
+	@ambiguous_path vars_regexp ambiguous_path {http.request.orig_uri} `^[^?]*(%|\\|//|/\.\.?(/|\?|$))`
+
+	@ui {
+		method GET
+		path / /index.html /favicon.ico /css/* /scripts/* /images/* /views/*
+	}
+
+	# qBittorrent 5.1.2 monitoring reads, with native authentication/session checks.
+	@read_api {
+		method GET
+		path /api/v2/app/version /api/v2/app/webapiVersion /api/v2/app/buildInfo /api/v2/app/preferences
+		path /api/v2/sync/maindata /api/v2/sync/torrentPeers
+		path /api/v2/transfer/info /api/v2/transfer/speedLimitsMode /api/v2/transfer/downloadLimit /api/v2/transfer/uploadLimit
+		path /api/v2/torrents/info /api/v2/torrents/properties /api/v2/torrents/trackers /api/v2/torrents/webseeds /api/v2/torrents/files
+		path /api/v2/torrents/pieceStates /api/v2/torrents/pieceHashes /api/v2/torrents/downloadLimit /api/v2/torrents/uploadLimit
+		path /api/v2/torrents/categories /api/v2/torrents/tags /api/v2/log/main /api/v2/log/peers
+	}
+
+	@session {
+		method POST
+		path /api/v2/auth/login /api/v2/auth/logout
+	}
+
+	# Keep this order literal. All download/control actions must use the gateway.
+	route {
+		respond @ambiguous_path "Forbidden" 403
+		reverse_proxy @ui qbittorrent:8080
+		reverse_proxy @read_api qbittorrent:8080
+		reverse_proxy @session qbittorrent:8080
+		respond "Forbidden" 403
+	}
+}

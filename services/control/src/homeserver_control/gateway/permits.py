@@ -15,6 +15,8 @@ from uuid import uuid4
 
 from homeserver_control.worker.capacity_evidence import CapacityEvidence
 
+from .probe_permits import ProbePermits
+
 
 @dataclass
 class Permit:
@@ -33,9 +35,11 @@ class Permit:
     budget_bytes: int | None = None
     state: str = "authorized"
     reported_seeders: int | None = None
+    probe_parent_id: str | None = None
+    quality_rank: tuple[int, ...] | None = None
 
 
-class PermitRegistry:
+class PermitRegistry(ProbePermits):
     """Issue and consume permits with single-use effect transitions.
 
     The in-memory mode keeps contract tests lightweight. Production passes the
@@ -110,11 +114,16 @@ class PermitRegistry:
                 connection.execute(
                     "ALTER TABLE gateway_permits ADD COLUMN reported_seeders INTEGER"
                 )
+            if "probe_parent_id" not in columns:
+                connection.execute("ALTER TABLE gateway_permits ADD COLUMN probe_parent_id TEXT")
+            if "quality_rank_json" not in columns:
+                connection.execute("ALTER TABLE gateway_permits ADD COLUMN quality_rank_json TEXT")
             connection.execute("DROP INDEX IF EXISTS idx_gateway_permit_reservation")
             connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_permit_reservation "
                 "ON gateway_permits(reservation_id) "
                 "WHERE reservation_id IS NOT NULL AND scope_key IS NULL "
+                "AND probe_parent_id IS NULL "
                 "AND state IN ('authorized', 'dispatching', 'unknown', 'confirmed')"
             )
             connection.execute("DROP INDEX IF EXISTS idx_gateway_permit_scope")
@@ -122,20 +131,33 @@ class PermitRegistry:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_permit_scope "
                 "ON gateway_permits(reservation_id, scope_key) "
                 "WHERE reservation_id IS NOT NULL AND scope_key IS NOT NULL "
+                "AND probe_parent_id IS NULL "
                 "AND state IN ('authorized', 'dispatching', 'unknown', 'confirmed')"
             )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_active_probe "
+                "ON gateway_permits(probe_parent_id) "
+                "WHERE probe_parent_id IS NOT NULL "
+                "AND state IN ('authorized', 'dispatching', 'unknown', 'confirmed')"
+            )
+            connection.execute("""CREATE TABLE IF NOT EXISTS source_handovers (
+                candidate_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'pending')""")
             connection.commit()
 
     @staticmethod
     def _pending_bytes(
-        connection: sqlite3.Connection, capacity: CapacityEvidence,
-        *, include_infohash: str | None = None,
+        connection: sqlite3.Connection,
+        capacity: CapacityEvidence,
+        *,
+        include_infohash: str | None = None,
     ) -> int:
         rows = connection.execute(
             """SELECT p.infohash, p.budget_bytes, p.state FROM gateway_permits p
             JOIN reservations r ON r.id = p.reservation_id
             WHERE r.state IN ('reserved', 'downloading', 'waiting_episodes')
-              AND p.state IN ('authorized', 'dispatching', 'unknown', 'confirmed')
+              AND (p.state IN ('authorized', 'dispatching', 'unknown', 'confirmed')
+                   OR p.permit_id IN (SELECT parent_id FROM source_handovers WHERE state='pending'))
               AND (p.state != 'authorized' OR p.expires_at > ?)
               AND p.budget_bytes > 0
               AND NOT EXISTS (
@@ -145,23 +167,26 @@ class PermitRegistry:
             (datetime.now(UTC).isoformat(),),
         ).fetchall()
         return capacity.other_pending_bytes + sum(
-            min(row["budget_bytes"], capacity.remaining_by_hash.get(
-                row["infohash"], row["budget_bytes"]
-            )) for row in rows
+            min(
+                row["budget_bytes"],
+                capacity.remaining_by_hash.get(row["infohash"], row["budget_bytes"]),
+            )
+            for row in rows
             if row["state"] != "confirmed"
             or row["infohash"] not in capacity.paused_hashes
             or row["infohash"] == include_infohash
         )
 
     def pending_bytes(
-        self, capacity: CapacityEvidence, *, include_infohash: str | None = None,
+        self,
+        capacity: CapacityEvidence,
+        *,
+        include_infohash: str | None = None,
     ) -> int:
         if self._db_path is None:
             raise ValueError("persistent permits required for queue capacity")
         with self._session() as connection:
-            return self._pending_bytes(
-                connection, capacity, include_infohash=include_infohash
-            )
+            return self._pending_bytes(connection, capacity, include_infohash=include_infohash)
 
     @staticmethod
     def _expires(value: str) -> datetime:
@@ -201,6 +226,10 @@ class PermitRegistry:
             expires_at=PermitRegistry._expires(row["expires_at"]),
             state=row["state"],
             result=json.loads(row["result_json"]) if row["result_json"] is not None else None,
+            probe_parent_id=row["probe_parent_id"],
+            quality_rank=tuple(json.loads(row["quality_rank_json"]))
+            if row["quality_rank_json"] is not None
+            else None,
         )
 
     def issue(
@@ -232,15 +261,20 @@ class PermitRegistry:
             budget_bytes=budget_bytes,
             reported_seeders=self._validate_reported_seeders(reported_seeders),
         )
-        if capacity is not None and (self._db_path is None or reservation_id is None or
-                                     isinstance(budget_bytes, bool) or
-                                     not isinstance(budget_bytes, int) or budget_bytes <= 0):
+        if capacity is not None and (
+            self._db_path is None
+            or reservation_id is None
+            or isinstance(budget_bytes, bool)
+            or not isinstance(budget_bytes, int)
+            or budget_bytes <= 0
+        ):
             raise ValueError("exact-byte permit requires a persistent reservation and size")
         if self._db_path is None:
             with self._lock:
                 if reservation_id is not None and any(
                     item.reservation_id == reservation_id
-                    and item.scope_key == scope_key and item.state == "superseded"
+                    and item.scope_key == scope_key
+                    and item.state == "superseded"
                     for item in self._permits.values()
                 ):
                     raise PermissionError("replacement_limit")
@@ -259,7 +293,8 @@ class PermitRegistry:
                     if reservation is None:
                         raise PermissionError("reservation_required")
                     if scope_key is not None and (
-                        not scope_key or category != "sonarr"
+                        not scope_key
+                        or category != "sonarr"
                         or not reservation["media_key"].startswith("season:tmdb:")
                     ):
                         raise ValueError("invalid episode permit")
@@ -276,8 +311,11 @@ class PermitRegistry:
                     )
                 elif scope_key is not None:
                     if (
-                        not scope_key or category != "sonarr" or reservation_id is None
-                        or budget_bytes is None or budget_bytes <= 0
+                        not scope_key
+                        or category != "sonarr"
+                        or reservation_id is None
+                        or budget_bytes is None
+                        or budget_bytes <= 0
                     ):
                         raise ValueError("invalid episode permit")
                     connection.execute("BEGIN IMMEDIATE")
@@ -292,8 +330,8 @@ class PermitRegistry:
                         raise PermissionError("season_reservation_required")
                     committed = connection.execute(
                         "SELECT COALESCE(SUM(budget_bytes), 0) FROM gateway_permits "
-                    "WHERE reservation_id = ? AND scope_key IS NOT NULL "
-                    "AND state IN ('authorized', 'dispatching', 'unknown', 'confirmed')",
+                        "WHERE reservation_id = ? AND scope_key IS NOT NULL "
+                        "AND state IN ('authorized', 'dispatching', 'unknown', 'confirmed')",
                         (reservation_id,),
                     ).fetchone()[0]
                     if committed + budget_bytes > reservation["budget_bytes"]:
@@ -304,11 +342,14 @@ class PermitRegistry:
                     ).fetchone()
                     if reservation is not None and reservation["budget_bytes"] == 0:
                         raise PermissionError("capacity_evidence_required")
-                if reservation_id is not None and connection.execute(
-                    "SELECT 1 FROM gateway_permits WHERE reservation_id = ? "
-                    "AND scope_key IS ? AND state = 'superseded' LIMIT 1",
-                    (reservation_id, scope_key),
-                ).fetchone():
+                if (
+                    reservation_id is not None
+                    and connection.execute(
+                        "SELECT 1 FROM gateway_permits WHERE reservation_id = ? "
+                        "AND scope_key IS ? AND state = 'superseded' LIMIT 1",
+                        (reservation_id, scope_key),
+                    ).fetchone()
+                ):
                     raise PermissionError("replacement_limit")
                 connection.execute(
                     """
@@ -383,9 +424,7 @@ class PermitRegistry:
             raise PermissionError("permit_required_or_ambiguous")
         return matches[0]
 
-    def find_for_magnet(
-        self, *, infohash: str, destination: str, category: str
-    ) -> Permit:
+    def find_for_magnet(self, *, infohash: str, destination: str, category: str) -> Permit:
         """Resolve a magnet only after metadata and reservation were verified.
 
         The v1 infohash identifies the inspected torrent info dictionary. A
@@ -395,12 +434,14 @@ class PermitRegistry:
         if self._db_path is None:
             with self._lock:
                 matches = [
-                    item for item in self._permits.values()
+                    item
+                    for item in self._permits.values()
                     if item.infohash == infohash.lower()
                     and item.destination == destination
                     and item.category == category
                     and item.metadata_sha256 is not None
-                    and item.budget_bytes is not None and item.budget_bytes > 0
+                    and item.budget_bytes is not None
+                    and item.budget_bytes > 0
                     and item.selected_files
                     and item.state in {"authorized", "confirmed"}
                     and datetime.now(UTC) < item.expires_at
@@ -421,7 +462,8 @@ class PermitRegistry:
                     (infohash.lower(), destination, category),
                 ).fetchall()
             matches = [
-                self._permit_from_row(row) for row in rows
+                self._permit_from_row(row)
+                for row in rows
                 if datetime.now(UTC) < self._expires(row["expires_at"])
             ]
         if len(matches) != 1:
@@ -437,7 +479,9 @@ class PermitRegistry:
                 )
         with self._session() as connection:
             row = connection.execute(
-                "SELECT 1 FROM gateway_permits WHERE infohash = ? AND state = 'confirmed' LIMIT 1",
+                "SELECT 1 FROM gateway_permits WHERE infohash = ? AND (state = 'confirmed' "
+                "OR permit_id IN (SELECT parent_id FROM source_handovers "
+                "WHERE state='pending')) LIMIT 1",
                 (infohash.lower(),),
             ).fetchone()
         return row is not None
@@ -449,8 +493,11 @@ class PermitRegistry:
             with self._lock:
                 return next(
                     (
-                        item for item in self._permits.values()
-                        if item.reservation_id == reservation_id and item.scope_key == scope_key
+                        item
+                        for item in self._permits.values()
+                        if item.reservation_id == reservation_id
+                        and item.scope_key == scope_key
+                        and item.probe_parent_id is None
                         and item.state in {"authorized", "dispatching", "unknown", "confirmed"}
                     ),
                     None,
@@ -458,15 +505,13 @@ class PermitRegistry:
         with self._session() as connection:
             row = connection.execute(
                 "SELECT * FROM gateway_permits WHERE reservation_id = ? "
-                "AND scope_key IS ? AND state IN "
+                "AND scope_key IS ? AND probe_parent_id IS NULL AND state IN "
                 "('authorized', 'dispatching', 'unknown', 'confirmed')",
                 (reservation_id, scope_key),
             ).fetchone()
         return self._permit_from_row(row) if row is not None else None
 
-    def deletion_source(
-        self, *, token: str, media_key: str, scope_key: str | None
-    ) -> Permit:
+    def deletion_source(self, *, token: str, media_key: str, scope_key: str | None) -> Permit:
         """Resolve a verified source for an exact media/episode deletion.
 
         The in-memory registry has no authoritative reservation media key, so
@@ -474,9 +519,12 @@ class PermitRegistry:
         Historical permits for another scope may still share a torrent hash;
         fail closed if any other live permit can own the same payload.
         """
-        if self._db_path is None or not isinstance(token, str) or not isinstance(
-            media_key, str
-        ) or (scope_key is not None and not isinstance(scope_key, str)):
+        if (
+            self._db_path is None
+            or not isinstance(token, str)
+            or not isinstance(media_key, str)
+            or (scope_key is not None and not isinstance(scope_key, str))
+        ):
             raise PermissionError("persistent deletion source required")
         with self._session() as connection:
             row = connection.execute(
@@ -489,24 +537,29 @@ class PermitRegistry:
             if row is None:
                 raise PermissionError("confirmed media source required")
             permit = self._permit_from_row(row)
-            season = re.fullmatch(
-                r"season:tmdb:[1-9][0-9]*:([1-9][0-9]*)", media_key
-            )
+            season = re.fullmatch(r"season:tmdb:[1-9][0-9]*:([1-9][0-9]*)", media_key)
             episode = re.fullmatch(r"S([0-9]{2,})E[0-9]{2,}", scope_key or "")
             if (
                 permit.destination != "/data/torrents"
                 or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
                 or permit.metadata_sha256 is None
                 or not permit.selected_files
-                or (scope_key is None and (
-                    permit.category != "radarr"
-                    or not re.fullmatch(r"movie:tmdb:[1-9][0-9]*", media_key)
-                ))
-                or (scope_key is not None and (
-                    permit.category != "sonarr"
-                    or season is None or episode is None
-                    or int(season[1]) != int(episode[1])
-                ))
+                or (
+                    scope_key is None
+                    and (
+                        permit.category != "radarr"
+                        or not re.fullmatch(r"movie:tmdb:[1-9][0-9]*", media_key)
+                    )
+                )
+                or (
+                    scope_key is not None
+                    and (
+                        permit.category != "sonarr"
+                        or season is None
+                        or episode is None
+                        or int(season[1]) != int(episode[1])
+                    )
+                )
             ):
                 raise PermissionError("source identity is not deletable")
             other = connection.execute(
@@ -524,15 +577,20 @@ class PermitRegistry:
         if self._db_path is None:
             with self._lock:
                 return [
-                    permit for permit in self._permits.values()
-                    if permit.state == "confirmed" and permit.category == "radarr"
-                    and permit.scope_key is None and permit.reservation_id is not None
+                    permit
+                    for permit in self._permits.values()
+                    if permit.state == "confirmed"
+                    and permit.category == "radarr"
+                    and permit.probe_parent_id is None
+                    and permit.scope_key is None
+                    and permit.reservation_id is not None
                 ]
         with self._session() as connection:
             rows = connection.execute(
                 "SELECT p.* FROM gateway_permits p "
                 "JOIN reservations r ON r.id = p.reservation_id "
                 "WHERE p.state = 'confirmed' AND p.category = 'radarr' "
+                "AND p.probe_parent_id IS NULL "
                 "AND p.scope_key IS NULL AND r.media_key LIKE 'movie:tmdb:%' "
                 "AND r.state IN ('reserved', 'downloading', 'waiting_episodes') "
                 "ORDER BY p.permit_id"
@@ -548,14 +606,18 @@ class PermitRegistry:
                 return [
                     (permit.reservation_id, permit)
                     for permit in self._permits.values()
-                    if permit.state == "confirmed" and permit.category == "sonarr"
-                    and permit.scope_key is not None and permit.reservation_id is not None
+                    if permit.state == "confirmed"
+                    and permit.category == "sonarr"
+                    and permit.probe_parent_id is None
+                    and permit.scope_key is not None
+                    and permit.reservation_id is not None
                 ]
         with self._session() as connection:
             rows = connection.execute(
                 "SELECT p.*, r.media_key FROM gateway_permits p "
                 "JOIN reservations r ON r.id = p.reservation_id "
                 "WHERE p.state = 'confirmed' AND p.category = 'sonarr' "
+                "AND p.probe_parent_id IS NULL "
                 "AND p.scope_key IS NOT NULL "
                 "AND r.state IN ('reserved', 'downloading', 'waiting_episodes') "
                 "AND r.media_key LIKE 'season:tmdb:%' "
@@ -571,7 +633,10 @@ class PermitRegistry:
         return episodes
 
     def list_source_history(
-        self, reservation_id: str, *, scope_key: str | None = None,
+        self,
+        reservation_id: str,
+        *,
+        scope_key: str | None = None,
     ) -> list[Permit]:
         """Return every prior source for this exact movie or episode slot.
 
@@ -580,10 +645,14 @@ class PermitRegistry:
         """
         if self._db_path is None:
             with self._lock:
-                return sorted((
-                    item for item in self._permits.values()
-                    if item.reservation_id == reservation_id and item.scope_key == scope_key
-                ), key=lambda item: item.permit_id)
+                return sorted(
+                    (
+                        item
+                        for item in self._permits.values()
+                        if item.reservation_id == reservation_id and item.scope_key == scope_key
+                    ),
+                    key=lambda item: item.permit_id,
+                )
         with self._session() as connection:
             rows = connection.execute(
                 "SELECT * FROM gateway_permits WHERE reservation_id = ? "
@@ -597,8 +666,10 @@ class PermitRegistry:
         if self._db_path is None:
             with self._lock:
                 return any(
-                    item.reservation_id == reservation_id and item.scope_key == scope_key
-                    and item.state == "superseded" for item in self._permits.values()
+                    item.reservation_id == reservation_id
+                    and item.scope_key == scope_key
+                    and item.state == "superseded"
+                    for item in self._permits.values()
                 )
         with self._session() as connection:
             row = connection.execute(
@@ -608,9 +679,7 @@ class PermitRegistry:
             ).fetchone()
         return row is not None
 
-    def list_uncertain(
-        self, limit: int = 100, *, after_id: str | None = None
-    ) -> list[Permit]:
+    def list_uncertain(self, limit: int = 100, *, after_id: str | None = None) -> list[Permit]:
         """Enumerate uncertain sources with a cursor across movie and episode slots."""
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("limit must be a positive integer")
@@ -621,7 +690,8 @@ class PermitRegistry:
             with self._lock:
                 return sorted(
                     (
-                        item for item in self._permits.values()
+                        item
+                        for item in self._permits.values()
                         if item.reservation_id is not None
                         and item.state in {"unknown", "dispatching"}
                         and (after_id is None or item.permit_id > after_id)
@@ -646,13 +716,15 @@ class PermitRegistry:
             with self._lock:
                 permit = self._permits.get(token)
                 if (
-                    permit is None or permit.state not in {
-                        "authorized", "dispatching", "unknown", "confirmed"
-                    }
+                    permit is None
+                    or permit.state not in {"authorized", "dispatching", "unknown", "confirmed"}
                     or permit.reservation_id is None
-                    or (permit.state == "authorized" and not self.had_superseded(
-                        permit.reservation_id, scope_key=permit.scope_key
-                    ))
+                    or (
+                        permit.state == "authorized"
+                        and not self.had_superseded(
+                            permit.reservation_id, scope_key=permit.scope_key
+                        )
+                    )
                 ):
                     raise PermissionError("reconcilable_source_required")
                 if permit.state == "confirmed":
@@ -670,32 +742,41 @@ class PermitRegistry:
             ).fetchone()
             permit = self._permit_from_row(row) if row is not None else None
             if (
-                permit is None or permit.state not in {
-                    "authorized", "dispatching", "unknown", "confirmed"
-                }
+                permit is None
+                or permit.state not in {"authorized", "dispatching", "unknown", "confirmed"}
                 or permit.reservation_id is None
             ):
                 raise PermissionError("reconcilable_source_required")
-            if permit.state == "authorized" and not connection.execute(
-                "SELECT 1 FROM gateway_permits WHERE reservation_id = ? "
-                "AND scope_key IS ? AND state = 'superseded' LIMIT 1",
-                (permit.reservation_id, permit.scope_key),
-            ).fetchone():
+            if (
+                permit.state == "authorized"
+                and permit.probe_parent_id is None
+                and not connection.execute(
+                    "SELECT 1 FROM gateway_permits WHERE reservation_id = ? "
+                    "AND scope_key IS ? AND state = 'superseded' LIMIT 1",
+                    (permit.reservation_id, permit.scope_key),
+                ).fetchone()
+            ):
                 raise PermissionError("replacement_permit_required")
             reservation = connection.execute(
                 "SELECT media_key FROM reservations WHERE id = ? "
                 "AND state IN ('reserved', 'downloading', 'waiting_episodes')",
                 (permit.reservation_id,),
             ).fetchone()
-            if reservation is None or (
-                permit.scope_key is None and (
-                    permit.category != "radarr"
-                    or not reservation["media_key"].startswith("movie:tmdb:")
+            if (
+                reservation is None
+                or (
+                    permit.scope_key is None
+                    and (
+                        permit.category != "radarr"
+                        or not reservation["media_key"].startswith("movie:tmdb:")
+                    )
                 )
-            ) or (
-                permit.scope_key is not None and (
-                    permit.category != "sonarr"
-                    or not reservation["media_key"].startswith("season:tmdb:")
+                or (
+                    permit.scope_key is not None
+                    and (
+                        permit.category != "sonarr"
+                        or not reservation["media_key"].startswith("season:tmdb:")
+                    )
                 )
             ):
                 raise PermissionError("active_source_reservation_required")
@@ -720,7 +801,11 @@ class PermitRegistry:
         return self.confirm_reconciled_source(token)
 
     def renew_replacement_authorized(
-        self, token: str, *, capacity: CapacityEvidence, expires_at: datetime,
+        self,
+        token: str,
+        *,
+        capacity: CapacityEvidence,
+        expires_at: datetime,
     ) -> Permit:
         """Renew an undispatched replacement without abandoning its exact-byte claim."""
         if not isinstance(capacity, CapacityEvidence) or expires_at <= datetime.now(UTC):
@@ -729,21 +814,22 @@ class PermitRegistry:
             with self._lock:
                 permit = self._permits.get(token)
                 if (
-                    permit is None or permit.state != "authorized"
-                    or permit.reservation_id is None or permit.budget_bytes is None
+                    permit is None
+                    or permit.state != "authorized"
+                    or permit.reservation_id is None
+                    or permit.budget_bytes is None
                 ):
                     raise PermissionError("authorized_replacement_required")
                 old_hashes = {
-                    item.infohash for item in self._permits.values()
+                    item.infohash
+                    for item in self._permits.values()
                     if item.reservation_id == permit.reservation_id
                     and item.scope_key == permit.scope_key
                     and item.state == "superseded"
                 }
                 if not old_hashes or not old_hashes.issubset(capacity.paused_hashes):
                     raise PermissionError("source_not_stopped")
-                if permit.budget_bytes > max(
-                    0, capacity.free_bytes - capacity.other_pending_bytes
-                ):
+                if permit.budget_bytes > max(0, capacity.free_bytes - capacity.other_pending_bytes):
                     raise PermissionError("waiting_space")
                 permit.expires_at = expires_at
                 return permit
@@ -755,16 +841,21 @@ class PermitRegistry:
             ).fetchone()
             permit = self._permit_from_row(row) if row is not None else None
             if (
-                permit is None or permit.state != "authorized"
+                permit is None
+                or permit.state != "authorized"
                 or permit.reservation_id is None
-                or permit.budget_bytes is None or permit.budget_bytes <= 0
+                or permit.budget_bytes is None
+                or permit.budget_bytes <= 0
             ):
                 raise PermissionError("authorized_replacement_required")
-            old_hashes = {row["infohash"] for row in connection.execute(
-                "SELECT infohash FROM gateway_permits WHERE reservation_id = ? "
-                "AND scope_key IS ? AND state = 'superseded'",
-                (permit.reservation_id, permit.scope_key),
-            ).fetchall()}
+            old_hashes = {
+                row["infohash"]
+                for row in connection.execute(
+                    "SELECT infohash FROM gateway_permits WHERE reservation_id = ? "
+                    "AND scope_key IS ? AND state = 'superseded'",
+                    (permit.reservation_id, permit.scope_key),
+                ).fetchall()
+            }
             if not old_hashes or not old_hashes.issubset(capacity.paused_hashes):
                 raise PermissionError("source_not_stopped")
             if not connection.execute(
@@ -791,9 +882,15 @@ class PermitRegistry:
             return permit
 
     def replace_confirmed(
-        self, old_token: str, *, infohash: str, metadata_sha256: str,
-        selected_files: tuple[str, ...], budget_bytes: int,
-        capacity: CapacityEvidence, expires_at: datetime,
+        self,
+        old_token: str,
+        *,
+        infohash: str,
+        metadata_sha256: str,
+        selected_files: tuple[str, ...],
+        budget_bytes: int,
+        capacity: CapacityEvidence,
+        expires_at: datetime,
         reported_seeders: int | None = None,
     ) -> Permit:
         """Atomically replace one stopped source while retaining its bytes and audit row."""
@@ -804,11 +901,14 @@ class PermitRegistry:
             raise ValueError("replacement metadata is required")
         reported_seeders = self._validate_reported_seeders(reported_seeders)
         if (
-            not isinstance(selected_files, tuple) or not selected_files
+            not isinstance(selected_files, tuple)
+            or not selected_files
             or any(not isinstance(name, str) or not name for name in selected_files)
             or len(set(selected_files)) != len(selected_files)
-            or isinstance(budget_bytes, bool) or not isinstance(budget_bytes, int)
-            or budget_bytes <= 0 or not isinstance(capacity, CapacityEvidence)
+            or isinstance(budget_bytes, bool)
+            or not isinstance(budget_bytes, int)
+            or budget_bytes <= 0
+            or not isinstance(capacity, CapacityEvidence)
             or expires_at <= datetime.now(UTC)
         ):
             raise ValueError("invalid replacement evidence")
@@ -816,11 +916,16 @@ class PermitRegistry:
 
         def replacement(old: Permit) -> Permit:
             return Permit(
-                permit_id=str(uuid4()), token=secrets.token_urlsafe(32),
-                infohash=new_hash, metadata_sha256=digest,
-                destination=old.destination, category=old.category,
-                reservation_id=old.reservation_id, scope_key=old.scope_key,
-                selected_files=selected_files, budget_bytes=budget_bytes,
+                permit_id=str(uuid4()),
+                token=secrets.token_urlsafe(32),
+                infohash=new_hash,
+                metadata_sha256=digest,
+                destination=old.destination,
+                category=old.category,
+                reservation_id=old.reservation_id,
+                scope_key=old.scope_key,
+                selected_files=selected_files,
+                budget_bytes=budget_bytes,
                 expires_at=expires_at,
                 reported_seeders=reported_seeders,
             )
@@ -831,15 +936,19 @@ class PermitRegistry:
                 if old is None or old.state != "confirmed" or old.reservation_id is None:
                     raise PermissionError("confirmed_source_required")
                 stopped_sources = {old.infohash} | {
-                    item.infohash for item in self._permits.values()
+                    item.infohash
+                    for item in self._permits.values()
                     if item.reservation_id == old.reservation_id
-                    and item.scope_key == old.scope_key and item.state == "superseded"
+                    and item.scope_key == old.scope_key
+                    and item.state == "superseded"
                 }
                 if not stopped_sources.issubset(capacity.paused_hashes):
                     raise PermissionError("source_not_stopped")
                 if any(
-                    item.infohash == new_hash and item.reservation_id == old.reservation_id
-                    and item.scope_key == old.scope_key for item in self._permits.values()
+                    item.infohash == new_hash
+                    and item.reservation_id == old.reservation_id
+                    and item.scope_key == old.scope_key
+                    for item in self._permits.values()
                 ):
                     raise ValueError("same_infohash_or_prior_source")
                 if budget_bytes > max(0, capacity.free_bytes - capacity.other_pending_bytes):
@@ -857,11 +966,14 @@ class PermitRegistry:
             old = self._permit_from_row(row) if row is not None else None
             if old is None or old.state != "confirmed" or old.reservation_id is None:
                 raise PermissionError("confirmed_source_required")
-            stopped_sources = {old.infohash} | {row["infohash"] for row in connection.execute(
-                "SELECT infohash FROM gateway_permits WHERE reservation_id = ? "
-                "AND scope_key IS ? AND state = 'superseded'",
-                (old.reservation_id, old.scope_key),
-            ).fetchall()}
+            stopped_sources = {old.infohash} | {
+                row["infohash"]
+                for row in connection.execute(
+                    "SELECT infohash FROM gateway_permits WHERE reservation_id = ? "
+                    "AND scope_key IS ? AND state = 'superseded'",
+                    (old.reservation_id, old.scope_key),
+                ).fetchall()
+            }
             if not stopped_sources.issubset(capacity.paused_hashes):
                 raise PermissionError("source_not_stopped")
             reservation = connection.execute(
@@ -873,21 +985,23 @@ class PermitRegistry:
                 raise PermissionError("reservation_required")
             media_key = reservation["media_key"]
             if (
-                (old.scope_key is None and (
-                    old.category != "radarr" or not media_key.startswith("movie:tmdb:")
-                ))
-                or (old.scope_key is not None and (
-                    old.category != "sonarr" or not media_key.startswith("season:tmdb:")
-                ))
+                old.scope_key is None
+                and (old.category != "radarr" or not media_key.startswith("movie:tmdb:"))
+            ) or (
+                old.scope_key is not None
+                and (old.category != "sonarr" or not media_key.startswith("season:tmdb:"))
             ):
                 raise PermissionError("source_identity_changed")
-            if connection.execute(
-                "SELECT 1 FROM movie_imports WHERE reservation_id = ? LIMIT 1",
-                (old.reservation_id,),
-            ).fetchone() or connection.execute(
-                "SELECT 1 FROM episode_imports WHERE permit_id = ? LIMIT 1",
-                (old.permit_id,),
-            ).fetchone():
+            if (
+                connection.execute(
+                    "SELECT 1 FROM movie_imports WHERE reservation_id = ? LIMIT 1",
+                    (old.reservation_id,),
+                ).fetchone()
+                or connection.execute(
+                    "SELECT 1 FROM episode_imports WHERE permit_id = ? LIMIT 1",
+                    (old.permit_id,),
+                ).fetchone()
+            ):
                 raise PermissionError("import_started")
             if connection.execute(
                 "SELECT 1 FROM gateway_permits WHERE reservation_id = ? "
@@ -907,7 +1021,8 @@ class PermitRegistry:
             new = replacement(old)
             connection.execute(
                 "UPDATE gateway_permits SET state = 'superseded' "
-                "WHERE permit_id = ? AND state = 'confirmed'", (old.permit_id,),
+                "WHERE permit_id = ? AND state = 'confirmed'",
+                (old.permit_id,),
             )
             connection.execute(
                 """INSERT INTO gateway_permits(
@@ -915,11 +1030,21 @@ class PermitRegistry:
                     metadata_sha256, destination, category, selected_files_json,
                     budget_bytes, reported_seeders, expires_at, state, result_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'authorized', NULL)""",
-                (new.permit_id, new.token, new.operation_id, new.reservation_id,
-                 new.scope_key, new.infohash, new.metadata_sha256, new.destination,
-                 new.category, json.dumps(new.selected_files), new.budget_bytes,
-                 new.reported_seeders,
-                 new.expires_at.isoformat()),
+                (
+                    new.permit_id,
+                    new.token,
+                    new.operation_id,
+                    new.reservation_id,
+                    new.scope_key,
+                    new.infohash,
+                    new.metadata_sha256,
+                    new.destination,
+                    new.category,
+                    json.dumps(new.selected_files),
+                    new.budget_bytes,
+                    new.reported_seeders,
+                    new.expires_at.isoformat(),
+                ),
             )
             connection.execute(
                 """UPDATE reservations SET budget_bytes = COALESCE((
@@ -938,11 +1063,14 @@ class PermitRegistry:
         """Release an unused permit after its gateway authorization has expired."""
         if self._db_path is None:
             with self._lock:
-                expired = [key for key, item in self._permits.items()
-                           if item.reservation_id == reservation_id
-                           and item.scope_key == scope_key
-                           and item.state == "authorized"
-                           and item.expires_at <= datetime.now(UTC)]
+                expired = [
+                    key
+                    for key, item in self._permits.items()
+                    if item.reservation_id == reservation_id
+                    and item.scope_key == scope_key
+                    and item.state == "authorized"
+                    and item.expires_at <= datetime.now(UTC)
+                ]
                 for key in expired:
                     del self._permits[key]
                 return len(expired)
@@ -1014,6 +1142,8 @@ class PermitRegistry:
                 raise PermissionError("permit_required")
             permit = self._permit_from_row(row)
             self._validate_payload(permit, infohash, destination, expected_digest)
+            if permit.probe_parent_id is not None:
+                self._require_probe_reservation(connection, permit)
             if permit.result is not None and permit.state == "confirmed":
                 connection.commit()
                 return permit.result
@@ -1028,12 +1158,20 @@ class PermitRegistry:
             connection.close()
 
         try:
-            result = effect(permit)
+            if permit.probe_parent_id is not None:
+                with self._session() as guard:
+                    guard.execute("BEGIN IMMEDIATE")
+                    self._require_probe_reservation(guard, permit)
+                    result = effect(permit)
+                    guard.commit()
+            else:
+                result = effect(permit)
         except Exception:
             with self._session() as update:
                 update.execute(
                     "UPDATE gateway_permits SET state = 'unknown' "
-                    "WHERE token = ? AND state = 'dispatching'", (token,)
+                    "WHERE token = ? AND state = 'dispatching'",
+                    (token,),
                 )
             raise
         with self._session() as update:

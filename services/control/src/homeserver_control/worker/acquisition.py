@@ -24,8 +24,14 @@ from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStor
 from .capacity_evidence import CapacityEvidence
 from .release_quality import release_rank, release_seeders
 from .source_health import SourceHealthStore, TorrentHealth
+from .source_probe import (
+    LiveSourceProbes,
+    canonical_quality,
+    edition_identity,
+    infer_source_quality,
+)
 from .subdl import SubDLSource
-from .subtitle_language import is_brazilian_portuguese_subtitle, is_english_subtitle
+from .subtitle_language import SubtitlePolicy, is_brazilian_portuguese_subtitle, is_english_subtitle
 
 LOGGER = logging.getLogger(__name__)
 _VIDEO_SUFFIXES = {".mkv", ".mp4", ".m4v", ".avi", ".mov"}
@@ -42,32 +48,36 @@ def _queue_only_rejection(release: dict[str, object]) -> bool:
     reasons = release.get("rejections")
     return (
         release.get("rejected") is True
-        and isinstance(reasons, list) and bool(reasons)
-        and all(isinstance(item, str)
-                and item.startswith("Release in queue already meets cutoff:")
-                for item in reasons)
+        and isinstance(reasons, list)
+        and bool(reasons)
+        and all(
+            isinstance(item, str) and item.startswith("Release in queue already meets cutoff:")
+            for item in reasons
+        )
     )
 
 
-def _replacement_has_peers(release: dict[str, object], reason: str,
-                           current_seeds: int) -> bool:
+def _replacement_has_peers(release: dict[str, object], reason: str, current_seeds: int) -> bool:
     reported = release.get("seeders")
     return (
-        isinstance(reported, int) and not isinstance(reported, bool)
-        and (reported >= 1 if reason in {"stalled", "replacing"}
-             else reported >= max(5, current_seeds * 2))
+        isinstance(reported, int)
+        and not isinstance(reported, bool)
+        and (
+            reported >= 1
+            if reason in {"stalled", "replacing"}
+            else reported >= max(5, current_seeds * 2)
+        )
     )
 
 
 def _is_sample_video(path: str) -> bool:
     parsed = PurePosixPath(path)
-    return (
-        any(part.lower() == "sample" for part in parsed.parts[:-1])
-        or bool(re.search(r"(?:^|[._ -])sample$", parsed.stem.lower()))
+    return any(part.lower() == "sample" for part in parsed.parts[:-1]) or bool(
+        re.search(r"(?:^|[._ -])sample$", parsed.stem.lower())
     )
 
 
-class MovieAcquirer:
+class MovieAcquirer(LiveSourceProbes):
     def __init__(
         self,
         *,
@@ -86,6 +96,11 @@ class MovieAcquirer:
         gateway_url: str | None = None,
         arr_token: str | None = None,
         availability_probe: Callable[[bytes, str], Awaitable[int | None]] | None = None,
+        live_source_probes: bool = False,
+        release_policy=None,
+        subtitle_policy: SubtitlePolicy | None = None,
+        source_retry_seconds: float = 300,
+        search_timeout_seconds: float = 90,
     ) -> None:
         if not radarr_api_key:
             raise ValueError("Radarr API key is required")
@@ -98,7 +113,12 @@ class MovieAcquirer:
         self.headers = {"X-Api-Key": radarr_api_key, "Accept": "application/json"}
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(15.0))
         self.retry_seconds = retry_seconds
-        self.subtitle_source = subtitle_source
+        self.source_retry_seconds = source_retry_seconds
+        self.search_timeout_seconds = search_timeout_seconds
+        self.subtitle_policy = subtitle_policy or SubtitlePolicy()
+        self.subtitle_source = (
+            subtitle_source if "subdl" in self.subtitle_policy.providers else None
+        )
         self.subtitle_store = subtitle_store
         self.torrent_store = torrent_store
         self.capacity_provider = capacity_provider
@@ -110,6 +130,11 @@ class MovieAcquirer:
         self.gateway_url = gateway_url.rstrip("/") if gateway_url else None
         self.arr_token = arr_token
         self.availability_probe = availability_probe
+        self.live_source_probes = live_source_probes
+        self.release_policy = release_policy
+        self._source_titles: dict[str, str] = {}
+        if live_source_probes and (health_store is None or torrent_store is None):
+            raise ValueError("live source probes require durable health and torrent storage")
         self._next_search: dict[str, float] = {}
         self._next_health_check: dict[str, float] = {}
         self._posted: set[str] = set()
@@ -117,23 +142,52 @@ class MovieAcquirer:
     async def _source_status(self, permit) -> tuple[str | None, TorrentHealth | None]:
         if self.health_store is None or self.gateway_url is None or self.arr_token is None:
             return None, None
+        if self.health_store.is_protected(permit.infohash):
+            return None, None
         now = time.monotonic()
         if now < self._next_health_check.get(permit.permit_id, 0):
             return None, None
         self._next_health_check[permit.permit_id] = now + 60
         response = await self.client.get(
             f"{self.gateway_url}/internal/torrent-health",
-            headers={"X-Arr-Token": self.arr_token,
-                     "X-Admission-Permit": permit.token},
+            headers={"X-Arr-Token": self.arr_token, "X-Admission-Permit": permit.token},
         )
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
             raise ValueError("invalid gateway source health")
         health = TorrentHealth.from_mapping(payload)
+        title = payload.get("name")
+        if isinstance(title, str):
+            self._source_titles[permit.permit_id] = title
+            if permit.quality_rank is None:
+                rank = infer_source_quality(title)
+                if rank is not None:
+                    self.permits.set_quality(permit.token, rank)
+                    permit.quality_rank = rank
         if health.infohash != permit.infohash:
             raise ValueError("gateway source identity changed")
         return self.health_store.observe(permit.permit_id, health, now=time.time()), health
+
+    def _rank(self, release, *, original_language=None):
+        return (
+            self.release_policy.rank(release, original_language=original_language)
+            if self.release_policy
+            else release_rank(release, original_language=original_language)
+        )
+
+    def _acceptable_video_size(self, release, torrent, runtime_minutes):
+        if self.release_policy is None:
+            return True
+        videos = [
+            item
+            for item in inspect_torrent(torrent).files
+            if PurePosixPath(item.path).suffix.lower() in _VIDEO_SUFFIXES
+            and not _is_sample_video(item.path)
+        ]
+        return len(videos) == 1 and self.release_policy.accepts_size(
+            release, video_bytes=videos[0].length, runtime_minutes=runtime_minutes
+        )
 
     async def _source_state(self, permit, action: str) -> None:
         assert self.gateway_url is not None and self.arr_token is not None
@@ -152,11 +206,13 @@ class MovieAcquirer:
         except Exception:
             LOGGER.warning("Cannot restart source %s without fresh capacity", permit.infohash)
             return "capacity_unavailable"
-        if self.permits.pending_bytes(
-            capacity, include_infohash=permit.infohash
-        ) > capacity.free_bytes:
-            LOGGER.warning("Keeping source %s stopped because space is insufficient",
-                           permit.infohash)
+        if (
+            self.permits.pending_bytes(capacity, include_infohash=permit.infohash)
+            > capacity.free_bytes
+        ):
+            LOGGER.warning(
+                "Keeping source %s stopped because space is insufficient", permit.infohash
+            )
             return "waiting_space"
         await self._source_state(permit, "start")
         assert self.health_store is not None
@@ -164,21 +220,43 @@ class MovieAcquirer:
         return "resumed"
 
     async def _dispatch_replacement(
-        self, *, old, infohash: str, metadata_sha256: str,
-        selected_files: tuple[str, ...], exact_bytes: int, torrent: bytes,
+        self,
+        *,
+        old,
+        infohash: str,
+        metadata_sha256: str,
+        selected_files: tuple[str, ...],
+        exact_bytes: int,
+        torrent: bytes,
         reported_seeders: int | None = None,
+        quality_rank=None,
     ) -> str:
         assert self.health_store is not None
         assert self.gateway_url is not None and self.arr_token is not None
         assert self.capacity_provider is not None
+        if self.live_source_probes:
+            return await self._start_probe(
+                old=old,
+                infohash=infohash,
+                metadata_sha256=metadata_sha256,
+                selected_files=selected_files,
+                exact_bytes=exact_bytes,
+                torrent=torrent,
+                reported_seeders=reported_seeders,
+                quality_rank=quality_rank,
+            )
         self.health_store.mark_replacing(old.permit_id)
         await self._source_state(old, "stop")
         try:
             capacity = await self.capacity_provider()
             chosen = self.permits.replace_confirmed(
-                old.token, infohash=infohash, metadata_sha256=metadata_sha256,
-                selected_files=selected_files, budget_bytes=exact_bytes,
-                capacity=capacity, expires_at=datetime.now(UTC) + timedelta(minutes=30),
+                old.token,
+                infohash=infohash,
+                metadata_sha256=metadata_sha256,
+                selected_files=selected_files,
+                budget_bytes=exact_bytes,
+                capacity=capacity,
+                expires_at=datetime.now(UTC) + timedelta(minutes=30),
                 reported_seeders=reported_seeders,
             )
         except Exception:
@@ -191,18 +269,20 @@ class MovieAcquirer:
         if self.torrent_store is not None:
             self.torrent_store.put(chosen, torrent)
         await self._add_verified_torrent(chosen, torrent)
-        LOGGER.info("Replaced stalled source %s with %s for %s",
-                    old.infohash, chosen.infohash, old.reservation_id)
+        LOGGER.info(
+            "Replaced stalled source %s with %s for %s",
+            old.infohash,
+            chosen.infohash,
+            old.reservation_id,
+        )
         return "replaced"
 
     async def _add_verified_torrent(self, permit, torrent: bytes) -> None:
         assert self.gateway_url is not None and self.arr_token is not None
         response = await self.client.post(
             f"{self.gateway_url}/api/v2/torrents/add",
-            headers={"X-Arr-Token": self.arr_token,
-                     "X-Admission-Permit": permit.token},
-            data={"category": permit.category, "savepath": permit.destination,
-                  "stopped": "false"},
+            headers={"X-Arr-Token": self.arr_token, "X-Admission-Permit": permit.token},
+            data={"category": permit.category, "savepath": permit.destination, "stopped": "false"},
             files={"torrents": ("verified.torrent", torrent, "application/x-bittorrent")},
         )
         response.raise_for_status()
@@ -212,10 +292,9 @@ class MovieAcquirer:
 
     async def _retry_replacement(self, permit) -> str | None:
         if (
-            permit.state != "authorized" or permit.reservation_id is None
-            or not self.permits.had_superseded(
-                permit.reservation_id, scope_key=permit.scope_key
-            )
+            permit.state != "authorized"
+            or permit.reservation_id is None
+            or not self.permits.had_superseded(permit.reservation_id, scope_key=permit.scope_key)
         ):
             return None
         if self.torrent_store is None or self.capacity_provider is None:
@@ -227,7 +306,8 @@ class MovieAcquirer:
         # Recheck retained sources on every retry, even before the permit expires.
         try:
             permit = self.permits.renew_replacement_authorized(
-                permit.token, capacity=capacity,
+                permit.token,
+                capacity=capacity,
                 expires_at=datetime.now(UTC) + timedelta(minutes=30),
             )
         except PermissionError as error:
@@ -238,10 +318,7 @@ class MovieAcquirer:
         return "replaced"
 
     async def _reconcile_uncertain_source(self, permit) -> str | None:
-        if (
-            permit.state not in {"unknown", "dispatching"}
-            or permit.reservation_id is None
-        ):
+        if permit.state not in {"unknown", "dispatching"} or permit.reservation_id is None:
             return None
         assert self.gateway_url is not None and self.arr_token is not None
         response = await self.client.post(
@@ -252,9 +329,7 @@ class MovieAcquirer:
         response.raise_for_status()
         result = response.json()
         state = result.get("state") if isinstance(result, dict) else None
-        replacement = self.permits.had_superseded(
-            permit.reservation_id, scope_key=permit.scope_key
-        )
+        replacement = self.permits.had_superseded(permit.reservation_id, scope_key=permit.scope_key)
         if state == "confirmed":
             LOGGER.info("Reconciled torrent %s", permit.infohash)
             return "replaced" if replacement else "reconciled"
@@ -262,8 +337,8 @@ class MovieAcquirer:
             key = f"unknown:{permit.permit_id}"
             if time.monotonic() >= self._next_search.get(key, 0):
                 LOGGER.warning(
-                    "Torrent %s is uncertain and absent upstream; "
-                    "manual reconciliation required", permit.infohash
+                    "Torrent %s is uncertain and absent upstream; manual reconciliation required",
+                    permit.infohash,
                 )
                 self._next_search[key] = time.monotonic() + 900
             return "replacement_uncertain" if replacement else "source_uncertain"
@@ -285,40 +360,53 @@ class MovieAcquirer:
 
     @staticmethod
     def _eligible_manifest(
-        torrent: bytes, budget: int | None = None, *, allow_external_subtitle: bool = False
+        torrent: bytes,
+        budget: int | None = None,
+        *,
+        allow_external_subtitle: bool = False,
+        subtitle_policy: SubtitlePolicy | None = None,
     ) -> tuple[str, str, tuple[str, ...]] | None:
         try:
             inspected = inspect_torrent(torrent)
         except TorrentBytesError:
             return None
         videos = [
-            item for item in inspected.files
+            item
+            for item in inspected.files
             if PurePosixPath(item.path).suffix.lower() in _VIDEO_SUFFIXES
             and not _is_sample_video(item.path)
         ]
         brazilian_subtitles = [
-            item for item in inspected.files
+            item
+            for item in inspected.files
             if PurePosixPath(item.path).suffix.lower() in _SUBTITLE_SUFFIXES
             and is_brazilian_portuguese_subtitle(item.path)
         ]
         english_subtitles = [
-            item for item in inspected.files
+            item
+            for item in inspected.files
             if PurePosixPath(item.path).suffix.lower() in _SUBTITLE_SUFFIXES
             and is_english_subtitle(item.path)
         ]
-        subtitles = brazilian_subtitles or english_subtitles
-        if (
-            len(videos) != 1
-            or not subtitles and not allow_external_subtitle
-        ):
+        policy = subtitle_policy or SubtitlePolicy()
+        by_language = {"pt-BR": brazilian_subtitles, "en-US": english_subtitles}
+        subtitles = next(
+            (
+                [item for item in by_language[language] if policy.matches(item.path)]
+                for language in policy.languages
+                if any(policy.matches(item.path) for item in by_language[language])
+            ),
+            [],
+        )
+        if len(videos) != 1 or not subtitles and not allow_external_subtitle:
             return None
-        return inspected.infohash, inspected.metadata_sha256, tuple(
-            item.path for item in (*videos, *subtitles)
+        return (
+            inspected.infohash,
+            inspected.metadata_sha256,
+            tuple(item.path for item in (*videos, *subtitles)),
         )
 
-    async def _metadata(
-        self, url: str, *, allow_magnet: bool = True
-    ) -> bytes | None:
+    async def _metadata(self, url: str, *, allow_magnet: bool = True) -> bytes | None:
         try:
             async with self.client.stream("GET", url, follow_redirects=False) as response:
                 if response.status_code in {301, 302, 303, 307, 308}:
@@ -370,9 +458,16 @@ class MovieAcquirer:
         except TorrentBytesError:
             return False
         candidate_paths = {item.path for item in candidate.files}
-        retained = [old, *(item for item in self.permits.list_source_history(
-            old.reservation_id, scope_key=old.scope_key
-        ) if item.state == "superseded")]
+        retained = [
+            old,
+            *(
+                item
+                for item in self.permits.list_source_history(
+                    old.reservation_id, scope_key=old.scope_key
+                )
+                if item.state == "superseded"
+            ),
+        ]
         for source in retained:
             torrent = self.torrent_store.get(source)
             if torrent is None:
@@ -387,48 +482,65 @@ class MovieAcquirer:
         return True
 
     async def _prioritize_replacements(
-        self, candidates: AsyncIterator[AcquisitionCandidate], *, old,
-        reason: str | None, health: TorrentHealth | None, rank=release_rank,
+        self,
+        candidates: AsyncIterator[AcquisitionCandidate],
+        *,
+        old,
+        reason: str | None,
+        health: TorrentHealth | None,
+        rank=release_rank,
     ) -> AsyncIterator[AcquisitionCandidate]:
         if reason is None:
             async for candidate in candidates:
                 yield candidate
             return
         assert old is not None and health is not None
-        attempted = {source.infohash for source in self.permits.list_source_history(
-            old.reservation_id, scope_key=old.scope_key
-        )}
+        peer_reason = "stalled" if self.live_source_probes else reason
+        attempted = {
+            source.infohash
+            for source in self.permits.list_source_history(
+                old.reservation_id, scope_key=old.scope_key
+            )
+        }
         unknown: list[AcquisitionCandidate] = []
         batch: list[AcquisitionCandidate] = []
 
         async def probe_batch():
             assert self.availability_probe is not None
-            results = await asyncio.gather(*(
-                self.availability_probe(item[3], item[1][0]) for item in batch
-            ))
+            results = await asyncio.gather(
+                *(self.availability_probe(item[3], item[1][0]) for item in batch)
+            )
             available = []
             for candidate, seeds in zip(batch, results, strict=True):
                 if seeds is None:
-                    if _replacement_has_peers(candidate[0], reason, health.num_seeds):
+                    if _replacement_has_peers(candidate[0], peer_reason, health.num_seeds):
                         unknown.append(candidate)
                 elif seeds > 0:
                     release, manifest, external, torrent = candidate
                     verified = {**release, "seeders": seeds}
-                    if _replacement_has_peers(verified, reason, health.num_seeds):
+                    if _replacement_has_peers(verified, peer_reason, health.num_seeds):
                         available.append((verified, manifest, external, torrent))
             return sorted(available, key=lambda item: rank(item[0]), reverse=True)
 
         async for candidate in candidates:
             release, manifest, _external, torrent = candidate
             infohash = manifest[0]
-            if (
-                infohash in attempted
-                or not self._replacement_paths_available(old, torrent)
-            ):
+            if infohash in attempted or not self._replacement_paths_available(old, torrent):
                 continue
+            if self.live_source_probes:
+                quality = canonical_quality(release)
+                current = old.quality_rank
+                if (
+                    current is None
+                    or quality is None
+                    or any(new < floor for new, floor in zip(quality[:2], current[:2], strict=True))
+                    or edition_identity(str(release.get("title", "")))
+                    != edition_identity(self._source_titles.get(old.permit_id, ""))
+                ):
+                    continue
             attempted.add(infohash)
             if self.availability_probe is None:
-                if _replacement_has_peers(release, reason, health.num_seeds):
+                if _replacement_has_peers(release, peer_reason, health.num_seeds):
                     yield candidate
                 continue
             batch.append(candidate)
@@ -449,14 +561,19 @@ class MovieAcquirer:
             yield candidate
 
     async def _eligible_movie_releases(
-        self, ordered: list[dict[str, object]], *, replacement_reason: str | None,
+        self,
+        ordered: list[dict[str, object]],
+        *,
+        replacement_reason: str | None,
         excluded_infohashes: set[str],
+        runtime_minutes: float | None = None,
     ) -> AsyncIterator[AcquisitionCandidate]:
         for release in ordered:
-            if (release_rank(release) is None or
-                    release.get("rejected") is not False and not (
-                        replacement_reason and _queue_only_rejection(release)
-                    )):
+            if (
+                self._rank(release) is None
+                or release.get("rejected") is not False
+                and not (replacement_reason and _queue_only_rejection(release))
+            ):
                 continue
             reported = release.get("size")
             if isinstance(reported, bool) or not isinstance(reported, int) or reported <= 0:
@@ -471,18 +588,26 @@ class MovieAcquirer:
             if torrent is None:
                 continue
             manifest = self._eligible_manifest(
-                torrent, allow_external_subtitle=self.subtitle_source is not None
+                torrent,
+                allow_external_subtitle=self.subtitle_source is not None,
+                subtitle_policy=self.subtitle_policy,
             )
             if manifest is None:
                 continue
+            if not self._acceptable_video_size(release, torrent, runtime_minutes):
+                continue
             infohash, digest, files = manifest
-            if infohash in excluded_infohashes or claimed_hash and (
-                not isinstance(claimed_hash, str) or claimed_hash.lower() != infohash
+            if (
+                infohash in excluded_infohashes
+                or claimed_hash
+                and (not isinstance(claimed_hash, str) or claimed_hash.lower() != infohash)
             ):
                 continue
             yield (
-                release, (infohash, digest, files, inspect_torrent(torrent).total_bytes),
-                None, torrent,
+                release,
+                (infohash, digest, files, inspect_torrent(torrent).total_bytes),
+                None,
+                torrent,
             )
 
     async def acquire(self, media_key: str, reservation_id: str) -> str:
@@ -504,13 +629,19 @@ class MovieAcquirer:
             if reconciled is not None:
                 return reconciled
             if existing.state == "confirmed":
+                probe_state = await self._monitor_probe(existing)
+                if probe_state is not None:
+                    return probe_state
                 replacement_reason, old_health = await self._source_status(existing)
                 if replacement_reason is None:
                     return "already_permitted"
             elif existing.state != "authorized" or reservation_id in self._posted:
                 return "already_permitted"
-            if (existing.state == "authorized" and datetime.now(UTC) >= existing.expires_at
-                    and not self.permits.had_superseded(reservation_id)):
+            if (
+                existing.state == "authorized"
+                and datetime.now(UTC) >= existing.expires_at
+                and not self.permits.had_superseded(reservation_id)
+            ):
                 return "permit_expired"
             retried = await self._retry_replacement(existing)
             if retried is not None:
@@ -519,7 +650,7 @@ class MovieAcquirer:
         if now < self._next_search.get(reservation_id, 0):
             return "search_deferred"
         self._next_search[reservation_id] = now + (
-            min(self.retry_seconds, 300) if replacement_reason else self.retry_seconds
+            self.source_retry_seconds if replacement_reason else self.retry_seconds
         )
         match = re.fullmatch(r"movie:tmdb:([0-9]+)", media_key)
         if match is None:
@@ -536,26 +667,38 @@ class MovieAcquirer:
             return "import_guard"
         if not await self._hardlink_import_enabled():
             return "import_guard"
-        movies = (await self.client.get(
-            f"{self.radarr_url}/api/v3/movie", params={"tmdbId": match.group(1)},
+        movies = await self.client.get(
+            f"{self.radarr_url}/api/v3/movie",
+            params={"tmdbId": match.group(1)},
             headers=self.headers,
-        ))
+        )
         movies.raise_for_status()
         payload = movies.json()
         if not isinstance(payload, list):
             raise ValueError("Radarr movie lookup response is invalid")
         movie = next(
-            (item for item in payload if isinstance(item, dict)
-             and item.get("tmdbId") == int(match.group(1)) and isinstance(item.get("id"), int)),
+            (
+                item
+                for item in payload
+                if isinstance(item, dict)
+                and item.get("tmdbId") == int(match.group(1))
+                and isinstance(item.get("id"), int)
+            ),
             None,
         )
         if movie is None:
             return "movie_not_in_radarr"
         if movie.get("hasFile"):
             return "already_imported"
+
+        def rank(release):
+            return self._rank(release, original_language=movie.get("originalLanguage"))
+
         releases = await self.client.get(
-            f"{self.radarr_url}/api/v3/release", params={"movieId": movie["id"]},
-            headers=self.headers, timeout=90.0,
+            f"{self.radarr_url}/api/v3/release",
+            params={"movieId": movie["id"]},
+            headers=self.headers,
+            timeout=self.search_timeout_seconds,
         )
         releases.raise_for_status()
         items = releases.json()
@@ -563,18 +706,27 @@ class MovieAcquirer:
             raise ValueError("Radarr release response is invalid")
         ordered = sorted(
             (item for item in items if isinstance(item, dict)),
-            key=lambda item: release_rank(item) or (0, 0, 0, 0, 0, 0),
+            key=lambda item: rank(item) or (0, 0, 0, 0, 0, 0, 0),
             reverse=True,
         )
         waiting_space = False
-        excluded = {source.infohash for source in self.permits.list_source_history(
-            reservation_id
-        )} if replacement_reason else set()
+        excluded = (
+            {source.infohash for source in self.permits.list_source_history(reservation_id)}
+            if replacement_reason
+            else set()
+        )
         candidates = self._eligible_movie_releases(
-            ordered, replacement_reason=replacement_reason, excluded_infohashes=excluded,
+            ordered,
+            replacement_reason=replacement_reason,
+            excluded_infohashes=excluded,
+            runtime_minutes=movie.get("runtime"),
         )
         async for candidate in self._prioritize_replacements(
-            candidates, old=existing, reason=replacement_reason, health=old_health,
+            candidates,
+            old=existing,
+            reason=replacement_reason,
+            health=old_health,
+            rank=rank,
         ):
             release, manifest, _, torrent = candidate
             infohash, metadata_sha256, selected_files, exact_bytes = manifest
@@ -582,10 +734,14 @@ class MovieAcquirer:
                 assert existing is not None
                 try:
                     return await self._dispatch_replacement(
-                        old=existing, infohash=infohash,
+                        old=existing,
+                        infohash=infohash,
                         metadata_sha256=metadata_sha256,
-                        selected_files=selected_files, exact_bytes=exact_bytes,
-                        torrent=torrent, reported_seeders=release_seeders(release),
+                        selected_files=selected_files,
+                        exact_bytes=exact_bytes,
+                        torrent=torrent,
+                        reported_seeders=release_seeders(release),
+                        quality_rank=canonical_quality(release),
                     )
                 except PermissionError as error:
                     if str(error) == "waiting_space":
@@ -608,10 +764,14 @@ class MovieAcquirer:
                 try:
                     capacity = await self.capacity_provider() if self.capacity_provider else None
                     chosen_permit = self.permits.issue(
-                        infohash=infohash, metadata_sha256=metadata_sha256,
-                        destination="/data/torrents", category="radarr",
-                        reservation_id=reservation_id, selected_files=selected_files,
-                        budget_bytes=exact_bytes, capacity=capacity,
+                        infohash=infohash,
+                        metadata_sha256=metadata_sha256,
+                        destination="/data/torrents",
+                        category="radarr",
+                        reservation_id=reservation_id,
+                        selected_files=selected_files,
+                        budget_bytes=exact_bytes,
+                        capacity=capacity,
                         expires_at=datetime.now(UTC) + timedelta(minutes=30),
                         reported_seeders=release_seeders(release),
                     )
@@ -623,6 +783,9 @@ class MovieAcquirer:
                 except sqlite3.IntegrityError:
                     return "already_permitted"
             if self.torrent_store is not None:
+                quality = canonical_quality(release)
+                if quality is not None:
+                    self.permits.set_quality(chosen_permit.token, quality)
                 self.torrent_store.put(chosen_permit, torrent)
             if self.permits.had_superseded(reservation_id):
                 retried = await self._retry_replacement(chosen_permit)

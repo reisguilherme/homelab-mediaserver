@@ -1,12 +1,15 @@
-FROM python:3.12.11-slim
+FROM python:3.12.14-slim
 WORKDIR /app
 COPY pyproject.toml uv.lock /app/
-ENV PYTHONPATH=/app/services/control/src
+ENV PYTHONPATH=/app/services/common/src:/app/services/control/src
 ENV PATH=/app/.venv/bin:$PATH
 RUN apt-get update \
+    && apt-get upgrade --no-install-recommends -y \
     && apt-get install --no-install-recommends -y ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir uv==0.8.0 \
     && uv sync --frozen --no-dev --no-install-project \
     && rm -rf /root/.cache
 COPY services/control/src /app/services/control/src
+COPY services/common/src /app/services/common/src
+COPY scripts /app/scripts

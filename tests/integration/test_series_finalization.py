@@ -21,14 +21,19 @@ def test_deleted_episode_does_not_block_finalizer_order(tmp_path):
     jobs = DeletionJobStore(repo.path)
     jobs.tombstone("episode:tmdb:97546:S01E02", "jellyfin-item")
     finalizer = SeriesFinalizer(
-        repository=repo, permits=PermitRegistry(repo.path),
-        torrent_root=tmp_path, gateway_url="http://gateway:8081",
-        arr_token="secret", sonarr_url="http://sonarr:8989",
-        sonarr_api_key="secret", is_tombstoned=jobs.is_tombstoned,
+        repository=repo,
+        permits=PermitRegistry(repo.path),
+        torrent_root=tmp_path,
+        gateway_url="http://gateway:8081",
+        arr_token="secret",
+        sonarr_url="http://sonarr:8989",
+        sonarr_api_key="secret",
+        is_tombstoned=jobs.is_tombstoned,
     )
     assert finalizer._episode_imported(
         {"seasonNumber": 1, "episodeNumber": 2, "hasFile": False},
-        {}, 97546,
+        {},
+        97546,
     )
 
 
@@ -38,24 +43,35 @@ async def test_completed_episode_is_validated_before_one_sonarr_import(tmp_path,
     repo = ReservationRepository(database)
     repo.initialize()
     reserved = repo.reserve(
-        request_id="seerr:3:4", source_id="3:4",
-        media_key="season:tmdb:97546:4", filesystem_id="fixture",
+        request_id="seerr:3:4",
+        source_id="3:4",
+        media_key="season:tmdb:97546:4",
+        filesystem_id="fixture",
         budget_bytes=100_000_000_000,
-        free_bytes=500_000_000_000, total_bytes=600_000_000_000,
+        free_bytes=500_000_000_000,
+        total_bytes=600_000_000_000,
     )
     assert reserved.reservation_id
     permits = PermitRegistry(database)
     permit = permits.issue(
-        infohash="a" * 40, metadata_sha256="b" * 64,
-        destination="/data/torrents", category="sonarr",
-        reservation_id=reserved.reservation_id, scope_key="S04E01",
-        selected_files=("Ted.Lasso.S04E01/Ted.Lasso.S04E01.mkv",
-                        "Ted.Lasso.S04E01/Ted.Lasso.S04E01.pt-BR.srt"),
-        budget_bytes=1000, expires_at=datetime.now(UTC) + timedelta(hours=1),
+        infohash="a" * 40,
+        metadata_sha256="b" * 64,
+        destination="/data/torrents",
+        category="sonarr",
+        reservation_id=reserved.reservation_id,
+        scope_key="S04E01",
+        selected_files=(
+            "Ted.Lasso.S04E01/Ted.Lasso.S04E01.mkv",
+            "Ted.Lasso.S04E01/Ted.Lasso.S04E01.pt-BR.srt",
+        ),
+        budget_bytes=1000,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
     permits.authorize(
-        token=permit.token, infohash=permit.infohash,
-        destination=permit.destination, metadata_sha256=permit.metadata_sha256,
+        token=permit.token,
+        infohash=permit.infohash,
+        destination=permit.destination,
+        metadata_sha256=permit.metadata_sha256,
         effect=lambda _permit: {"accepted": True},
     )
     torrents = tmp_path / "torrents"
@@ -67,7 +83,9 @@ async def test_completed_episode_is_validated_before_one_sonarr_import(tmp_path,
     monkeypatch.setattr(
         "homeserver_control.worker.series_finalization.validate_media",
         lambda path, **_kwargs: ValidationResult(
-            Path(path), 5, MediaProbe(1920, 1080, ("eng",), (), {}),
+            Path(path),
+            5,
+            MediaProbe(1920, 1080, ("eng",), (), {}),
         ),
     )
     posts = []
@@ -79,7 +97,8 @@ async def test_completed_episode_is_validated_before_one_sonarr_import(tmp_path,
     async def capacity_provider():
         return CapacityEvidence(
             free_bytes=copy_bytes + 2,
-            remaining_by_hash={permit.infohash: 0}, other_pending_bytes=3,
+            remaining_by_hash={permit.infohash: 0},
+            other_pending_bytes=3,
         )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -88,24 +107,45 @@ async def test_completed_episode_is_validated_before_one_sonarr_import(tmp_path,
         if request.url.path == "/api/v3/series":
             return httpx.Response(200, json=[{"id": 1, "tmdbId": 97546}])
         if request.url.path == "/api/v3/episode":
-            return httpx.Response(200, json=[{
-                "id": 44, "seasonNumber": 4, "episodeNumber": 1,
-                "hasFile": imported, "episodeFileId": 9 if imported else 0,
-            }])
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 44,
+                        "seasonNumber": 4,
+                        "episodeNumber": 1,
+                        "hasFile": imported,
+                        "episodeFileId": 9 if imported else 0,
+                    }
+                ],
+            )
         if request.url.path == "/api/v3/episodefile/9":
-            return httpx.Response(200, json={
-                "path": "/data/media/tv/Ted Lasso/Season 04/Ted.Lasso.S04E01.mkv",
-            })
+            return httpx.Response(
+                200,
+                json={
+                    "path": "/data/media/tv/Ted Lasso/Season 04/Ted.Lasso.S04E01.mkv",
+                },
+            )
         if request.url.path == "/api/v2/torrents/info":
-            return httpx.Response(200, json=[{
-                "hash": permit.infohash, "progress": 1, "amount_left": 0,
-                "content_path": "/data/torrents/Ted.Lasso.S04E01",
-            }])
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "hash": permit.infohash,
+                        "progress": 1,
+                        "amount_left": 0,
+                        "content_path": "/data/torrents/Ted.Lasso.S04E01",
+                    }
+                ],
+            )
         if request.url.path == "/api/v2/torrents/files":
-            return httpx.Response(200, json=[
-                {"name": permit.selected_files[0], "size": 5},
-                {"name": permit.selected_files[1], "size": subtitle.stat().st_size},
-            ])
+            return httpx.Response(
+                200,
+                json=[
+                    {"name": permit.selected_files[0], "size": 5},
+                    {"name": permit.selected_files[1], "size": subtitle.stat().st_size},
+                ],
+            )
         if request.url.path == "/api/v3/command" and request.method == "POST":
             posts.append(request)
             assert request.read().decode().find("DownloadedEpisodesScan") >= 0
@@ -114,40 +154,50 @@ async def test_completed_episode_is_validated_before_one_sonarr_import(tmp_path,
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         finalizer = SeriesFinalizer(
-            repository=repo, permits=permits, torrent_root=torrents,
-            media_root=library, gateway_url="http://download-gateway:8081",
-            arr_token="secret", sonarr_url="http://sonarr:8989",
-            sonarr_api_key="secret", client=client,
+            repository=repo,
+            permits=permits,
+            torrent_root=torrents,
+            media_root=library,
+            gateway_url="http://download-gateway:8081",
+            arr_token="secret",
+            sonarr_url="http://sonarr:8989",
+            sonarr_api_key="secret",
+            client=client,
         )
         finalizer.capacity_provider = capacity_provider
-        assert await finalizer.finalize(
-            "season:tmdb:97546:4", reserved.reservation_id
-        ) == "import_guard"
+        assert (
+            await finalizer.finalize("season:tmdb:97546:4", reserved.reservation_id)
+            == "import_guard"
+        )
         hardlinks_enabled = True
         library.mkdir()
-        assert await finalizer.finalize(
-            "season:tmdb:97546:4", reserved.reservation_id
-        ) == "waiting_space"
+        assert (
+            await finalizer.finalize("season:tmdb:97546:4", reserved.reservation_id)
+            == "waiting_space"
+        )
         finalizer.import_uid = os.getuid()
         finalizer.import_gid = os.getgid()
-        assert await finalizer.finalize(
-            "season:tmdb:97546:4", reserved.reservation_id
-        ) == "import_requested"
-        assert await finalizer.finalize(
-            "season:tmdb:97546:4", reserved.reservation_id
-        ) == "import_pending"
+        assert (
+            await finalizer.finalize("season:tmdb:97546:4", reserved.reservation_id)
+            == "import_requested"
+        )
+        assert (
+            await finalizer.finalize("season:tmdb:97546:4", reserved.reservation_id)
+            == "import_pending"
+        )
         destination = library / "Ted Lasso" / "Season 04"
         destination.mkdir(parents=True)
         (destination / "Ted.Lasso.S04E01.mkv").write_bytes(b"video")
         imported = True
-        assert await finalizer.finalize(
-            "season:tmdb:97546:4", reserved.reservation_id
-        ) == "import_uncertain"
+        assert (
+            await finalizer.finalize("season:tmdb:97546:4", reserved.reservation_id)
+            == "import_uncertain"
+        )
         (destination / "Ted.Lasso.S04E01.mkv").unlink()
         os.link(folder / "Ted.Lasso.S04E01.mkv", destination / "Ted.Lasso.S04E01.mkv")
-        assert await finalizer.finalize(
-            "season:tmdb:97546:4", reserved.reservation_id
-        ) == "complete"
+        assert (
+            await finalizer.finalize("season:tmdb:97546:4", reserved.reservation_id) == "complete"
+        )
     assert len(posts) == 1
     assert repo.episode_import_state(permit.permit_id) == "complete"
     assert (destination / "Ted.Lasso.S04E01.pt-BR.srt").stat().st_ino == subtitle.stat().st_ino
@@ -158,19 +208,29 @@ def test_legacy_episode_permit_cannot_import_another_episodes_subtitle(tmp_path)
     repo = ReservationRepository(database)
     repo.initialize()
     reserved = repo.reserve(
-        request_id="seerr:3:1", source_id="3:1",
-        media_key="season:tmdb:95480:1", filesystem_id="fixture",
-        budget_bytes=100, free_bytes=1000, total_bytes=2000,
+        request_id="seerr:3:1",
+        source_id="3:1",
+        media_key="season:tmdb:95480:1",
+        filesystem_id="fixture",
+        budget_bytes=100,
+        free_bytes=1000,
+        total_bytes=2000,
     )
     assert reserved.reservation_id
     permits = PermitRegistry(database)
     permit = permits.issue(
-        infohash="a" * 40, metadata_sha256="b" * 64,
-        destination="/data/torrents", category="sonarr",
-        reservation_id=reserved.reservation_id, scope_key="S01E01",
-        selected_files=("Slow.Horses.S01E01/Slow.Horses.S01E01.mkv",
-                        "Slow.Horses.S01E01/Slow.Horses.S01E02.pt-BR.srt"),
-        budget_bytes=100, expires_at=datetime.now(UTC) + timedelta(hours=1),
+        infohash="a" * 40,
+        metadata_sha256="b" * 64,
+        destination="/data/torrents",
+        category="sonarr",
+        reservation_id=reserved.reservation_id,
+        scope_key="S01E01",
+        selected_files=(
+            "Slow.Horses.S01E01/Slow.Horses.S01E01.mkv",
+            "Slow.Horses.S01E01/Slow.Horses.S01E02.pt-BR.srt",
+        ),
+        budget_bytes=100,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
     source = tmp_path / "torrents" / "Slow.Horses.S01E01"
     source.mkdir(parents=True)
@@ -181,9 +241,14 @@ def test_legacy_episode_permit_cannot_import_another_episodes_subtitle(tmp_path)
     video.parent.mkdir(parents=True)
     video.write_bytes(b"video")
     finalizer = SeriesFinalizer(
-        repository=repo, permits=permits, torrent_root=tmp_path / "torrents",
-        media_root=tmp_path / "media", gateway_url="http://gateway",
-        arr_token="secret", sonarr_url="http://sonarr", sonarr_api_key="secret",
+        repository=repo,
+        permits=permits,
+        torrent_root=tmp_path / "torrents",
+        media_root=tmp_path / "media",
+        gateway_url="http://gateway",
+        arr_token="secret",
+        sonarr_url="http://sonarr",
+        sonarr_api_key="secret",
     )
     with pytest.raises(ValidationError, match="episode"):
         finalizer._ensure_subtitle(video, permit)
@@ -191,33 +256,46 @@ def test_legacy_episode_permit_cannot_import_another_episodes_subtitle(tmp_path)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("subtitle_case", [
-    "brazilian", "english", "embedded_english", "embedded_with_brazilian",
-    "original_ptbr",
-])
-async def test_episode_subtitle_priority_and_original_audio(
-    tmp_path, monkeypatch, subtitle_case
-):
+@pytest.mark.parametrize(
+    "subtitle_case",
+    [
+        "brazilian",
+        "english",
+        "embedded_english",
+        "embedded_with_brazilian",
+        "original_ptbr",
+    ],
+)
+async def test_episode_subtitle_priority_and_original_audio(tmp_path, monkeypatch, subtitle_case):
     database = tmp_path / "control.sqlite"
     repo = ReservationRepository(database)
     repo.initialize()
     reserved = repo.reserve(
-        request_id="seerr:3:4", source_id="3:4",
-        media_key="season:tmdb:97546:4", filesystem_id="fixture",
+        request_id="seerr:3:4",
+        source_id="3:4",
+        media_key="season:tmdb:97546:4",
+        filesystem_id="fixture",
         budget_bytes=100_000_000_000,
-        free_bytes=500_000_000_000, total_bytes=600_000_000_000,
+        free_bytes=500_000_000_000,
+        total_bytes=600_000_000_000,
     )
     assert reserved.reservation_id
     permits = PermitRegistry(database)
     permit = permits.issue(
-        infohash="a" * 40, metadata_sha256="b" * 64,
-        destination="/data/torrents", category="sonarr",
-        reservation_id=reserved.reservation_id, scope_key="S04E01",
+        infohash="a" * 40,
+        metadata_sha256="b" * 64,
+        destination="/data/torrents",
+        category="sonarr",
+        reservation_id=reserved.reservation_id,
+        scope_key="S04E01",
         selected_files=("Ted.Lasso.S04E01/Ted.Lasso.S04E01.mkv",),
-        budget_bytes=1000, expires_at=datetime.now(UTC) + timedelta(hours=1),
+        budget_bytes=1000,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
     permits.authorize(
-        token=permit.token, infohash=permit.infohash, destination=permit.destination,
+        token=permit.token,
+        infohash=permit.infohash,
+        destination=permit.destination,
         metadata_sha256=permit.metadata_sha256,
         effect=lambda _permit: {"accepted": True},
     )
@@ -226,31 +304,58 @@ async def test_episode_subtitle_priority_and_original_audio(
     (torrent_folder / "Ted.Lasso.S04E01.mkv").write_bytes(b"video")
     brazilian_srt = b"1\n00:00:01,000 --> 00:00:02,000\nLegenda brasileira\n"
     english_srt = b"1\n00:00:01,000 --> 00:00:02,000\nEnglish subtitle\n"
-    raw = {"streams": [{
-        "codec_type": "audio", "tags": {"language": "pt-BR", "title": "Original"},
-    }]} if subtitle_case == "original_ptbr" else {"streams": [{
-        "codec_type": "subtitle", "codec_name": "subrip",
-        "tags": {"language": "eng"}, "disposition": {"forced": 0},
-    }]} if subtitle_case in {"embedded_english", "embedded_with_brazilian"} else {}
+    raw = (
+        {
+            "streams": [
+                {
+                    "codec_type": "audio",
+                    "tags": {"language": "pt-BR", "title": "Original"},
+                }
+            ]
+        }
+        if subtitle_case == "original_ptbr"
+        else {
+            "streams": [
+                {
+                    "codec_type": "subtitle",
+                    "codec_name": "subrip",
+                    "tags": {"language": "eng"},
+                    "disposition": {"forced": 0},
+                }
+            ]
+        }
+        if subtitle_case in {"embedded_english", "embedded_with_brazilian"}
+        else {}
+    )
     monkeypatch.setattr(
         "homeserver_control.worker.series_finalization.validate_media",
         lambda path, **_kwargs: ValidationResult(
-            Path(path), 5, MediaProbe(
-                1920, 1080, ("por",) if subtitle_case == "original_ptbr" else ("eng",),
-                ("eng",) if subtitle_case in {
-                    "embedded_english", "embedded_with_brazilian"
-                } else (), raw,
+            Path(path),
+            5,
+            MediaProbe(
+                1920,
+                1080,
+                ("por",) if subtitle_case == "original_ptbr" else ("eng",),
+                ("eng",)
+                if subtitle_case in {"embedded_english", "embedded_with_brazilian"}
+                else (),
+                raw,
             ),
         ),
     )
     monkeypatch.setattr(
         "homeserver_control.worker.finalization.validate_media",
         lambda path, **_kwargs: ValidationResult(
-            Path(path), 5, MediaProbe(
-                1920, 1080, ("por",) if subtitle_case == "original_ptbr" else ("eng",),
-                ("eng",) if subtitle_case in {
-                    "embedded_english", "embedded_with_brazilian"
-                } else (), raw,
+            Path(path),
+            5,
+            MediaProbe(
+                1920,
+                1080,
+                ("por",) if subtitle_case == "original_ptbr" else ("eng",),
+                ("eng",)
+                if subtitle_case in {"embedded_english", "embedded_with_brazilian"}
+                else (),
+                raw,
             ),
         ),
     )
@@ -262,15 +367,16 @@ async def test_episode_subtitle_priority_and_original_audio(
             self.calls = []
 
         async def fetch(
-            self, *, tmdb_id, release_title, season, episode, language="BR_PT"
+            self, *, tmdb_id, release_title, season, episode, language="BR_PT", match_mode=None
         ):
             assert (tmdb_id, release_title, season, episode) == (
-                97546, "Ted.Lasso.S04E01.1080p.WEB-DL", 4, 1
+                97546,
+                "Ted.Lasso.S04E01.1080p.WEB-DL",
+                4,
+                1,
             )
             self.calls.append(language)
-            if language == "BR_PT" and subtitle_case in {
-                "brazilian", "embedded_with_brazilian"
-            }:
+            if language == "BR_PT" and subtitle_case in {"brazilian", "embedded_with_brazilian"}:
                 return brazilian_srt
             if language == "EN":
                 return english_srt
@@ -284,24 +390,48 @@ async def test_episode_subtitle_priority_and_original_audio(
         if request.url.path == "/api/v3/series":
             return httpx.Response(200, json=[{"id": 1, "tmdbId": 97546}])
         if request.url.path == "/api/v3/episode":
-            return httpx.Response(200, json=[{
-                "id": 44, "seasonNumber": 4, "episodeNumber": 1,
-                "hasFile": imported, "episodeFileId": 9 if imported else 0,
-            }])
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": 44,
+                        "seasonNumber": 4,
+                        "episodeNumber": 1,
+                        "hasFile": imported,
+                        "episodeFileId": 9 if imported else 0,
+                    }
+                ],
+            )
         if request.url.path == "/api/v3/episodefile/9":
-            return httpx.Response(200, json={
-                "path": "/data/media/tv/Ted Lasso/Season 04/Ted.Lasso.S04E01.mkv",
-            })
+            return httpx.Response(
+                200,
+                json={
+                    "path": "/data/media/tv/Ted Lasso/Season 04/Ted.Lasso.S04E01.mkv",
+                },
+            )
         if request.url.path == "/api/v2/torrents/info":
-            return httpx.Response(200, json=[{
-                "hash": permit.infohash, "progress": 1, "amount_left": 0,
-                "content_path": "/data/torrents/Ted.Lasso.S04E01",
-                "name": "Ted.Lasso.S04E01.1080p.WEB-DL",
-            }])
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "hash": permit.infohash,
+                        "progress": 1,
+                        "amount_left": 0,
+                        "content_path": "/data/torrents/Ted.Lasso.S04E01",
+                        "name": "Ted.Lasso.S04E01.1080p.WEB-DL",
+                    }
+                ],
+            )
         if request.url.path == "/api/v2/torrents/files":
-            return httpx.Response(200, json=[{
-                "name": permit.selected_files[0], "size": 5,
-            }])
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "name": permit.selected_files[0],
+                        "size": 5,
+                    }
+                ],
+            )
         if request.url.path == "/api/v3/command" and request.method == "POST":
             posts.append(request)
             return httpx.Response(201, json={"id": 18})
@@ -310,24 +440,30 @@ async def test_episode_subtitle_priority_and_original_audio(
     library = tmp_path / "media"
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         finalizer = SeriesFinalizer(
-            repository=repo, permits=permits, torrent_root=tmp_path / "torrents",
-            media_root=library, gateway_url="http://download-gateway:8081",
-            arr_token="secret", sonarr_url="http://sonarr:8989",
-            sonarr_api_key="secret", client=client, subtitle_source=source,
+            repository=repo,
+            permits=permits,
+            torrent_root=tmp_path / "torrents",
+            media_root=library,
+            gateway_url="http://download-gateway:8081",
+            arr_token="secret",
+            sonarr_url="http://sonarr:8989",
+            sonarr_api_key="secret",
+            client=client,
+            subtitle_source=source,
         )
+
         async def capacity_provider():
-            return CapacityEvidence(
-                free_bytes=100, remaining_by_hash={permit.infohash: 0}
-            )
+            return CapacityEvidence(free_bytes=100, remaining_by_hash={permit.infohash: 0})
 
         finalizer.capacity_provider = capacity_provider
-        assert await finalizer.finalize(
-            "season:tmdb:97546:4", reserved.reservation_id
-        ) == "import_requested"
+        assert (
+            await finalizer.finalize("season:tmdb:97546:4", reserved.reservation_id)
+            == "import_requested"
+        )
         expected_calls = {
             "brazilian": ["BR_PT"],
-            "english": ["BR_PT", "EN"],
-            "embedded_english": ["BR_PT"],
+            "english": ["BR_PT", "BR_PT", "EN"],
+            "embedded_english": ["BR_PT", "BR_PT"],
             "embedded_with_brazilian": ["BR_PT"],
             "original_ptbr": [],
         }[subtitle_case]
@@ -339,34 +475,39 @@ async def test_episode_subtitle_priority_and_original_audio(
             "embedded_with_brazilian": brazilian_srt,
             "original_ptbr": None,
         }[subtitle_case]
-        assert SubtitleArtifactStore(database).get(
-            reserved.reservation_id, "S04E01", permit.infohash,
-            language="EN" if subtitle_case == "english" else "BR_PT",
-        ) == expected_subtitle
+        assert (
+            SubtitleArtifactStore(database).get(
+                reserved.reservation_id,
+                "S04E01",
+                permit.infohash,
+                language="EN" if subtitle_case == "english" else "BR_PT",
+            )
+            == expected_subtitle
+        )
         destination = library / "Ted Lasso" / "Season 04"
         destination.mkdir(parents=True)
         (destination / "Ted.Lasso.S04E01.mkv").write_bytes(b"video")
         imported = True
-        assert await finalizer.finalize(
-            "season:tmdb:97546:4", reserved.reservation_id
-        ) == "complete"
+        assert (
+            await finalizer.finalize("season:tmdb:97546:4", reserved.reservation_id) == "complete"
+        )
     assert len(posts) == 1
     if expected_subtitle is None:
         assert not list(destination.glob("*.srt"))
     else:
-        suffix = "pt-BR" if subtitle_case in {
-            "brazilian", "embedded_with_brazilian"
-        } else "en"
-        assert (
-            destination / f"Ted.Lasso.S04E01.{suffix}.srt"
-        ).read_bytes() == expected_subtitle
+        suffix = "pt-BR" if subtitle_case in {"brazilian", "embedded_with_brazilian"} else "en"
+        assert (destination / f"Ted.Lasso.S04E01.{suffix}.srt").read_bytes() == expected_subtitle
 
 
 def _reserved_season(repo, season, *, tmdb_id=99999):
     reserved = repo.reserve(
-        request_id=f"seerr:chronology:{season}", source_id=f"chronology:{season}",
-        media_key=f"season:tmdb:{tmdb_id}:{season}", filesystem_id="fixture",
-        budget_bytes=100, free_bytes=1000, total_bytes=2000,
+        request_id=f"seerr:chronology:{season}",
+        source_id=f"chronology:{season}",
+        media_key=f"season:tmdb:{tmdb_id}:{season}",
+        filesystem_id="fixture",
+        budget_bytes=100,
+        free_bytes=1000,
+        total_bytes=2000,
     )
     assert reserved.reservation_id
     return reserved.reservation_id
@@ -375,30 +516,40 @@ def _reserved_season(repo, season, *, tmdb_id=99999):
 def _confirmed_episode(permits, reservation_id, season, number):
     permit = permits.issue(
         infohash=f"{season:02x}{number:02x}" * 10,
-        metadata_sha256="b" * 64, destination="/data/torrents",
-        category="sonarr", reservation_id=reservation_id,
+        metadata_sha256="b" * 64,
+        destination="/data/torrents",
+        category="sonarr",
+        reservation_id=reservation_id,
         scope_key=f"S{season:02d}E{number:02d}",
         selected_files=(f"Show.S{season:02d}E{number:02d}.mkv",),
-        budget_bytes=100, expires_at=datetime.now(UTC) + timedelta(hours=1),
+        budget_bytes=100,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
     permits.authorize(
-        token=permit.token, infohash=permit.infohash,
-        destination=permit.destination, metadata_sha256=permit.metadata_sha256,
+        token=permit.token,
+        infohash=permit.infohash,
+        destination=permit.destination,
+        metadata_sha256=permit.metadata_sha256,
         effect=lambda _: {"accepted": True},
     )
     return permit
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("earlier_state, expected", [
-    ("missing", "waiting_previous_season"),
-    ("accepted", "waiting_previous_season"),
-    ("complete", "downloading"),
-    ("preexisting", "downloading"),
-    ("catalog_missing", "waiting_previous_season"),
-])
+@pytest.mark.parametrize(
+    "earlier_state, expected",
+    [
+        ("missing", "waiting_previous_season"),
+        ("accepted", "waiting_previous_season"),
+        ("complete", "downloading"),
+        ("preexisting", "downloading"),
+        ("catalog_missing", "waiting_previous_season"),
+    ],
+)
 async def test_later_season_waits_for_requested_prior_season_import(
-    tmp_path, earlier_state, expected,
+    tmp_path,
+    earlier_state,
+    expected,
 ):
     database = tmp_path / "control.sqlite"
     repo = ReservationRepository(database)
@@ -408,7 +559,8 @@ async def test_later_season_waits_for_requested_prior_season_import(
     permits = PermitRegistry(database)
     first_permit = (
         _confirmed_episode(permits, first_reservation, 1, 1)
-        if earlier_state not in {"preexisting", "catalog_missing"} else None
+        if earlier_state not in {"preexisting", "catalog_missing"}
+        else None
     )
     _confirmed_episode(permits, third_reservation, 3, 1)
     if earlier_state in {"accepted", "complete"}:
@@ -423,14 +575,17 @@ async def test_later_season_waits_for_requested_prior_season_import(
         if request.url.path == "/api/v3/series":
             return httpx.Response(200, json=[{"id": 1, "tmdbId": 99999}])
         if request.url.path == "/api/v3/episode":
-            episodes = [
-                {"id": 31, "seasonNumber": 3, "episodeNumber": 1, "hasFile": False}
-            ]
+            episodes = [{"id": 31, "seasonNumber": 3, "episodeNumber": 1, "hasFile": False}]
             if earlier_state != "catalog_missing":
-                episodes.insert(0, {
-                    "id": 11, "seasonNumber": 1, "episodeNumber": 1,
-                    "hasFile": earlier_state != "missing",
-                })
+                episodes.insert(
+                    0,
+                    {
+                        "id": 11,
+                        "seasonNumber": 1,
+                        "episodeNumber": 1,
+                        "hasFile": earlier_state != "missing",
+                    },
+                )
             return httpx.Response(200, json=episodes)
         if request.url.path == "/api/v2/torrents/info":
             gateway_calls.append(request)
@@ -439,25 +594,31 @@ async def test_later_season_waits_for_requested_prior_season_import(
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         finalizer = SeriesFinalizer(
-            repository=repo, permits=permits, torrent_root=tmp_path / "torrents",
-            gateway_url="http://download-gateway:8081", arr_token="secret",
-            sonarr_url="http://sonarr:8989", sonarr_api_key="secret", client=client,
+            repository=repo,
+            permits=permits,
+            torrent_root=tmp_path / "torrents",
+            gateway_url="http://download-gateway:8081",
+            arr_token="secret",
+            sonarr_url="http://sonarr:8989",
+            sonarr_api_key="secret",
+            client=client,
         )
-        assert await finalizer.finalize(
-            "season:tmdb:99999:3", third_reservation
-        ) == expected
-    assert len(gateway_calls) == (
-        1 if earlier_state in {"complete", "preexisting"} else 0
-    )
+        assert await finalizer.finalize("season:tmdb:99999:3", third_reservation) == expected
+    assert len(gateway_calls) == (1 if earlier_state in {"complete", "preexisting"} else 0)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("earlier_imported, expected", [
-    (False, "waiting_previous_episode"),
-    (True, "downloading"),
-])
+@pytest.mark.parametrize(
+    "earlier_imported, expected",
+    [
+        (False, "waiting_previous_episode"),
+        (True, "downloading"),
+    ],
+)
 async def test_episode_waits_for_missing_earlier_episode_without_permit(
-    tmp_path, earlier_imported, expected,
+    tmp_path,
+    earlier_imported,
+    expected,
 ):
     database = tmp_path / "control.sqlite"
     repo = ReservationRepository(database)
@@ -471,11 +632,13 @@ async def test_episode_waits_for_missing_earlier_episode_without_permit(
         if request.url.path == "/api/v3/series":
             return httpx.Response(200, json=[{"id": 1, "tmdbId": 99999}])
         if request.url.path == "/api/v3/episode":
-            return httpx.Response(200, json=[
-                {"id": 11, "seasonNumber": 1, "episodeNumber": 1,
-                 "hasFile": earlier_imported},
-                {"id": 12, "seasonNumber": 1, "episodeNumber": 2, "hasFile": False},
-            ])
+            return httpx.Response(
+                200,
+                json=[
+                    {"id": 11, "seasonNumber": 1, "episodeNumber": 1, "hasFile": earlier_imported},
+                    {"id": 12, "seasonNumber": 1, "episodeNumber": 2, "hasFile": False},
+                ],
+            )
         if request.url.path == "/api/v2/torrents/info":
             gateway_calls.append(request)
             return httpx.Response(200, json=[])
@@ -483,9 +646,14 @@ async def test_episode_waits_for_missing_earlier_episode_without_permit(
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         finalizer = SeriesFinalizer(
-            repository=repo, permits=permits, torrent_root=tmp_path / "torrents",
-            gateway_url="http://download-gateway:8081", arr_token="secret",
-            sonarr_url="http://sonarr:8989", sonarr_api_key="secret", client=client,
+            repository=repo,
+            permits=permits,
+            torrent_root=tmp_path / "torrents",
+            gateway_url="http://download-gateway:8081",
+            arr_token="secret",
+            sonarr_url="http://sonarr:8989",
+            sonarr_api_key="secret",
+            client=client,
         )
         assert await finalizer.finalize("season:tmdb:99999:1", reservation_id) == expected
     assert len(gateway_calls) == (1 if earlier_imported else 0)
@@ -504,21 +672,31 @@ async def test_unrequested_prior_seasons_do_not_block_current_season(tmp_path):
         if request.url.path == "/api/v3/series":
             return httpx.Response(200, json=[{"id": 1, "tmdbId": 99999}])
         if request.url.path == "/api/v3/episode":
-            return httpx.Response(200, json=[
-                {"id": season * 10 + 1, "seasonNumber": season,
-                 "episodeNumber": 1, "hasFile": False}
-                for season in (1, 2, 3, 4)
-            ])
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": season * 10 + 1,
+                        "seasonNumber": season,
+                        "episodeNumber": 1,
+                        "hasFile": False,
+                    }
+                    for season in (1, 2, 3, 4)
+                ],
+            )
         if request.url.path == "/api/v2/torrents/info":
             return httpx.Response(200, json=[])
         raise AssertionError(f"unexpected request {request.method} {request.url}")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         finalizer = SeriesFinalizer(
-            repository=repo, permits=permits, torrent_root=tmp_path / "torrents",
-            gateway_url="http://download-gateway:8081", arr_token="secret",
-            sonarr_url="http://sonarr:8989", sonarr_api_key="secret", client=client,
+            repository=repo,
+            permits=permits,
+            torrent_root=tmp_path / "torrents",
+            gateway_url="http://download-gateway:8081",
+            arr_token="secret",
+            sonarr_url="http://sonarr:8989",
+            sonarr_api_key="secret",
+            client=client,
         )
-        assert await finalizer.finalize("season:tmdb:99999:4", reservation_id) == (
-            "downloading"
-        )
+        assert await finalizer.finalize("season:tmdb:99999:4", reservation_id) == ("downloading")

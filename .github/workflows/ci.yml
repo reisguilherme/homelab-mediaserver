@@ -12,22 +12,70 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
           python-version: '3.12'
-      - name: Install uv and locked dependencies
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          version: '0.8.0'
+          enable-cache: true
+      - name: Install locked dependencies and filesystem test tooling
         run: |
-          python -m pip install --upgrade pip uv
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y restic shellcheck
           uv sync --frozen
+      - name: Scan history for credentials
+        run: bash scripts/check-secrets.sh
+      - name: Audit locked production dependencies
+        run: |
+          uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file "$RUNNER_TEMP/homeserver-requirements.txt"
+          uvx --from pip-audit==2.10.0 pip-audit --no-deps --disable-pip -r "$RUNNER_TEMP/homeserver-requirements.txt"
       - name: Lint
         run: uv run make lint
       - name: Unit tests
         run: uv run make test-unit
       - name: Contract tests
-        run: uv run make test-contract
+        run: |
+          docker create --name homeserver-ci-caddy caddy:2.10.2-alpine
+          docker cp homeserver-ci-caddy:/usr/bin/caddy "$RUNNER_TEMP/caddy"
+          docker rm homeserver-ci-caddy
+          chmod +x "$RUNNER_TEMP/caddy"
+          HOMESERVER_TEST_CADDY="$RUNNER_TEMP/caddy" uv run make test-contract
       - name: Integration tests
         run: uv run make test-integration
       - name: Compose render
         run: uv run make compose-check
       - name: Smoke tests
         run: uv run make smoke
+      - name: Configuration, install and real Restic contracts
+        run: uv run make test-config test-install test-restic
+      - name: Build CPU images from the tested source
+        run: |
+          mkdir -p services/common/src/.image-privacy-fixture
+          printf 'fake-build-context-marker\n' > services/common/src/.image-privacy-fixture/.env
+          printf 'fake-build-context-marker\n' > services/common/src/.image-privacy-fixture/state.db
+          printf 'fake-build-context-marker\n' > services/common/src/.image-privacy-fixture/private.pem
+          docker build -f deploy/Dockerfile.control --label org.opencontainers.image.revision="$GITHUB_SHA" -t homeserver-control:dev .
+          docker build -f deploy/Dockerfile.telemetry --label org.opencontainers.image.revision="$GITHUB_SHA" -t homeserver-telemetry:dev .
+      - name: Verify image imports and command distribution
+        run: |
+          docker run --rm homeserver-control:dev python -c 'import homeserver_common.cli, homeserver_control.configuration.reconcile, homeserver_control.worker.__main__'
+          docker run --rm homeserver-telemetry:dev python -c 'import homeserver_telemetry.app'
+          docker run --rm homeserver-control:dev python -m homeserver_common.cli config catalog > /dev/null
+          for image in homeserver-control:dev homeserver-telemetry:dev; do
+            docker run --rm "$image" python -c 'from pathlib import Path; p=Path("/app/services/common/src/.image-privacy-fixture"); assert not any(p.glob("*")) if p.exists() else True'
+          done
+      - name: Fresh CPU stack with real native APIs
+        run: uv run make test-fresh-stack
+      - name: Scan explicitly built images
+        run: bash scripts/check-images.sh --output-dir image-security homeserver-control:dev homeserver-telemetry:dev
+      - name: Retain image vulnerability reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: image-vulnerability-reports
+          path: image-security/
+          if-no-files-found: ignore
+          retention-days: 14

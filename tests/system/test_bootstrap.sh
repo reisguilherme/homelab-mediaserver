@@ -9,22 +9,23 @@ mkdir -p "$test_root/etc" "$test_root/srv/data"
 printf 'fixture-fstab\n' > "$test_root/etc/fstab"
 before=$(sha256sum "$test_root/etc/fstab")
 
-config="$test_root/server-valid.yaml"
+config="$test_root/server.env"
 cat > "$config" <<EOF
-server:
-  mode: adopt
-storage:
-  media_mount: $test_root/srv/data
-  media_uuid: fixture-uuid
+HOMESERVER_ENVIRONMENT=dev
+HOMESERVER_INSTALL_ROOT=$test_root/install
+HOMESERVER_APPDATA_ROOT=$test_root/appdata
+HOMESERVER_MEDIA_ROOT=$test_root/srv/data
+HOMESERVER_TRANSCODE_ROOT=$test_root/transcode
+HOMESERVER_BACKUP_STAGING_ROOT=$test_root/backups
+HOMESERVER_RUN_ROOT=$test_root/run
 EOF
 
-HOMESERVER_FIXTURE_ROOT="$test_root" HOMESERVER_REPORT="$test_root/report.yaml" \
-  bash "$script" --check --config "$config"
-HOMESERVER_FIXTURE_ROOT="$test_root" HOMESERVER_REPORT="$test_root/plan.yaml" \
-  bash "$script" --plan --config "$config"
+bash "$script" --check --mode adopt --env-file "$config" > "$test_root/report.json"
+bash "$script" --plan --mode adopt --env-file "$config" > "$test_root/plan.json"
 after=$(sha256sum "$test_root/etc/fstab")
 test "$before" = "$after"
-test -s "$test_root/report.yaml"
-test -s "$test_root/plan.yaml"
+test -s "$test_root/report.json"
+test -s "$test_root/plan.json"
+test ! -e "$test_root/install"
 
 echo 'bootstrap tests passed'

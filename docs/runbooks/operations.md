@@ -1,55 +1,26 @@
 # Operação diária
 
-- Consultar a fila e o motivo de espera antes de repetir um pedido. Os links
-  dos painéis nativos Sonarr, Radarr e qBittorrent estão em
-  [Preparação dos serviços](service-setup.md#painéis-web-nativos).
-- Tratar `waiting_space`, `waiting_source`, `waiting_subtitles` e estados
-  `unknown` como estados operacionais, não como falhas a ignorar.
-- Para remover um filme ou episódio já assistido, abrir o item no Jellyfin com
-  a conta administradora, usar o menu de três pontos e escolher **Excluir**.
-  Esse comando cria uma operação durável no controlador. Assistir ou marcar
-  como assistido não apaga nada. O Jellyfin continua sem escrita direta na
-  biblioteca; o worker remove a origem verificada, o registro Arr e o arquivo,
-  depois notifica o Jellyfin e confirma que a varredura retirou o item do
-  catálogo. Não conceda escrita ao contêiner Jellyfin para habilitar esse botão.
-- Consultar o resultado em `GET /api/v1/deletions/jobs` na API de controle
-  (porta Tailscale 8080, cabeçalho `X-Admin-Token`). `complete` confirma o
-  fim; `blocked` mostra ambiguidade ou arquivo alterado; uma etapa com erro
-  temporário será tentada novamente. O botão Excluir pode responder antes do
-  fim do trabalho, então aguarde o desaparecimento do item no catálogo.
-- Excluir uma temporada ou série inteira pelo Jellyfin permanece bloqueado.
-  Exclua os episódios individualmente; pacotes de torrent compartilhados
-  também são bloqueados para não remover os outros episódios. O tombstone
-  impede a reacquisição automática da mídia excluída.
-- Conferir capacidade física, compromissos e idade do snapshot de telemetria.
-- Não liberar downloads enquanto UUID, banco, gateway ou backup estiverem
-  bloqueados.
-- Um pedido só compromete espaço depois que o controlador inspeciona os
-  metadados do torrent. A permissão usa o tamanho de todos os arquivos do
-  pacote e exige que ele caiba no espaço livre atual, descontados os bytes
-  restantes dos torrents na fila e das permissões ainda não iniciadas. Não há
-  reserva fixa por filme, episódio ou temporada. A busca prefere remux Blu-ray,
-  Blu-ray e só então WEB-DL. WEBRip e HDTV ficam fora da aquisição automática.
-- Um filme sem legenda externa explicitamente pt-BR no torrent pode ser
-  admitido sem consulta prévia ao SubDL. O finalizador mantém o vídeo fora da
-  biblioteca até validar uma legenda ou confirmar áudio original pt-BR; sem
-  isso, o pedido fica em `waiting_subtitles`. `pt`, `por` e `pt-PT` não
-  comprovam português brasileiro. A preferência por Dolby Vision e Atmos usa
-  o nome da release;
-  conferir os codecs e a legenda na reprodução quando esses recursos forem
-  decisivos. Séries sem sidecar continuam exigindo SRT no preflight.
-- Para magnets v1, a busca tenta obter o `.torrent` de `itorrents.net` e
-  confere o hash antes de emitir a permissão. O gateway só encaminha um
-  magnet cuja permissão tenha metadados inspecionados e reserva ativa; caso o
-  cache não responda ou não traga os arquivos requeridos, o pedido aguarda.
-- O Bazarr está ligado a Radarr/Sonarr com perfil exclusivo `pb` e provedor
-  público Podnapisi para busca após a importação. Para filmes só com vídeo,
-  o finalizador busca pelo ID TMDb verificado: pt-BR da mesma release, pt-BR
-  de outra release com duração compatível, inglês da mesma release e inglês
-  de outra release com duração compatível, nessa ordem. Releases diferentes
-  exigem edição/corte compatível e cobertura dos tempos do SRT próxima à
-  duração do vídeo, com margem para créditos finais. Conferir o sincronismo
-  no Jellyfin. O SubDL V1 usa `EN` e não garante a variante en-US.
-- Novas importações de filmes ignoram artefatos de legenda criados pelo
-  preflight anterior. A auditoria de produção desta mudança encontrou quatro
-  desses artefatos, todos de pedidos já concluídos.
+O [guia do operador](../operator-guide.md) é o procedimento atual para alterar
+`.env`, limites de downloads/seeding, qualidade/idiomas, supervisão, backup,
+update e rollback. Use [troubleshooting](../troubleshooting.md) para estados da
+fila e [serviços](service-setup.md) para os painéis nativos.
+
+Capacidade usa tamanho real dos arquivos e bytes pendentes, sem reserva fixa
+por filme. Filmes elegíveis são ordenados por seeds; séries seguem temporada
+e episódio. Fonte lenta por cinco minutos dispara busca/avaliação sem parar
+a atual; troca exige qualidade/edição compatíveis e ETA melhor medido.
+
+Solicitações podem aguardar espaço, fonte, legenda, validação ou importação;
+Requested no Seerr sozinho não descreve o estado detalhado. Consulte a API de
+controle e o painel nativo Arr/qBit antes de repetir o pedido. Monitor qBit
+permite leitura; mutações nesse proxy são recusadas para preservar o gateway.
+
+Exclusão é explícita pelo Jellyfin com permissão configurada. Jellyfin continua
+sem escrita direta na biblioteca: proxy cria um job durável; worker verifica
+origem, remove torrent/registro/arquivo e sincroniza catálogo. Assistir não apaga.
+`GET /api/v1/deletions/jobs` com X-Admin-Token informa complete/blocked/retry.
+Exclusão de série/temporada inteira ou pacote compartilhado é bloqueada para
+não apagar outros episódios. Tombstones impedem reacquisição automática.
+
+Não apague mídia/cache por estimativa, remova recovery ou retome torrents como
+atalho. Verifique UUID, capacidade e efeitos externos antes de qualquer operação.

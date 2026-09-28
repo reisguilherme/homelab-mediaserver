@@ -1,13 +1,19 @@
 # Alertas e telemetria
 
-Alertas próprios são deduplicados por `(event_type, object_id, generation)` e passam por outbox persistente. O payload interno não guarda tokens de provedores nem URLs com credenciais. Um timeout depois de um provedor aceitar a mensagem pode gerar duplicação externa; o operador deve tratar a chave de geração como a referência idempotente.
+O painel HTTP e os snapshots do host funcionam sem CYD ou broker MQTT.
+Consulte [status](status-dashboard.md) e [guia do operador](../operator-guide.md).
 
-Telegram é o adaptador inicial recomendado, mas a conta ainda precisa ser confirmada. O transporte falso é a única dependência dos testes locais. A disponibilidade da notificação não é pré-requisito para reprodução ou seeding.
+Alertas são opcionais: configure `HOMESERVER_ALERTS_ENABLED=true` e
+`HOMESERVER_ALERT_WEBHOOK_URL` no `.env` privado. O supervisor envia um POST
+JSON somente a esse destino explicitamente configurado, usando timeout
+`HTTP_TIMEOUT_SECONDS`. Não há integração Telegram implícita.
 
-No perfil de produção, o broker MQTT usa o template TLS
-`deploy/mosquitto/mosquitto.prod.conf`, certificados/`passwd` montados de
-`/etc/homeserver/mqtt-certs`, autenticação por dispositivo/serviço, ACL de
-leitura limitada e mensagens de até 8 KiB para a CYD. O perfil dev usa listener
-interno sem publicação; TLS de produção só pode ser declarado após validar o
-certificado e o handshake na rede real. O painel só lê snapshots e publica
-presença; não há tópicos de comando administrativo.
+A outbox SQLite persistente em `APPDATA_ROOT/telemetry/notifications.sqlite`
+deduplica por evento, objeto e geração. Retry exponencial começa em
+`ALERT_RETRY_SECONDS` e é limitado a uma hora. Stack bloqueada/degradada e
+backup ausente/antigo produzem alertas; falha de entrega não impede reprodução.
+`BACKUP_STALE_HOURS` define a idade máxima; zero desabilita o limiar de idade.
+
+Payloads e logs ocultam credenciais. Um timeout após o destinatário aceitar
+pode duplicar a entrega; o destinatário deve tratar geração como idempotente.
+Falha de webhook é observada na outbox sem publicar a URL secreta em logs.

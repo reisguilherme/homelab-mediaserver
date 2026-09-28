@@ -32,4 +32,6 @@ def test_dev_compose_does_not_reference_production_mounts() -> None:
     compose = Path("deploy/compose.dev.yaml").read_text(encoding="utf-8")
     assert "/srv/data" not in compose
     assert "127.0.0.1" in compose
-    assert "HOMESERVER_RUNTIME" in compose
+    for name in ("MEDIA_ROOT", "APPDATA_ROOT", "RUN_ROOT", "TRANSCODE_ROOT"):
+        assert "HOMESERVER_" + name in compose
+    assert "../.runtime/dev/" in compose

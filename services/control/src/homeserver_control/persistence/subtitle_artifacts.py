@@ -24,8 +24,15 @@ class SubtitleArtifactStore:
         return connection
 
     def put(
-        self, reservation_id: str, scope_key: str | None, infohash: str, content: bytes,
-        *, language: str = "BR_PT", source: str = "subdl",
+        self,
+        reservation_id: str,
+        scope_key: str | None,
+        infohash: str,
+        content: bytes,
+        *,
+        language: str = "BR_PT",
+        source: str = "subdl",
+        replace_language: bool = False,
     ) -> None:
         if language not in {"BR_PT", "EN"}:
             raise ValueError("unsupported subtitle language")
@@ -47,20 +54,34 @@ class SubtitleArtifactStore:
                     """INSERT INTO subtitle_artifacts
                     (reservation_id, scope_key, infohash, source, language, sha256, content)
                     VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (reservation_id, scope_key or "", infohash.lower(), source, language,
-                     digest, content),
+                    (
+                        reservation_id,
+                        scope_key or "",
+                        infohash.lower(),
+                        source,
+                        language,
+                        digest,
+                        content,
+                    ),
                 )
             elif row[0] == "subdl" and source == MOVIE_FINALIZER_SOURCE:
                 connection.execute(
                     """UPDATE subtitle_artifacts
                     SET source = ?, language = ?, sha256 = ?, content = ?
                     WHERE reservation_id = ? AND scope_key = ? AND infohash = ?""",
-                    (source, language, digest, content, reservation_id,
-                     scope_key or "", infohash.lower()),
+                    (
+                        source,
+                        language,
+                        digest,
+                        content,
+                        reservation_id,
+                        scope_key or "",
+                        infohash.lower(),
+                    ),
                 )
             elif row[0] != source:
                 raise ValueError("subtitle artifact source conflicts with an existing permit")
-            elif row[1] == "EN" and language == "BR_PT":
+            elif row[1] != language and replace_language or row[1] == "EN" and language == "BR_PT":
                 connection.execute(
                     """UPDATE subtitle_artifacts SET language = ?, sha256 = ?, content = ?
                     WHERE reservation_id = ? AND scope_key = ? AND infohash = ?""",
@@ -72,8 +93,13 @@ class SubtitleArtifactStore:
                 raise ValueError("subtitle artifact conflicts with an existing permit")
 
     def get(
-        self, reservation_id: str, scope_key: str | None, infohash: str,
-        *, language: str = "BR_PT", source: str = "subdl",
+        self,
+        reservation_id: str,
+        scope_key: str | None,
+        infohash: str,
+        *,
+        language: str = "BR_PT",
+        source: str = "subdl",
     ) -> bytes | None:
         if language not in {"BR_PT", "EN"}:
             raise ValueError("unsupported subtitle language")

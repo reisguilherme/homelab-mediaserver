@@ -7,6 +7,9 @@ import argparse
 import json
 import os
 import shutil
+import signal
+import subprocess
+import sys
 import tempfile
 import time
 from datetime import UTC, datetime
@@ -96,10 +99,11 @@ def collect(
     network_root: Path = Path("/sys/class/net"),
     sampled_at: float | None = None,
     previous: dict[str, object] | None = None,
+    network_interface: str = "auto",
 ) -> dict[str, object]:
     sampled_at = time.time() if sampled_at is None else sampled_at
     cpu = _cpu_counters(proc_root)
-    interface = _default_interface(proc_root)
+    interface = _default_interface(proc_root) if network_interface == "auto" else network_interface
     network = _interface_counters(network_root, interface)
     old = previous.get("counters", {}) if isinstance(previous, dict) else {}
     if not isinstance(old, dict):
@@ -168,6 +172,7 @@ def write_atomic(output: Path, payload: dict[str, object]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
+        os.chmod(temporary, 0o640)
         os.replace(temporary, output)
     finally:
         if os.path.exists(temporary):
@@ -177,12 +182,76 @@ def write_atomic(output: Path, payload: dict[str, object]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=Path("/run/homeserver/host.json"))
+    parser.add_argument("--env-file", type=Path)
+    parser.add_argument("--loop", action="store_true")
     args = parser.parse_args()
-    try:
-        previous = json.loads(args.output.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        previous = None
-    write_atomic(args.output, collect(previous=previous))
+    settings = None
+    if args.env_file:
+        root = Path(__file__).resolve().parent.parent
+        sys.path.insert(0, str(root / "services/common/src"))
+        from homeserver_common.env import load_settings
+
+        settings = load_settings(args.env_file, mode="prod")
+        args.output = Path(settings.run_root) / "host.json"
+    if args.loop and settings is None:
+        parser.error("--loop requires --env-file")
+    running = True
+
+    def stop(_signal, _frame):
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    while running:
+        try:
+            previous = json.loads(args.output.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous = None
+        media = Path(settings.media_root) if settings else Path("/srv/data")
+        if settings:
+            guard = subprocess.run(
+                ["bash", str(root / "scripts/check-mount.sh"), str(media), settings.media_uuid],
+                capture_output=True,
+                timeout=15,
+            )
+            if guard.returncode:
+                # Never report a root-filesystem reading as mounted media capacity.
+                write_atomic(
+                    Path(settings.run_root) / "capacity.json",
+                    {"filesystem_id": None, "state": "missing", "measured_at": time.time()},
+                )
+                if not args.loop:
+                    return 4
+                time.sleep(settings.metrics_interval_seconds)
+                continue
+            stat = os.statvfs(media)
+            write_atomic(
+                Path(settings.run_root) / "capacity.json",
+                {
+                    "filesystem_id": settings.media_uuid,
+                    "measured_at": time.time(),
+                    "free_bytes": stat.f_bavail * stat.f_frsize,
+                    "total_bytes": stat.f_blocks * stat.f_frsize,
+                },
+            )
+        snapshot = collect(
+            previous=previous,
+            media_path=media,
+            network_interface=settings.network_interface if settings else "auto",
+        )
+        if settings:
+            from homeserver_common.backup_status import read_backup_status
+
+            snapshot["backup"] = read_backup_status(
+                Path(settings.appdata_root) / "control/last-backup.json",
+                enabled=settings.backup_enabled,
+                stale_hours=settings.backup_stale_hours,
+            )
+        write_atomic(args.output, snapshot)
+        if not args.loop:
+            break
+        time.sleep(settings.metrics_interval_seconds)
     return 0
 
 

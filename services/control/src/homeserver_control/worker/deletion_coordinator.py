@@ -39,19 +39,41 @@ class DeletionCoordinator:
     """Process one durable job per call, removing its source before Arr media."""
 
     def __init__(
-        self, *, jobs: DeletionJobStore, media_root: str | Path,
-        data_root: str | Path, snapshot_path: str | Path, filesystem_id: str,
-        radarr_url: str, radarr_api_key: str, sonarr_url: str,
-        sonarr_api_key: str, seerr_url: str, seerr_api_key: str,
-        gateway_url: str, arr_token: str, jellyfin_url: str,
-        jellyfin_api_key: str, client: httpx.AsyncClient | None = None,
+        self,
+        *,
+        jobs: DeletionJobStore,
+        media_root: str | Path,
+        data_root: str | Path,
+        snapshot_path: str | Path,
+        filesystem_id: str,
+        radarr_url: str,
+        radarr_api_key: str,
+        sonarr_url: str,
+        sonarr_api_key: str,
+        seerr_url: str,
+        seerr_api_key: str,
+        gateway_url: str,
+        arr_token: str,
+        jellyfin_url: str,
+        jellyfin_api_key: str,
+        client: httpx.AsyncClient | None = None,
         mount_check: Callable[[Path], bool] | None = None,
     ) -> None:
-        if not all((
-            filesystem_id, radarr_url, radarr_api_key, sonarr_url, sonarr_api_key,
-            seerr_url, seerr_api_key, gateway_url, arr_token, jellyfin_url,
-            jellyfin_api_key,
-        )):
+        if not all(
+            (
+                filesystem_id,
+                radarr_url,
+                radarr_api_key,
+                sonarr_url,
+                sonarr_api_key,
+                seerr_url,
+                seerr_api_key,
+                gateway_url,
+                arr_token,
+                jellyfin_url,
+                jellyfin_api_key,
+            )
+        ):
             raise ValueError("deletion coordinator requires service credentials and media UUID")
         self.jobs = jobs
         self.media_root = Path(media_root)
@@ -103,11 +125,17 @@ class DeletionCoordinator:
         else:
             match = _EPISODE_KEY.fullmatch(media_key) if isinstance(media_key, str) else None
             ids = (
-                "sonarr_series_id", "sonarr_episode_id", "sonarr_episode_file_id",
-                "series_tmdb_id", "season", "episode",
+                "sonarr_series_id",
+                "sonarr_episode_id",
+                "sonarr_episode_file_id",
+                "series_tmdb_id",
+                "season",
+                "episode",
             )
             if match is None or (
-                payload.get("series_tmdb_id"), payload.get("season"), payload.get("episode")
+                payload.get("series_tmdb_id"),
+                payload.get("season"),
+                payload.get("episode"),
             ) != tuple(map(int, match.groups())):
                 raise DeletionBlocked("episode identity is invalid")
         if any(type(payload.get(name)) is not int or payload[name] <= 0 for name in ids[:3]):
@@ -129,7 +157,8 @@ class DeletionCoordinator:
         library = self.media_root / ("movies" if job["item_type"] == "Movie" else "tv")
         try:
             safe = (
-                path.is_absolute() and path != library
+                path.is_absolute()
+                and path != library
                 and path.is_relative_to(library)
                 and path.resolve(strict=False).is_relative_to(library.resolve(strict=True))
             )
@@ -184,12 +213,19 @@ class DeletionCoordinator:
             permit_table = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE name='gateway_permits' AND type='table'"
             ).fetchone()
-            permits = [] if permit_table is None else connection.execute(
-                """SELECT token, state FROM gateway_permits
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(gateway_permits)")}
+            primary_filter = " AND probe_parent_id IS NULL" if "probe_parent_id" in columns else ""
+            permits = (
+                []
+                if permit_table is None
+                else connection.execute(
+                    """SELECT token, state FROM gateway_permits
                 WHERE reservation_id = ? AND scope_key IS ?
-                AND state IN ('authorized','dispatching','unknown','confirmed')""",
-                (rows[0]["id"], scope),
-            ).fetchall()
+                AND state IN ('authorized','dispatching','unknown','confirmed')"""
+                    + primary_filter,
+                    (rows[0]["id"], scope),
+                ).fetchall()
+            )
         if len(permits) > 1:
             raise DeletionBlocked("multiple active torrent permits match captured item")
         if permits and permits[0]["state"] != "confirmed":
@@ -237,8 +273,7 @@ class DeletionCoordinator:
                     raise DeletionBlocked("Radarr movie changed while delete was pending")
             return False
         if not isinstance(movie, dict) or (
-            movie.get("id") != payload["radarr_id"]
-            or movie.get("tmdbId") != payload["tmdb_id"]
+            movie.get("id") != payload["radarr_id"] or movie.get("tmdbId") != payload["tmdb_id"]
         ):
             raise DeletionBlocked("Radarr movie identity changed")
         movie_file = movie.get("movieFile")
@@ -261,8 +296,11 @@ class DeletionCoordinator:
         episodes = self._json(response)
         if not isinstance(episodes, list):
             raise DeletionRetryable("Sonarr episode list is invalid")
-        matches = [item for item in episodes if isinstance(item, dict)
-                   and item.get("id") == payload["sonarr_episode_id"]]
+        matches = [
+            item
+            for item in episodes
+            if isinstance(item, dict) and item.get("id") == payload["sonarr_episode_id"]
+        ]
         if len(matches) != 1 or (
             matches[0].get("seasonNumber") != payload["season"]
             or matches[0].get("episodeNumber") != payload["episode"]
@@ -270,8 +308,11 @@ class DeletionCoordinator:
         ):
             raise DeletionBlocked("Sonarr episode identity changed")
         episode_file_id = payload["sonarr_episode_file_id"]
-        if any(item.get("episodeFileId") == episode_file_id
-               for item in episodes if item is not matches[0] and isinstance(item, dict)):
+        if any(
+            item.get("episodeFileId") == episode_file_id
+            for item in episodes
+            if item is not matches[0] and isinstance(item, dict)
+        ):
             raise DeletionBlocked("Sonarr episode file is shared with another episode")
         current_file_id = matches[0].get("episodeFileId")
         if current_file_id in (None, 0) and not file_exists:
@@ -309,6 +350,26 @@ class DeletionCoordinator:
                 raise DeletionBlocked("hardlinked torrent source has no confirmed permit")
             return
         self._guard_mount()
+        with sqlite3.connect(self.jobs.path) as connection:
+            connection.row_factory = sqlite3.Row
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(gateway_permits)")}
+            probes = (
+                []
+                if "probe_parent_id" not in columns
+                else connection.execute(
+                    "SELECT n.token FROM gateway_permits n JOIN gateway_permits p "
+                    "ON n.probe_parent_id=p.permit_id WHERE p.token=? "
+                    "AND n.state IN ('authorized','dispatching','unknown','confirmed')",
+                    (permit_token,),
+                ).fetchall()
+            )
+        for probe in probes:
+            stopped = await self.client.post(
+                f"{self.gateway_url}/internal/probe-decision",
+                headers=self.gateway_headers,
+                json={"permit_token": probe["token"], "decision": "reject"},
+            )
+            stopped.raise_for_status()
         response = await self.client.post(
             f"{self.gateway_url}/internal/delete-source",
             headers=self.gateway_headers,
@@ -316,7 +377,8 @@ class DeletionCoordinator:
                 "permit_token": permit_token,
                 "media_key": reservation_key,
                 "scope_key": (
-                    None if job["item_type"] == "Movie"
+                    None
+                    if job["item_type"] == "Movie"
                     else f"S{job['payload']['season']:02d}E{job['payload']['episode']:02d}"
                 ),
             },
@@ -391,7 +453,7 @@ class DeletionCoordinator:
             prefix = video.stem
             if not sidecar.name.startswith(prefix):
                 continue
-            suffix = sidecar.name[len(prefix):]
+            suffix = sidecar.name[len(prefix) :]
             if not _SIDECAR.fullmatch(suffix):
                 continue
             self._guard_mount()
@@ -404,7 +466,10 @@ class DeletionCoordinator:
             try:
                 current = sidecar.lstat()
                 if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != (
-                    before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
                 ):
                     raise DeletionBlocked("matching media sidecar changed before removal")
                 sidecar.unlink()
@@ -423,7 +488,8 @@ class DeletionCoordinator:
             raise DeletionBlocked("Seerr movie request identity is invalid")
         self._guard_mount()
         response = await self.client.get(
-            f"{self.seerr_url}/api/v1/request/{source_id}", headers=self.seerr_headers,
+            f"{self.seerr_url}/api/v1/request/{source_id}",
+            headers=self.seerr_headers,
         )
         request = self._json(response, allow_missing=True)
         if request is None:
@@ -437,7 +503,8 @@ class DeletionCoordinator:
             raise DeletionBlocked("Seerr request no longer matches captured movie")
         self._guard_mount()
         response = await self.client.delete(
-            f"{self.seerr_url}/api/v1/request/{source_id}", headers=self.seerr_headers,
+            f"{self.seerr_url}/api/v1/request/{source_id}",
+            headers=self.seerr_headers,
         )
         self._status(response, allow_missing=True)
 
@@ -449,12 +516,16 @@ class DeletionCoordinator:
         )
         result = self._json(response)
         items = result.get("Items") if isinstance(result, dict) else None
-        if not isinstance(items, list) or any(
-            not isinstance(item, dict)
-            or not isinstance(item.get("Id"), str)
-            or item["Id"].lower() != item_id.lower()
-            for item in items
-        ) or len(items) > 1:
+        if (
+            not isinstance(items, list)
+            or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("Id"), str)
+                or item["Id"].lower() != item_id.lower()
+                for item in items
+            )
+            or len(items) > 1
+        ):
             raise DeletionRetryable("Jellyfin returned an invalid item lookup")
         return bool(items)
 

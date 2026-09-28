@@ -45,6 +45,13 @@ class CoordinatedDeletion(Protocol):
 LOGGER = logging.getLogger(__name__)
 
 
+def _log_failure(context: str, error: Exception, media_key: str | None = None) -> None:
+    # Upstream exception strings/tracebacks can contain API keys and response bodies.
+    LOGGER.error(
+        "%s%s (%s)", context, f" for {media_key}" if media_key else "", type(error).__name__
+    )
+
+
 @dataclass(frozen=True)
 class CycleReport:
     processed: int = 0
@@ -118,16 +125,16 @@ class WorkerCycle:
         if self.deletion_coordinator is not None:
             try:
                 await self.deletion_coordinator.run_once()
-            except Exception:
-                LOGGER.exception("coordinated deletion failed; acquisitions paused this cycle")
+            except Exception as error:
+                _log_failure("coordinated deletion failed; acquisitions paused this cycle", error)
                 return CycleReport()
         can_prioritize = True
         if self.source_reconciler is not None:
             try:
                 await self.source_reconciler.reconcile()
-            except Exception:
+            except Exception as error:
                 can_prioritize = False
-                LOGGER.exception("uncertain source reconciliation failed")
+                _log_failure("uncertain source reconciliation failed", error)
         processed = accepted = deferred = malformed = grabbed = 0
         approved_source_ids: set[str] = set()
         admitted: list[tuple[AdmissionCandidate, str]] = []
@@ -165,10 +172,8 @@ class WorkerCycle:
                         )
                         if outcome in {"grabbed", "replaced"}:
                             grabbed += 1
-                    except Exception:
-                        LOGGER.exception(
-                            "movie acquisition failed for %s", candidate.media_key
-                        )
+                    except Exception as error:
+                        _log_failure("movie acquisition failed", error, candidate.media_key)
                 if self.finalizer is not None:
                     try:
                         outcome = await self.finalizer.finalize(
@@ -179,10 +184,8 @@ class WorkerCycle:
                                 "movie finalization %s for %s", outcome,
                                 candidate.media_key,
                             )
-                    except Exception:
-                        LOGGER.exception(
-                            "movie finalization failed for %s", candidate.media_key
-                        )
+                    except Exception as error:
+                        _log_failure("movie finalization failed", error, candidate.media_key)
             elif candidate.media_key.startswith("season:tmdb:"):
                 if self.series_acquirer is not None:
                     try:
@@ -196,11 +199,9 @@ class WorkerCycle:
                             can_prioritize = False
                         if outcome in {"grabbed", "replaced"}:
                             grabbed += 1
-                    except Exception:
+                    except Exception as error:
                         can_prioritize = False
-                        LOGGER.exception(
-                            "series acquisition failed for %s", candidate.media_key
-                        )
+                        _log_failure("series acquisition failed", error, candidate.media_key)
                 else:
                     can_prioritize = False
                 if self.series_finalizer is not None:
@@ -213,10 +214,8 @@ class WorkerCycle:
                                 "series finalization %s for %s", outcome,
                                 candidate.media_key,
                             )
-                    except Exception:
-                        LOGGER.exception(
-                            "series finalization failed for %s", candidate.media_key
-                        )
+                    except Exception as error:
+                        _log_failure("series finalization failed", error, candidate.media_key)
         cancelled = (
             await self.cancellation.reconcile(approved_source_ids)
             if self.cancellation is not None else 0
@@ -224,6 +223,6 @@ class WorkerCycle:
         if can_prioritize and self.movie_prioritizer is not None:
             try:
                 await self.movie_prioritizer.prioritize()
-            except Exception:
-                LOGGER.exception("movie download prioritization failed")
+            except Exception as error:
+                _log_failure("movie download prioritization failed", error)
         return CycleReport(processed, accepted, deferred, malformed, grabbed, cancelled)

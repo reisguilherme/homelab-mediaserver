@@ -63,7 +63,6 @@ class SourceReconciler:
                     f"{self.gateway_url}/internal/reconcile-source",
                     headers={"X-Arr-Token": self.arr_token},
                     json={"permit_token": permit.token},
-                    timeout=3.0,
                 )
                 response.raise_for_status()
                 result = response.json()

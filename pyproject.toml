@@ -22,6 +22,7 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [
+  "services/common/src",
   "services/control/src",
   "services/telemetry/src",
 ]
@@ -30,7 +31,7 @@ addopts = "-ra"
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-src = ["services/control/src", "services/telemetry/src", "tests"]
+src = ["services/common/src", "services/control/src", "services/telemetry/src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

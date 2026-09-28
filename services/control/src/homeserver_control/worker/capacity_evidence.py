@@ -26,39 +26,70 @@ class CapacityEvidence:
         ):
             raise ValueError("invalid filesystem free bytes")
         if any(
-            not isinstance(key, str) or len(key) != 40
-            or isinstance(value, bool) or not isinstance(value, int) or value < 0
+            not isinstance(key, str)
+            or len(key) != 40
+            or isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
             for key, value in self.remaining_by_hash.items()
         ):
             raise ValueError("invalid torrent progress")
-        if (isinstance(self.other_pending_bytes, bool)
-                or not isinstance(self.other_pending_bytes, int)
-                or self.other_pending_bytes < 0):
+        if (
+            isinstance(self.other_pending_bytes, bool)
+            or not isinstance(self.other_pending_bytes, int)
+            or self.other_pending_bytes < 0
+        ):
             raise ValueError("invalid unmanaged queue size")
         if any(not isinstance(item, str) or len(item) != 40 for item in self.paused_hashes):
             raise ValueError("invalid stopped torrent identity")
 
 
 async def read_capacity_evidence(
-    *, snapshot_path: Path, data_root: Path, gateway_url: str,
-    arr_token: str, client: httpx.AsyncClient,
+    *,
+    snapshot_path: Path,
+    data_root: Path,
+    gateway_url: str,
+    arr_token: str,
+    client: httpx.AsyncClient,
+    expected_filesystem_id: str | None = None,
+    max_age_seconds: float = 30,
 ) -> CapacityEvidence:
     """Read current free bytes and trusted remaining bytes of admitted torrents."""
-    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-    measured = snapshot.get("measured_at")
-    if (
-        not snapshot.get("filesystem_id")
-        or not isinstance(measured, (int, float))
-        or not 0 <= time.time() - measured <= 30
-        or not os.path.ismount(data_root)
-    ):
-        raise ValueError("filesystem_snapshot_unavailable")
     response = await client.get(
         f"{gateway_url.rstrip('/')}/internal/queue-capacity",
         headers={"X-Arr-Token": arr_token},
     )
     response.raise_for_status()
     payload = response.json()
+    return capacity_from_queue(
+        snapshot_path=snapshot_path,
+        data_root=data_root,
+        payload=payload,
+        expected_filesystem_id=expected_filesystem_id,
+        max_age_seconds=max_age_seconds,
+    )
+
+
+def capacity_from_queue(
+    *,
+    snapshot_path: Path,
+    data_root: Path,
+    payload,
+    expected_filesystem_id: str | None = None,
+    max_age_seconds: float = 30,
+) -> CapacityEvidence:
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    measured = snapshot.get("measured_at")
+    if (
+        not snapshot.get("filesystem_id")
+        or isinstance(measured, bool)
+        or not isinstance(measured, (int, float))
+        or not 0 <= time.time() - measured <= max_age_seconds
+        or expected_filesystem_id is not None
+        and snapshot.get("filesystem_id") != expected_filesystem_id
+        or not os.path.ismount(data_root)
+    ):
+        raise ValueError("filesystem_snapshot_unavailable")
     if not isinstance(payload, list):
         raise ValueError("gateway_queue_unavailable")
     remaining: dict[str, int] = {}
@@ -78,8 +109,14 @@ async def read_capacity_evidence(
         # their stopped state is still required before another safe failover.
         if stopped:
             paused.add(infohash.lower())
-        known = (isinstance(total, int) and not isinstance(total, bool) and total > 0
-                 and isinstance(left, int) and not isinstance(left, bool) and 0 <= left <= total)
+        known = (
+            isinstance(total, int)
+            and not isinstance(total, bool)
+            and total > 0
+            and isinstance(left, int)
+            and not isinstance(left, bool)
+            and 0 <= left <= total
+        )
         if not known:
             if not admitted:
                 raise ValueError("unmanaged torrent size is unknown")
@@ -90,6 +127,9 @@ async def read_capacity_evidence(
             other_pending += left
     stats = os.statvfs(data_root)
     free_bytes = stats.f_bavail * stats.f_frsize
-    return CapacityEvidence(free_bytes=free_bytes, remaining_by_hash=remaining,
-                            other_pending_bytes=other_pending,
-                            paused_hashes=frozenset(paused))
+    return CapacityEvidence(
+        free_bytes=free_bytes,
+        remaining_by_hash=remaining,
+        other_pending_bytes=other_pending,
+        paused_hashes=frozenset(paused),
+    )

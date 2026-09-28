@@ -1,0 +1,30 @@
+name: Public image vulnerability scan
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Build public project images
+        run: |
+          docker build -f deploy/Dockerfile.control -t homeserver-control:security .
+          docker build -f deploy/Dockerfile.telemetry -t homeserver-telemetry:security .
+      - name: Scan explicit project images
+        run: bash scripts/check-images.sh --output-dir image-security homeserver-control:security homeserver-telemetry:security
+      - name: Preserve public vulnerability reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: image-vulnerability-reports
+          path: image-security/
+          if-no-files-found: warn
+          retention-days: 14

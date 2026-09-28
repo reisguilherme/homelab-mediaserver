@@ -58,7 +58,7 @@ def validate(manifest_path: Path, artifact_path: Path, release: str) -> None:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError("release manifest is not valid JSON") from error
-    if not isinstance(manifest, dict) or manifest.get("schema_version") != 1:
+    if not isinstance(manifest, dict) or manifest.get("schema_version") not in (1, 2):
         raise ValueError("unsupported release schema")
     if not isinstance(manifest.get("git_commit"), str) or manifest["git_commit"] != release:
         raise ValueError("manifest commit mismatch")
@@ -72,7 +72,7 @@ def validate(manifest_path: Path, artifact_path: Path, release: str) -> None:
             raise ValueError("release image map is invalid")
         if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
             raise ValueError(f"image {name} is not pinned by digest")
-    if not isinstance(manifest.get("database_schema"), int) or manifest["database_schema"] < 1:
+    if type(manifest.get("database_schema")) is not int or manifest["database_schema"] < 1:
         raise ValueError("database schema is invalid")
     if not isinstance(manifest.get("requires_backup"), bool):
         raise ValueError("requires_backup must be boolean")
@@ -87,6 +87,53 @@ def validate(manifest_path: Path, artifact_path: Path, release: str) -> None:
             digest.update(block)
     if digest.hexdigest() != expected:
         raise ValueError("artifact checksum mismatch")
+    with tarfile.open(artifact_path, "r:*") as archive:
+        for name, expected_checksum in manifest["config_checksums"].items():
+            path = PurePosixPath(name)
+            if (
+                path.is_absolute()
+                or ".." in path.parts
+                or not re.fullmatch(r"[0-9a-f]{64}", str(expected_checksum))
+            ):
+                raise ValueError("invalid configuration checksum entry")
+            try:
+                member = archive.getmember(name)
+                source = archive.extractfile(member) if member.isfile() else None
+            except KeyError:
+                source = None
+            if source is None:
+                raise ValueError("configuration checksum references missing file")
+            with source:
+                actual = hashlib.sha256(source.read()).hexdigest()
+            if actual != expected_checksum:
+                raise ValueError("configuration checksum mismatch")
+    if manifest["schema_version"] == 2:
+        references = manifest.get("image_references")
+        if not isinstance(references, dict) or set(references) != set(images):
+            raise ValueError("release image reference map is invalid")
+        for service, reference in references.items():
+            if (
+                not isinstance(reference, str)
+                or not reference.endswith("@" + images[service])
+                or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[0-9a-f]{64}", reference)
+            ):
+                raise ValueError("image reference digest mismatch")
+        if type(manifest.get("config_version")) is not int or manifest["config_version"] < 1:
+            raise ValueError("release configuration version is invalid")
+        tools = manifest.get("tools")
+        if not isinstance(tools, dict) or not tools.get("python") or not tools.get("uv"):
+            raise ValueError("release tool versions are missing")
+        compatibility = manifest.get("database_compatibility", {})
+        if not (
+            isinstance(compatibility, dict)
+            and type(compatibility.get("minimum")) is int
+            and type(compatibility.get("maximum")) is int
+            and 0
+            <= compatibility["minimum"]
+            <= manifest["database_schema"]
+            <= compatibility["maximum"]
+        ):
+            raise ValueError("database compatibility range is invalid")
 
 
 def main() -> int:

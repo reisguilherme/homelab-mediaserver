@@ -11,10 +11,12 @@ class NotificationService:
     """Persist first, deliver later, and retry without exposing credentials."""
 
     def __init__(
-        self, *, outbox: NotificationOutbox, transport: Callable[[dict[str, Any]], None]
+        self, *, outbox: NotificationOutbox, transport: Callable[[dict[str, Any]], None],
+        retry_seconds: float = 60,
     ) -> None:
         self.outbox = outbox
         self.transport = transport
+        self.retry_seconds = retry_seconds
 
     def enqueue(
         self,
@@ -41,7 +43,9 @@ class NotificationService:
                 self.transport(payload)
             except Exception:
                 attempts = int(item.get("attempts", 0)) + 1
-                retry_at = now + min(3600, 60 * (2 ** max(0, attempts - 1)))
+                retry_at = now + min(
+                    3600, self.retry_seconds * (2 ** min(16, max(0, attempts - 1)))
+                )
                 self.outbox.mark_failed(int(item["id"]), retry_at=retry_at)
             else:
                 self.outbox.mark_sent(int(item["id"]))

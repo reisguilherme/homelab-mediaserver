@@ -1,5 +1,9 @@
 # HomeServer — Escopo detalhado do projeto
 
+> Documento histórico de 21/09. Configuração, limites de download e CYD foram
+> substituídos pelo [design de produtização](2026-09-28-homeserver-productization-design.md).
+> Para instalar/operar, use o [README](../../../README.md) e os guias atuais.
+
 **Versão:** 1.3 — 21 de setembro de 2026
 
 **Responsável:** Guilherme

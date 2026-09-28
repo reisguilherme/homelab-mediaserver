@@ -1,5 +1,603 @@
+# Reference template. The official CLI renders compose.json from the explicit .env.
 name: homeserver
-
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:10.10.7
+    restart: 'no'
+    networks:
+    - apps
+    - telemetry
+    - egress
+    volumes:
+    - type: bind
+      source: ${HOMESERVER_APPDATA_ROOT:-/srv/appdata}/jellyfin
+      target: /config
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${HOMESERVER_MEDIA_ROOT:-/srv/data}/media
+      target: /data/media
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${HOMESERVER_TRANSCODE_ROOT:-/srv/transcode}
+      target: /transcode
+      read_only: false
+      bind:
+        create_host_path: false
+    logging: &id001
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+    user: ${HOMESERVER_SERVICE_UID:-1000}:${HOMESERVER_SERVICE_GID:-1000}
+    environment:
+      TZ: America/Sao_Paulo
+  jellyfin-proxy:
+    image: nginx:1.30.5-alpine
+    restart: 'no'
+    networks:
+    - apps
+    - edge_control
+    volumes:
+    - type: bind
+      source: ./jellyfin-proxy/nginx.conf
+      target: /etc/nginx/nginx.conf
+      read_only: true
+      bind:
+        create_host_path: false
+    logging: *id001
+    ports:
+    - host_ip: ${HOMESERVER_TAILSCALE_BIND_IP:-127.0.0.1}
+      published: ${HOMESERVER_JELLYFIN_PORT:-8096}
+      target: 8096
+      protocol: tcp
+    depends_on:
+    - jellyfin
+    - control-api
+  seerr:
+    image: fallenbagel/jellyseerr:2.7.3
+    restart: 'no'
+    networks:
+    - apps
+    - edge_control
+    - egress
+    volumes:
+    - type: bind
+      source: ${HOMESERVER_APPDATA_ROOT:-/srv/appdata}/seerr
+      target: /app/config
+      read_only: false
+      bind:
+        create_host_path: false
+    logging: *id001
+    ports:
+    - host_ip: ${HOMESERVER_TAILSCALE_BIND_IP:-127.0.0.1}
+      published: ${HOMESERVER_SEERR_PORT:-5055}
+      target: 5055
+      protocol: tcp
+    user: 1000:1000
+    environment:
+      TZ: America/Sao_Paulo
+      NODE_OPTIONS: --no-network-family-autoselection --dns-result-order=ipv4first
+  sonarr:
+    image: linuxserver/sonarr:4.0.15
+    restart: 'no'
+    networks:
+    - apps
+    - edge_control
+    - egress
+    volumes:
+    - type: bind
+      source: ${HOMESERVER_APPDATA_ROOT:-/srv/appdata}/sonarr
+      target: /config
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${HOMESERVER_MEDIA_ROOT:-/srv/data}
+      target: /data
+      read_only: false
+      bind:
+        create_host_path: false
+    logging: *id001
+    ports:
+    - host_ip: ${HOMESERVER_TAILSCALE_BIND_IP:-127.0.0.1}
+      published: ${HOMESERVER_SONARR_PORT:-8989}
+      target: 8989
+      protocol: tcp
+    environment: &id002
+      PUID: ${HOMESERVER_SERVICE_UID:-1000}
+      PGID: ${HOMESERVER_SERVICE_GID:-1000}
+      TZ: America/Sao_Paulo
+  radarr:
+    image: lscr.io/linuxserver/radarr@sha256:adb6c09d6b729ea5e642c99cea35af72702ef476bf4763f153299ac5db9f0b4f
+    restart: 'no'
+    networks:
+    - apps
+    - edge_control
+    - egress
+    volumes:
+    - type: bind
+      source: ${HOMESERVER_APPDATA_ROOT:-/srv/appdata}/radarr
+      target: /config
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${HOMESERVER_MEDIA_ROOT:-/srv/data}
+      target: /data
+      read_only: false
+      bind:
+        create_host_path: false
+    logging: *id001
+    ports:
+    - host_ip: ${HOMESERVER_TAILSCALE_BIND_IP:-127.0.0.1}
+      published: ${HOMESERVER_RADARR_PORT:-7878}
+      target: 7878
+      protocol: tcp
+    environment: *id002
+  prowlarr:
+    image: linuxserver/prowlarr:1.35.1
+    restart: 'no'
+    networks:
+    - apps
+    - edge_control
+    - egress
+    volumes:
+    - type: bind
+      source: ${HOMESERVER_APPDATA_ROOT:-/srv/appdata}/prowlarr
+      target: /config
+      read_only: false
+      bind:
+        create_host_path: false
+    logging: *id001
+    ports:
+    - host_ip: ${HOMESERVER_TAILSCALE_BIND_IP:-127.0.0.1}
+      published: ${HOMESERVER_PROWLARR_PORT:-9696}
+      target: 9696
+      protocol: tcp
+    environment: *id002
+  bazarr:
+    image: linuxserver/bazarr:1.5.1
+    restart: 'no'
+    networks:
+    - apps
+    - edge_control
+    - egress
+    volumes:
+    - type: bind
+      source: ${HOMESERVER_APPDATA_ROOT:-/srv/appdata}/bazarr
+      target: /config
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${HOMESERVER_MEDIA_ROOT:-/srv/data}/media
+      target: /data/media
+      read_only: false
+      bind:
+        create_host_path: false
+    logging: *id001
+    ports:
+    - host_ip: ${HOMESERVER_TAILSCALE_BIND_IP:-127.0.0.1}
+      published: ${HOMESERVER_BAZARR_PORT:-6767}
+      target: 6767
+      protocol: tcp
+    environment: *id002
+  qbittorrent:
+    image: linuxserver/qbittorrent:5.1.2
+    restart: 'no'
+    networks:
+    - transfer
+    - egress_transfer
+    volumes:
+    - type: bind
+      source: ${HOMESERVER_APPDATA_ROOT:-/srv/appdata}/qbittorrent
+      target: /config
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${HOMESERVER_MEDIA_ROOT:-/srv/data}
+      target: /data
+      read_only: false
+      bind:
+        create_host_path: false
+    logging: *id001
+    environment:
+      PUID: ${HOMESERVER_SERVICE_UID:-1000}
+      PGID: ${HOMESERVER_SERVICE_GID:-1000}
+      TZ: America/Sao_Paulo
+      WEBUI_PORT: '8080'
+      TORRENTING_PORT: ${HOMESERVER_QBIT_PEER_PORT:-6881}
+    ports:
+    - host_ip: ${HOMESERVER_QBIT_PEER_BIND_IP:-127.0.0.1}
+      published: ${HOMESERVER_QBIT_PEER_PORT:-6881}
+      target: ${HOMESERVER_QBIT_PEER_PORT:-6881}
+      protocol: tcp
+    - host_ip: ${HOMESERVER_QBIT_PEER_BIND_IP:-127.0.0.1}
+      published: ${HOMESERVER_QBIT_PEER_PORT:-6881}
+      target: ${HOMESERVER_QBIT_PEER_PORT:-6881}
+      protocol: udp
+  qbit-monitor:
+    image: caddy:2.10.2-alpine
+    restart: 'no'
+    networks:
+    - transfer
+    - edge_control
+    volumes:
+    - type: bind
+      source: ./qbit-monitor/Caddyfile
+      target: /etc/caddy/Caddyfile
+      read_only: true
+      bind:
+        create_host_path: false
+    logging: *id001
+    ports:
+    - host_ip: ${HOMESERVER_TAILSCALE_BIND_IP:-127.0.0.1}
+      published: ${HOMESERVER_QBIT_MONITOR_PORT:-18080}
+      target: 8080
+      protocol: tcp
+  control-api:
+    image: homeserver-control:dev
+    restart: 'no'
+    networks:
+    - edge_control
+    - apps
+    - telemetry
+    volumes:
+    - &id003
+      type: bind
+      source: ${HOMESERVER_APPDATA_ROOT:-/srv/appdata}/control
+      target: /var/lib/homeserver
+      read_only: false
+      bind:
+        create_host_path: false
+    - &id004
+      type: bind
+      source: ${HOMESERVER_RUN_ROOT:-/run/homeserver}
+      target: /run/homeserver
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${HOMESERVER_MEDIA_ROOT:-/srv/data}
+      target: /data
+      read_only: true
+      bind:
+        create_host_path: false
+    logging: *id001
+    environment: &id005
+      HOMESERVER_CONFIG_VERSION: ${HOMESERVER_CONFIG_VERSION:-1}
+      HOMESERVER_ENVIRONMENT: ${HOMESERVER_ENVIRONMENT:-prod}
+      HOMESERVER_INSTANCE_NAME: ${HOMESERVER_INSTANCE_NAME:-homeserver}
+      HOMESERVER_TIMEZONE: ${HOMESERVER_TIMEZONE:-America/Sao_Paulo}
+      HOMESERVER_INSTALL_ROOT: ${HOMESERVER_INSTALL_ROOT:-/opt/homeserver}
+      HOMESERVER_APPDATA_ROOT: /var/lib/homeserver
+      HOMESERVER_MEDIA_ROOT: /data
+      HOMESERVER_TRANSCODE_ROOT: ${HOMESERVER_TRANSCODE_ROOT:-/srv/transcode}
+      HOMESERVER_RUN_ROOT: ${HOMESERVER_RUN_ROOT:-/run/homeserver}
+      HOMESERVER_MEDIA_UUID: ${HOMESERVER_MEDIA_UUID:-}
+      HOMESERVER_QBIT_GATEWAY_URL: ${HOMESERVER_QBIT_GATEWAY_URL:-http://download-gateway:8081}
+      HOMESERVER_QBIT_QUEUEING_ENABLED: ${HOMESERVER_QBIT_QUEUEING_ENABLED:-true}
+      HOMESERVER_UPLOAD_LIMIT_BYTES: ${HOMESERVER_UPLOAD_LIMIT_BYTES:--1}
+      HOMESERVER_DOWNLOAD_LIMIT_BYTES: ${HOMESERVER_DOWNLOAD_LIMIT_BYTES:--1}
+      HOMESERVER_SERVICE_UID: ${HOMESERVER_SERVICE_UID:-1000}
+      HOMESERVER_SERVICE_GID: ${HOMESERVER_SERVICE_GID:-1000}
+      HOMESERVER_RENDER_GID: ${HOMESERVER_RENDER_GID:-1000}
+      HOMESERVER_VIDEO_GID: ${HOMESERVER_VIDEO_GID:-1000}
+      HOMESERVER_NETWORK_INTERFACE: ${HOMESERVER_NETWORK_INTERFACE:-auto}
+      HOMESERVER_ACCESS_MODE: ${HOMESERVER_ACCESS_MODE:-tailscale}
+      HOMESERVER_LAN_BIND_IP: ${HOMESERVER_LAN_BIND_IP:-127.0.0.1}
+      HOMESERVER_TAILSCALE_BIND_IP: ${HOMESERVER_TAILSCALE_BIND_IP:-127.0.0.1}
+      HOMESERVER_QBIT_PEER_BIND_IP: ${HOMESERVER_QBIT_PEER_BIND_IP:-127.0.0.1}
+      HOMESERVER_TAILSCALE_HOSTNAME: ${HOMESERVER_TAILSCALE_HOSTNAME:-}
+      HOMESERVER_JELLYFIN_PORT: ${HOMESERVER_JELLYFIN_PORT:-8096}
+      HOMESERVER_JELLYFIN_PUBLIC_URL: ${HOMESERVER_JELLYFIN_PUBLIC_URL:-}
+      HOMESERVER_SEERR_PORT: ${HOMESERVER_SEERR_PORT:-5055}
+      HOMESERVER_SEERR_PUBLIC_URL: ${HOMESERVER_SEERR_PUBLIC_URL:-}
+      HOMESERVER_SONARR_PORT: ${HOMESERVER_SONARR_PORT:-8989}
+      HOMESERVER_SONARR_PUBLIC_URL: ${HOMESERVER_SONARR_PUBLIC_URL:-}
+      HOMESERVER_RADARR_PORT: ${HOMESERVER_RADARR_PORT:-7878}
+      HOMESERVER_RADARR_PUBLIC_URL: ${HOMESERVER_RADARR_PUBLIC_URL:-}
+      HOMESERVER_PROWLARR_PORT: ${HOMESERVER_PROWLARR_PORT:-9696}
+      HOMESERVER_PROWLARR_PUBLIC_URL: ${HOMESERVER_PROWLARR_PUBLIC_URL:-}
+      HOMESERVER_BAZARR_PORT: ${HOMESERVER_BAZARR_PORT:-6767}
+      HOMESERVER_BAZARR_PUBLIC_URL: ${HOMESERVER_BAZARR_PUBLIC_URL:-}
+      HOMESERVER_CONTROL_PORT: ${HOMESERVER_CONTROL_PORT:-8080}
+      HOMESERVER_CONTROL_PUBLIC_URL: ${HOMESERVER_CONTROL_PUBLIC_URL:-}
+      HOMESERVER_STATUS_PORT: ${HOMESERVER_STATUS_PORT:-8081}
+      HOMESERVER_STATUS_PUBLIC_URL: ${HOMESERVER_STATUS_PUBLIC_URL:-}
+      HOMESERVER_QBIT_MONITOR_PORT: ${HOMESERVER_QBIT_MONITOR_PORT:-18080}
+      HOMESERVER_QBIT_MONITOR_PUBLIC_URL: ${HOMESERVER_QBIT_MONITOR_PUBLIC_URL:-}
+      HOMESERVER_JELLYFIN_URL: ${HOMESERVER_JELLYFIN_URL:-http://jellyfin:8096}
+      HOMESERVER_JELLYFIN_API_KEY: ${HOMESERVER_JELLYFIN_API_KEY:-}
+      HOMESERVER_SEERR_URL: ${HOMESERVER_SEERR_URL:-http://seerr:5055}
+      HOMESERVER_SEERR_API_KEY: ${HOMESERVER_SEERR_API_KEY:-}
+      HOMESERVER_SONARR_URL: ${HOMESERVER_SONARR_URL:-http://sonarr:8989}
+      HOMESERVER_SONARR_API_KEY: ${HOMESERVER_SONARR_API_KEY:-}
+      HOMESERVER_RADARR_URL: ${HOMESERVER_RADARR_URL:-http://radarr:7878}
+      HOMESERVER_RADARR_API_KEY: ${HOMESERVER_RADARR_API_KEY:-}
+      HOMESERVER_PROWLARR_URL: ${HOMESERVER_PROWLARR_URL:-http://prowlarr:9696}
+      HOMESERVER_PROWLARR_API_KEY: ${HOMESERVER_PROWLARR_API_KEY:-}
+      HOMESERVER_BAZARR_URL: ${HOMESERVER_BAZARR_URL:-http://bazarr:6767}
+      HOMESERVER_BAZARR_API_KEY: ${HOMESERVER_BAZARR_API_KEY:-}
+      HOMESERVER_QBIT_URL: ${HOMESERVER_QBIT_URL:-http://qbittorrent:8080}
+      HOMESERVER_QBIT_PEER_PORT: ${HOMESERVER_QBIT_PEER_PORT:-6881}
+      HOMESERVER_TRANSCODE_MODE: ${HOMESERVER_TRANSCODE_MODE:-cpu}
+      HOMESERVER_INTEL_RENDER_DEVICE: ${HOMESERVER_INTEL_RENDER_DEVICE:-/dev/dri/renderD128}
+      HOMESERVER_TRANSCODE_THREADS: ${HOMESERVER_TRANSCODE_THREADS:-0}
+      HOMESERVER_JELLYFIN_ENABLE_MEDIA_DELETION: ${HOMESERVER_JELLYFIN_ENABLE_MEDIA_DELETION:-}
+      HOMESERVER_DOWNLOAD_MAX_ACTIVE: ${HOMESERVER_DOWNLOAD_MAX_ACTIVE:-4}
+      HOMESERVER_SEED_MAX_ACTIVE: ${HOMESERVER_SEED_MAX_ACTIVE:-8}
+      HOMESERVER_TORRENT_MAX_ACTIVE: ${HOMESERVER_TORRENT_MAX_ACTIVE:-12}
+      HOMESERVER_TORRENT_MAX_CONNECTIONS: ${HOMESERVER_TORRENT_MAX_CONNECTIONS:-500}
+      HOMESERVER_TORRENT_MAX_CONNECTIONS_PER_TORRENT: ${HOMESERVER_TORRENT_MAX_CONNECTIONS_PER_TORRENT:-100}
+      HOMESERVER_UPLOAD_SLOTS: ${HOMESERVER_UPLOAD_SLOTS:-20}
+      HOMESERVER_UPLOAD_SLOTS_PER_TORRENT: ${HOMESERVER_UPLOAD_SLOTS_PER_TORRENT:-4}
+      HOMESERVER_QUEUE_IGNORE_SLOW_TORRENTS: ${HOMESERVER_QUEUE_IGNORE_SLOW_TORRENTS:-true}
+      HOMESERVER_UPLOAD_LIMIT_MBIT: ${HOMESERVER_UPLOAD_LIMIT_MBIT:-20}
+      HOMESERVER_DOWNLOAD_LIMIT_MBIT: ${HOMESERVER_DOWNLOAD_LIMIT_MBIT:-0}
+      HOMESERVER_SEED_RATIO_LIMIT: ${HOMESERVER_SEED_RATIO_LIMIT:--1}
+      HOMESERVER_SEED_TIME_LIMIT_MINUTES: ${HOMESERVER_SEED_TIME_LIMIT_MINUTES:--1}
+      HOMESERVER_SEED_INACTIVE_LIMIT_MINUTES: ${HOMESERVER_SEED_INACTIVE_LIMIT_MINUTES:--1}
+      HOMESERVER_MOVIE_QUEUE_PRIORITY: ${HOMESERVER_MOVIE_QUEUE_PRIORITY:-seeders}
+      HOMESERVER_SERIES_ORDER: ${HOMESERVER_SERIES_ORDER:-sequential}
+      HOMESERVER_WORKER_INTERVAL_SECONDS: ${HOMESERVER_WORKER_INTERVAL_SECONDS:-5}
+      HOMESERVER_SEARCH_RETRY_SECONDS: ${HOMESERVER_SEARCH_RETRY_SECONDS:-300}
+      HOMESERVER_SOURCE_STALL_SECONDS: ${HOMESERVER_SOURCE_STALL_SECONDS:-300}
+      HOMESERVER_SOURCE_SLOW_WINDOW_SECONDS: ${HOMESERVER_SOURCE_SLOW_WINDOW_SECONDS:-300}
+      HOMESERVER_SOURCE_SEARCH_RETRY_SECONDS: ${HOMESERVER_SOURCE_SEARCH_RETRY_SECONDS:-300}
+      HOMESERVER_SOURCE_PROBE_SECONDS: ${HOMESERVER_SOURCE_PROBE_SECONDS:-60}
+      HOMESERVER_MOVIE_PRIORITY_INTERVAL_SECONDS: ${HOMESERVER_MOVIE_PRIORITY_INTERVAL_SECONDS:-60}
+      HOMESERVER_HTTP_TIMEOUT_SECONDS: ${HOMESERVER_HTTP_TIMEOUT_SECONDS:-15}
+      HOMESERVER_SEARCH_TIMEOUT_SECONDS: ${HOMESERVER_SEARCH_TIMEOUT_SECONDS:-90}
+      HOMESERVER_WORKER_CYCLE_TIMEOUT_SECONDS: ${HOMESERVER_WORKER_CYCLE_TIMEOUT_SECONDS:-900}
+      HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS: ${HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS:-30}
+      HOMESERVER_SOURCE_MIN_RATE_KIB: ${HOMESERVER_SOURCE_MIN_RATE_KIB:-1024}
+      HOMESERVER_SOURCE_MIN_TIME_GAIN_PERCENT: ${HOMESERVER_SOURCE_MIN_TIME_GAIN_PERCENT:-20}
+      HOMESERVER_SOURCE_PROBE_ENABLED: ${HOMESERVER_SOURCE_PROBE_ENABLED:-true}
+      HOMESERVER_SOURCE_PROTECTED_HASHES: ${HOMESERVER_SOURCE_PROTECTED_HASHES:-}
+      HOMESERVER_WORKER_HEARTBEAT_MAX_AGE_SECONDS: ${HOMESERVER_WORKER_HEARTBEAT_MAX_AGE_SECONDS:-90}
+      HOMESERVER_SUPERVISOR_INTERVAL_SECONDS: ${HOMESERVER_SUPERVISOR_INTERVAL_SECONDS:-15}
+      HOMESERVER_SUPERVISOR_MAX_RESTARTS: ${HOMESERVER_SUPERVISOR_MAX_RESTARTS:-5}
+      HOMESERVER_SUPERVISOR_RESTART_WINDOW_SECONDS: ${HOMESERVER_SUPERVISOR_RESTART_WINDOW_SECONDS:-300}
+      HOMESERVER_MEDIA_RESOLUTIONS: ${HOMESERVER_MEDIA_RESOLUTIONS:-2160,1080}
+      HOMESERVER_MEDIA_SOURCES: ${HOMESERVER_MEDIA_SOURCES:-remux,bluray,webdl}
+      HOMESERVER_PREFER_DOLBY_VISION: ${HOMESERVER_PREFER_DOLBY_VISION:-true}
+      HOMESERVER_PREFER_ATMOS: ${HOMESERVER_PREFER_ATMOS:-true}
+      HOMESERVER_AUTOMATIC_UPGRADES: ${HOMESERVER_AUTOMATIC_UPGRADES:-false}
+      HOMESERVER_AUDIO_LANGUAGES: ${HOMESERVER_AUDIO_LANGUAGES:-original}
+      HOMESERVER_SUBTITLE_LANGUAGES: ${HOMESERVER_SUBTITLE_LANGUAGES:-pt-BR,en-US}
+      HOMESERVER_SUBTITLE_MATCH_MODES: ${HOMESERVER_SUBTITLE_MATCH_MODES:-release,compatible_edition}
+      HOMESERVER_SUBTITLE_SKIP_ORIGINAL_AUDIO_LANGUAGES: ${HOMESERVER_SUBTITLE_SKIP_ORIGINAL_AUDIO_LANGUAGES:-pt-BR}
+      HOMESERVER_SUBTITLE_ALLOW_GENERIC_ENGLISH: ${HOMESERVER_SUBTITLE_ALLOW_GENERIC_ENGLISH:-true}
+      HOMESERVER_SUBTITLE_CREDITS_MARGIN_SECONDS: ${HOMESERVER_SUBTITLE_CREDITS_MARGIN_SECONDS:-600}
+      HOMESERVER_SUBTITLE_PROVIDERS: ${HOMESERVER_SUBTITLE_PROVIDERS:-bazarr,subdl}
+      HOMESERVER_BAZARR_PROVIDERS: ${HOMESERVER_BAZARR_PROVIDERS:-subdl,opensubtitlescom}
+      HOMESERVER_SUBDL_API_KEY: ${HOMESERVER_SUBDL_API_KEY:-}
+      HOMESERVER_OPENSUBTITLES_USERNAME: ${HOMESERVER_OPENSUBTITLES_USERNAME:-}
+      HOMESERVER_OPENSUBTITLES_PASSWORD: ${HOMESERVER_OPENSUBTITLES_PASSWORD:-}
+      HOMESERVER_ARR_TOKEN: ${HOMESERVER_ARR_TOKEN:-}
+      HOMESERVER_ADMIN_TOKEN: ${HOMESERVER_ADMIN_TOKEN:-}
+      HOMESERVER_CSRF_TOKEN: ${HOMESERVER_CSRF_TOKEN:-}
+      HOMESERVER_ADMIN_PASSWORD: ${HOMESERVER_ADMIN_PASSWORD:-}
+      HOMESERVER_QBIT_PASSWORD: ${HOMESERVER_QBIT_PASSWORD:-}
+      HOMESERVER_ADMIN_USERNAME: ${HOMESERVER_ADMIN_USERNAME:-admin}
+      HOMESERVER_QBIT_USERNAME: ${HOMESERVER_QBIT_USERNAME:-admin}
+      HOMESERVER_PROWLARR_INDEXERS: ${HOMESERVER_PROWLARR_INDEXERS:-[]}
+      HOMESERVER_BYPARR_ENABLED: ${HOMESERVER_BYPARR_ENABLED:-false}
+      HOMESERVER_BYPARR_URL: ${HOMESERVER_BYPARR_URL:-http://byparr:8191}
+      HOMESERVER_METRICS_INTERVAL_SECONDS: ${HOMESERVER_METRICS_INTERVAL_SECONDS:-5}
+      HOMESERVER_METRICS_MAX_AGE_SECONDS: ${HOMESERVER_METRICS_MAX_AGE_SECONDS:-90}
+      HOMESERVER_LOG_LEVEL: ${HOMESERVER_LOG_LEVEL:-INFO}
+      HOMESERVER_LOG_MAX_SIZE_MB: ${HOMESERVER_LOG_MAX_SIZE_MB:-10}
+      HOMESERVER_LOG_MAX_FILES: ${HOMESERVER_LOG_MAX_FILES:-3}
+      HOMESERVER_ALERTS_ENABLED: ${HOMESERVER_ALERTS_ENABLED:-false}
+      HOMESERVER_ALERT_RETRY_SECONDS: ${HOMESERVER_ALERT_RETRY_SECONDS:-60}
+      HOMESERVER_ALERT_WEBHOOK_URL: ${HOMESERVER_ALERT_WEBHOOK_URL:-}
+      HOMESERVER_ARR_UID: ${HOMESERVER_ARR_UID:-1000}
+      HOMESERVER_ARR_GID: ${HOMESERVER_ARR_GID:-1000}
+      HOMESERVER_WORKER_INTERVAL: ${HOMESERVER_WORKER_INTERVAL:-5}
+      HOMESERVER_DB_PATH: ${HOMESERVER_DB_PATH:-/var/lib/homeserver/control.sqlite}
+      HOMESERVER_CAPACITY_SNAPSHOT: ${HOMESERVER_CAPACITY_SNAPSHOT:-/run/homeserver/capacity.json}
+      HOMESERVER_HOST_SNAPSHOT: ${HOMESERVER_HOST_SNAPSHOT:-/run/homeserver/host.json}
+      HOMESERVER_RECOVERY_MODE: ${HOMESERVER_RECOVERY_MODE:-/var/lib/homeserver/RECOVERY_MODE}
+      HOMESERVER_MEDIA_ROOTS: /data/media:/data/torrents
+    ports:
+    - host_ip: ${HOMESERVER_TAILSCALE_BIND_IP:-127.0.0.1}
+      published: ${HOMESERVER_CONTROL_PORT:-8080}
+      target: 8080
+      protocol: tcp
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready',timeout=5).close()
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    command:
+    - uvicorn
+    - homeserver_control.api.app:app
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8080'
+    - --log-level
+    - info
+    user: 1000:1000
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.control
+  control-worker:
+    image: homeserver-control:dev
+    restart: 'no'
+    networks:
+    - apps
+    - egress
+    volumes:
+    - *id003
+    - *id004
+    - type: bind
+      source: ${HOMESERVER_MEDIA_ROOT:-/srv/data}
+      target: /data
+      read_only: false
+      bind:
+        create_host_path: false
+    logging: *id001
+    environment: *id005
+    command:
+    - python
+    - -m
+    - homeserver_control.worker
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import os,time; from homeserver_control.persistence.heartbeat import WorkerHeartbeatStore;
+        assert WorkerHeartbeatStore(os.environ['HOMESERVER_DB_PATH']).ready(now=time.time(),max_age=float(os.environ.get('HOMESERVER_WORKER_HEARTBEAT_MAX_AGE_SECONDS','90')))
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    user: 1000:1000
+  download-gateway:
+    image: homeserver-control:dev
+    restart: 'no'
+    networks:
+    - apps
+    - transfer
+    volumes:
+    - *id003
+    logging: *id001
+    environment: *id005
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health/live',timeout=5).close()
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    command:
+    - uvicorn
+    - homeserver_control.gateway.app:app
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8081'
+    - --log-level
+    - info
+    user: 1000:1000
+  telemetry:
+    image: homeserver-telemetry:dev
+    restart: 'no'
+    networks:
+    - telemetry
+    - edge_control
+    - egress
+    volumes:
+    - *id004
+    - type: bind
+      source: ${HOMESERVER_MEDIA_ROOT:-/srv/data}
+      target: /data
+      read_only: true
+      bind:
+        create_host_path: false
+    logging: *id001
+    environment:
+      HOMESERVER_TAILSCALE_HOSTNAME: ${HOMESERVER_TAILSCALE_HOSTNAME:-}
+      HOMESERVER_JELLYFIN_PORT: ${HOMESERVER_JELLYFIN_PORT:-8096}
+      HOMESERVER_JELLYFIN_PUBLIC_URL: ${HOMESERVER_JELLYFIN_PUBLIC_URL:-}
+      HOMESERVER_SEERR_PORT: ${HOMESERVER_SEERR_PORT:-5055}
+      HOMESERVER_SEERR_PUBLIC_URL: ${HOMESERVER_SEERR_PUBLIC_URL:-}
+      HOMESERVER_SONARR_PORT: ${HOMESERVER_SONARR_PORT:-8989}
+      HOMESERVER_SONARR_PUBLIC_URL: ${HOMESERVER_SONARR_PUBLIC_URL:-}
+      HOMESERVER_RADARR_PORT: ${HOMESERVER_RADARR_PORT:-7878}
+      HOMESERVER_RADARR_PUBLIC_URL: ${HOMESERVER_RADARR_PUBLIC_URL:-}
+      HOMESERVER_PROWLARR_PORT: ${HOMESERVER_PROWLARR_PORT:-9696}
+      HOMESERVER_PROWLARR_PUBLIC_URL: ${HOMESERVER_PROWLARR_PUBLIC_URL:-}
+      HOMESERVER_BAZARR_PORT: ${HOMESERVER_BAZARR_PORT:-6767}
+      HOMESERVER_BAZARR_PUBLIC_URL: ${HOMESERVER_BAZARR_PUBLIC_URL:-}
+      HOMESERVER_CONTROL_PORT: ${HOMESERVER_CONTROL_PORT:-8080}
+      HOMESERVER_CONTROL_PUBLIC_URL: ${HOMESERVER_CONTROL_PUBLIC_URL:-}
+      HOMESERVER_STATUS_PORT: ${HOMESERVER_STATUS_PORT:-8081}
+      HOMESERVER_STATUS_PUBLIC_URL: ${HOMESERVER_STATUS_PUBLIC_URL:-}
+      HOMESERVER_QBIT_MONITOR_PORT: ${HOMESERVER_QBIT_MONITOR_PORT:-18080}
+      HOMESERVER_QBIT_MONITOR_PUBLIC_URL: ${HOMESERVER_QBIT_MONITOR_PUBLIC_URL:-}
+      HOMESERVER_QBIT_PEER_PORT: ${HOMESERVER_QBIT_PEER_PORT:-6881}
+      HOMESERVER_METRICS_MAX_AGE_SECONDS: ${HOMESERVER_METRICS_MAX_AGE_SECONDS:-90}
+      HOMESERVER_HOST_SNAPSHOT: ${HOMESERVER_HOST_SNAPSHOT:-/run/homeserver/host.json}
+      HOMESERVER_CAPACITY_SNAPSHOT: ${HOMESERVER_CAPACITY_SNAPSHOT:-/run/homeserver/capacity.json}
+      HOMESERVER_MEDIA_ROOT: /data
+      HOMESERVER_MEDIA_UUID: ${HOMESERVER_MEDIA_UUID:-}
+      HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS: ${HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS:-30}
+    ports:
+    - host_ip: ${HOMESERVER_TAILSCALE_BIND_IP:-127.0.0.1}
+      published: ${HOMESERVER_STATUS_PORT:-8081}
+      target: 8080
+      protocol: tcp
+    healthcheck:
+      test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready',timeout=5).close()
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    command:
+    - uvicorn
+    - homeserver_telemetry.app:app
+    - --host
+    - 0.0.0.0
+    - --port
+    - '8080'
+    - --log-level
+    - info
+    user: 1000:1000
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.telemetry
+  operator:
+    image: homeserver-control:dev
+    restart: 'no'
+    networks:
+    - apps
+    - transfer
+    volumes:
+    - *id003
+    - type: bind
+      source: ${HOMESERVER_RUN_ROOT:-/run/homeserver}
+      target: /run/homeserver
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${HOMESERVER_INSTALL_ROOT:-/opt/homeserver}/shared/operator.env
+      target: /run/homeserver/operator.env
+      read_only: true
+      bind:
+        create_host_path: false
+    logging: *id001
+    profiles:
+    - operator
+    environment:
+      HOMESERVER_NATIVE_CONTEXT: container
+    user: 0:0
+    entrypoint:
+    - python
+    - -m
+    - homeserver_common.cli
 networks:
   apps:
     internal: true
@@ -7,142 +605,9 @@ networks:
     internal: true
   telemetry:
     internal: true
-  # Docker publishes the admin API only when one attached bridge is not internal.
   edge_control:
     internal: false
   egress:
     internal: false
   egress_transfer:
     internal: false
-
-volumes:
-  jellyfin_appdata:
-  seerr_appdata:
-  sonarr_appdata:
-  radarr_appdata:
-  prowlarr_appdata:
-  qbittorrent_appdata:
-  bazarr_appdata:
-  control_state:
-  telemetry_state:
-  mosquitto_state:
-  media:
-  transcode:
-  host_metrics:
-    name: homeserver_host_metrics
-
-services:
-  jellyfin:
-    image: ${JELLYFIN_IMAGE:-jellyfin/jellyfin:10.10.7}
-    restart: "no"
-    networks: [apps, telemetry, egress]
-    volumes:
-      - jellyfin_appdata:/config
-      - media:/data/media:ro
-      - transcode:/transcode
-
-  jellyfin-proxy:
-    image: ${JELLYFIN_PROXY_IMAGE:-nginx:1.30.5-alpine}
-    restart: "no"
-    networks: [apps, edge_control]
-    depends_on: [jellyfin, control-api]
-    volumes:
-      - ./jellyfin-proxy/nginx.conf:/etc/nginx/nginx.conf:ro
-
-  seerr:
-    image: ${SEERR_IMAGE:-fallenbagel/jellyseerr:2.7.3}
-    restart: "no"
-    networks: [apps, egress]
-    volumes:
-      - seerr_appdata:/app/config
-
-  sonarr:
-    image: ${SONARR_IMAGE:-linuxserver/sonarr:4.0.15}
-    restart: "no"
-    networks: [apps, egress]
-    volumes:
-      - sonarr_appdata:/config
-      - media:/data
-
-  radarr:
-    image: ${RADARR_IMAGE:-linuxserver/radarr:5.20.0}
-    restart: "no"
-    networks: [apps, egress]
-    volumes:
-      - radarr_appdata:/config
-      - media:/data
-
-  prowlarr:
-    image: ${PROWLARR_IMAGE:-linuxserver/prowlarr:1.35.1}
-    restart: "no"
-    networks: [apps, egress]
-    volumes:
-      - prowlarr_appdata:/config
-
-  qbittorrent:
-    image: ${QBITTORRENT_IMAGE:-linuxserver/qbittorrent:5.1.2}
-    restart: "no"
-    networks: [transfer, egress_transfer]
-    volumes:
-      - qbittorrent_appdata:/config
-      - media:/data
-
-  bazarr:
-    image: ${BAZARR_IMAGE:-linuxserver/bazarr:1.5.1}
-    restart: "no"
-    networks: [apps, egress]
-    volumes:
-      - bazarr_appdata:/config
-      - media:/data/media
-
-  control-api:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.control
-    image: ${CONTROL_IMAGE:-homeserver-control:dev}
-    command: ["uvicorn", "homeserver_control.api.app:app", "--host", "0.0.0.0", "--port", "8080"]
-    restart: "no"
-    networks: [edge_control, apps, telemetry]
-    volumes:
-      - control_state:/var/lib/homeserver
-
-  control-worker:
-    image: ${CONTROL_IMAGE:-homeserver-control:dev}
-    command: ["python", "-m", "homeserver_control.worker"]
-    restart: "no"
-    networks: [apps, egress]
-    volumes:
-      - control_state:/var/lib/homeserver
-      - media:/data
-
-  download-gateway:
-    image: ${CONTROL_IMAGE:-homeserver-control:dev}
-    command: ["uvicorn", "homeserver_control.gateway.app:app", "--host", "0.0.0.0", "--port", "8081"]
-    restart: "no"
-    networks: [apps, transfer]
-    volumes:
-      - control_state:/var/lib/homeserver
-
-  telemetry:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.telemetry
-    image: ${TELEMETRY_IMAGE:-homeserver-telemetry:dev}
-    command: ["uvicorn", "homeserver_telemetry.app:app", "--host", "0.0.0.0", "--port", "8080"]
-    restart: "no"
-    networks: [telemetry, egress]
-    volumes:
-      - telemetry_state:/var/lib/homeserver
-      - type: volume
-        source: host_metrics
-        target: /run/homeserver
-        read_only: true
-
-  mosquitto:
-    image: ${MOSQUITTO_IMAGE:-eclipse-mosquitto:2.0.22}
-    restart: "no"
-    networks: [telemetry]
-    volumes:
-      - mosquitto_state:/mosquitto/data
-      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - ./mosquitto/acl:/mosquitto/config/acl:ro

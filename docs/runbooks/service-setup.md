@@ -1,115 +1,84 @@
 # Preparação dos serviços
 
-O Compose base não publica portas e não contém caminhos do host. Use
-`compose.dev.yaml` para fixtures/loopback e `compose.prod.yaml` somente depois
-da auditoria, guarda de UUID e criação explícita de `/etc/homeserver/server.env`.
+Use o [guia de instalação](../installation.md) fresh/adopt e o `.env` privado.
+Compose no repositório é referência; runtime/units/configuração nativa são
+produzidos pelo instalador. Não edite os derivados nem mantenha overrides
+concorrentes. Credenciais geradas/importadas ficam em arquivos 0600 fora do Git.
 
-Antes da primeira aquisição, configurar uma instância de Sonarr e Radarr,
-desabilitar busca/RSS/grabs autônomos e apontar os Arr apenas para o gateway.
-O qBittorrent permanece na rede `transfer`; não publicar sua API na LAN.
+Execute `config plan`, `config apply`, `config verify` conforme o
+[guia do operador](../operator-guide.md#aplicar-uma-mudança). Read-back confirma
+valores efetivos, IDs existentes são preservados e serviços sem capacidades
+compatíveis retornam unsupported. Apply parcial pode ser repetido após corrigir
+a dependência; recursos estrangeiros não são apagados.
+
+## Recursos gerenciados
+
+- qBit: downloads/seeding/torrents ativos, bandwidth, conexões, porta de peers,
+  flags de fila e limites de seed. UPnP permanece desativado. 20 Mbit/s solicita
+  2.500.000 B/s; a versão 5.1.2 grava KiB inteiros, ou 2.499.584 B/s. Adopt importa
+  a precisão nativa em UPLOAD_LIMIT_BYTES/DOWNLOAD_LIMIT_BYTES.
+- Arr: rootfolders `/data/media/movies` e `/data/media/tv`, perfil HomeServer
+  compatível com resolução/fontes e cliente **HomeServer Gateway**. Este usa
+  usuário arr/token do gateway; qBit não é um cliente direto alternativo.
+  Definições de qualidade recebem pisos de vídeo/minuto e tamanho máximo
+  ilimitado. Completed Download Handling fica desabilitado, e hardlinks ficam
+  habilitados: o worker coordena validação/importação antes de publicar a mídia.
+- Prowlarr: aplicações Arr, indexadores declarados por schema nativo e proxy
+  FlareSolverr quando BYPARR_ENABLED. Credenciais mascaradas exigem teste de
+  conexão e evidência privada persistente; máscara sozinha não comprova igualdade.
+- Bazarr: providers declarados, conexões Arr e perfil HomeServer derivado de
+  idiomas. Worker aplica prioridades pt-BR/release/edição e inglês fallback;
+  não habilitar pt-PT como se fosse pt-BR. Chaves/contas não vão no Git.
+- Jellyfin: bibliotecas adotadas pelo path com IDs preservados, conta inicial
+  somente quando ausente, número de threads e permissão opcional de exclusão.
+- Seerr: conexão Jellyfin, bibliotecas, Arr e perfis pelos IDs reais, preservando
+  usuários/pedidos. Tokens descobertos autenticadamente são persistidos pelo CLI.
+
+Contas existentes não têm senhas redefinidas silenciosamente. Nome de biblioteca
+existente com path diferente exige adoção explícita. Perfil estrangeiro não é
+renomeado/removido. Busca/RSS/grabs Arr autônomos devem permanecer desabilitados:
+novos downloads passam pelo worker/gateway para checar tamanho real e capacidade.
 
 ## Painéis web nativos
 
-Com o Tailscale conectado, acessar `http://<tailscale-hostname>:8989/` (Sonarr),
-`http://<tailscale-hostname>:7878/` (Radarr) e
-`http://<tailscale-hostname>:18080/` (qBittorrent). Consultar o hostname e as
-portas ativas no servidor com `sudo tailscale serve status`. O Tailscale Serve
-encaminha as portas para os binds em loopback; esses painéis não são publicados
-na LAN. As credenciais ficam somente na configuração do servidor.
+Os cards do painel usam JELLYFIN_PUBLIC_URL, SEERR_PUBLIC_URL, SONARR_PUBLIC_URL,
+RADARR_PUBLIC_URL, QBIT_MONITOR_PUBLIC_URL, PROWLARR_PUBLIC_URL e BAZARR_PUBLIC_URL.
+Esses URLs e portas ficam no `.env`. Administre via Tailscale/loopback; não abrir
+portas do roteador nem publicar a API nativa qBit na LAN.
 
-Usar Sonarr/Radarr para acompanhar buscas, fila e importações, e o qBittorrent
-para acompanhar a transferência. Novos downloads continuam passando pelo
-controlador e gateway; não adicionar torrents ou alterar a fila manualmente
-pelo painel do qBittorrent.
+O monitor qBit mantém autenticação nativa e permite UI/GET de leitura + login/
+logout. Botões de mutação podem aparecer na UI, mas retornam 403. Use Sonarr/
+Radarr para acompanhar importação, Prowlarr para fontes e qBit para velocidade,
+progresso e peers; não adicionar ou retomar torrents contornando o controlador.
 
-## Porta de peers do qBittorrent
+## Porta de peers
 
-Em produção, o Compose publica somente a porta de transferência P2P do
-qBittorrent, em TCP e UDP, no endereço `LAN_BIND_IP`. Sem esse endereço, a
-publicação fica restrita a `127.0.0.1`. O padrão é a porta `6881`; para usar
-outra, definir `QBITTORRENT_PEER_PORT` em `/etc/homeserver/server.env` antes do
-deploy. A mesma porta é configurada no cliente via `TORRENTING_PORT`. Não usar
-`TAILSCALE_BIND_IP` para essa publicação nem expor a WebUI/API `8080` na LAN.
+QBIT_PEER_PORT (padrão 6881) e QBIT_PEER_BIND_IP configuram TCP/UDP de transferência,
+separados da API administrativa. Bind padrão é 127.0.0.1; escolha endereço LAN
+explícito quando necessário. Publicação Docker não abre roteador e não garante
+conexões externas ou velocidade: seeds disponíveis continuam sendo determinantes.
 
-Após o deploy, conferir a porta publicada e as preferências de conexão do
-qBittorrent: a porta de escuta deve ser a mesma em TCP e UDP.
+## Fontes e legendas
 
-```bash
-docker ps --filter name=homeserver-qbittorrent --format '{{.Ports}}'
-```
+Após cinco minutos sem progresso ou abaixo do limiar configurado, o worker busca
+alternativa mantendo a atual. Candidata precisa mesma qualidade/edição, tamanho
+verificado, capacidade conjunta e medição suficiente. A promoção exige ETA
+melhor; indisponibilidade/ambiguidade exige reconciliação. Arquivos parciais
+anteriores não são apagados automaticamente. Séries mantêm sequência mesmo
+quando filmes mais saudáveis passam à frente.
 
-Publicar a porta no host não cria uma regra de entrada no roteador nem garante
-peers de entrada da Internet; a velocidade ainda depende dos seeds da release.
+Prioridade de legenda é pt-BR mesma release, pt-BR edição compatível, inglês
+mesma release e inglês edição compatível. Duração evita extended/director cut
+incompatível, com margem para créditos. Original pt-BR pode dispensar legenda.
+Use SUBDL_API_KEY e providers Bazarr declarados; provider desativado/sem chave
+não prova disponibilidade. Validação/importação precedem publicação Jellyfin;
+um 100% no qBit ainda pode aguardar legenda ou importação.
 
-## Troca de fonte sem progresso
+`AUDIO_LANGUAGES` prefere idiomas declarados nos metadados de release;
+`original` exige contexto do Arr. Não deduza idioma ou região pelo nome.
+`SUBTITLE_SKIP_ORIGINAL_AUDIO_LANGUAGES` aceita `pt-BR`, ou vazio para desativar
+a dispensa; não há detector de dispensa original en-US nesta versão.
 
-O worker mede o progresso de cada filme e do primeiro episódio pendente de cada
-série. Procura outra fonte após cinco minutos sem avanço, sem seeds conectados
-e com velocidade zero, ou após uma hora com média abaixo de 1 MiB/s. Um
-episódio pausado por ordem cronológica não entra nessa avaliação. A alternativa
-precisa ter qualidade permitida, metadados verificáveis, caminhos distintos dos
-arquivos de todas as fontes preservadas e espaço livre para seu tamanho exato.
-Na troca, o worker consulta trackers UDP públicos e prefere seeds confirmados.
-Uma resposta zero completa descarta a candidata; timeout ou tracker sem suporte
-mantém a disponibilidade desconhecida. Seeds medidos prevalecem sobre números
-antigos do indexador. Se nenhuma alternativa confirmada puder ser admitida,
-fontes com disponibilidade desconhecida e seeds reportados ainda são tentadas.
-O gateway para a fonte anterior, verifica a parada e só
-então autoriza a nova. Os arquivos parciais antigos permanecem no disco.
-Para episódios sem sidecar, a nova fonte também exige SRT elegível no preflight.
-
-A nova fonte continua sendo monitorada e pode ser trocada novamente. O histórico
-impede retornar a hashes já tentados; as buscas de substituição se repetem a cada
-cinco minutos quando necessário. Todas as fontes anteriores precisam permanecer
-paradas. Seus arquivos parciais contam no espaço físico usado e não são apagados
-automaticamente. Sem candidata segura ou espaço suficiente, o episódio aguarda;
-os posteriores da mesma série continuam parados até a importação validada.
-
-Se a resposta ao envio da nova fonte se perder, o worker consulta o qBittorrent
-e confirma o permit apenas quando hash, categoria, destino e tamanho coincidirem
-com o manifesto persistido. Caso o torrent continue ausente após uma operação
-incerta, a fonte antiga permanece parada e o worker registra a necessidade de
-reconciliação manual, sem repetir um efeito cujo resultado não foi comprovado.
-
-Validar a versão real das imagens e preencher digests no manifesto de release.
-Tags do arquivo `config/versions.env` são referências de desenvolvimento, não
-prova de compatibilidade ou de segurança da produção.
-
-## Legendas e importação
-
-No Bazarr, manter o perfil `pb` (Português Brasil) e habilitar provedores
-testados. O SubDL exige uma chave de API; o OpenSubtitles.com exige conta válida.
-O Bazarr procura legendas depois que a mídia está na biblioteca. A ausência de
-legenda obtida antes do download não dispensa a validação na importação.
-
-O worker usa a mesma chave SubDL em `/etc/homeserver/subdl.key`, arquivo de uma
-linha criado no servidor com dono `root` e modo `0600`. O Compose monta o arquivo
-somente no `control-worker` em `/run/secrets/subdl.key`; nunca colocar a chave no
-repositório, manifesto ou saída de diagnóstico. Criar o arquivo e executar um
-backup consistente antes de implantar a release que requer essa montagem.
-
-Para filmes, a aquisição não consulta o SubDL. Após validar o vídeo baixado,
-o finalizador consulta o serviço pelo ID TMDb verificado e escolhe
-SRT válido nesta ordem: pt-BR da mesma release, pt-BR de outra release com
-duração compatível, inglês da mesma release e inglês de outra release com
-duração compatível. Uma release diferente precisa ter edição/corte compatível
-e cobertura temporal do SRT próxima à duração medida do vídeo, com margem
-para créditos finais. O SubDL V1 usa `EN` sem garantir o dialeto en-US.
-Artefatos de filmes criados pelo preflight anterior são ignorados nas novas
-importações. Para séries sem sidecar, permanece o preflight: checar
-temporada e episódio, preferir release exata e, depois, mesmo título, episódio
-e família de fonte; persistir o SRT antes do permit. Para filmes sem legenda
-elegível, o finalizador mantém o vídeo fora da biblioteca até obter uma
-legenda válida ou confirmar áudio original pt-BR. Conferir sincronismo e
-tradução no Jellyfin.
-
-Legendas SRT em Windows-1252 são convertidas para UTF-8 após a validação da
-estrutura; arquivos sem tempos SRT válidos continuam inelegíveis. Clipes em
-`Sample/` ou com nome terminado em `sample` não contam como segundo vídeo do
-torrent e não são selecionados para download. Um segundo vídeo principal ainda
-bloqueia o candidato.
-
-Se o Seerr mostrar `Requested`, conferir a reserva no controlador, o permit do
-gateway e as filas Sonarr/Radarr e qBittorrent. O estado do Seerr só avança após
-a importação. Pedidos `waiting_space` aguardam capacidade real no disco, sem
-liberação manual do gateway.
+Para os comandos por sintoma, consulte [troubleshooting](../troubleshooting.md).
+Tags de desenvolvimento não são prova de segurança/compatibilidade: produção
+usa manifesto validado com digests imutáveis e versão/SHA observada.

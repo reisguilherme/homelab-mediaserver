@@ -7,6 +7,24 @@ from homeserver_control.worker.__main__ import _build_cycle
 from homeserver_control.worker.runtime import WorkerCycle
 
 
+def test_worker_snapshot_enforces_configured_uuid_and_age(tmp_path):
+    import json
+
+    from homeserver_control.worker.__main__ import _snapshot_from_file
+
+    path = tmp_path / "capacity.json"
+    path.write_text(
+        json.dumps(
+            {"filesystem_id": "fixture", "free_bytes": 5, "total_bytes": 10, "measured_at": 1000}
+        )
+    )
+    wrong = _snapshot_from_file(path, expected_filesystem_id="other", max_age_seconds=60)
+    assert not wrong.usable(now=1001)
+    valid = _snapshot_from_file(path, expected_filesystem_id="fixture", max_age_seconds=60)
+    assert valid.usable(now=1040)
+    assert not valid.usable(now=1061)
+
+
 @dataclass
 class FakeSource:
     pages: list[list[dict[str, object]]]
@@ -41,6 +59,34 @@ class FakeFinalizer:
     async def finalize(self, media_key: str, reservation_id: str) -> str:
         self.calls.append((media_key, reservation_id))
         return "downloading"
+
+
+@pytest.mark.asyncio
+async def test_external_failure_logs_context_without_credentials_or_traceback(caplog):
+    import httpx
+
+    class FailingAcquirer:
+        async def acquire(self, media_key, reservation_id):
+            request = httpx.Request("GET", "https://subtitles.invalid/?api_key=private-fixture-key")
+            raise httpx.HTTPStatusError(
+                "secret upstream response private-fixture-password",
+                request=request,
+                response=httpx.Response(401, request=request),
+            )
+
+    cycle = WorkerCycle(
+        source=FakeSource(pages=[[{
+            "source_id": "42", "media_key": "movie:tmdb:10", "kind": "movie",
+        }]]),
+        scheduler=FakeScheduler([ReservationResult(True, reservation_id="r1")]),
+        acquirer=FailingAcquirer(),
+    )
+    report = await cycle.run_once()
+    assert report.accepted == 1
+    assert "movie:tmdb:10" in caplog.text
+    assert "HTTPStatusError" in caplog.text
+    assert "private-fixture" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 class FakeCancellation:
@@ -85,7 +131,8 @@ async def test_worker_handles_deletion_before_admitting_new_requests() -> None:
             return []
 
     cycle = WorkerCycle(
-        source=Source(), scheduler=FakeScheduler([]),
+        source=Source(),
+        scheduler=FakeScheduler([]),
         deletion_coordinator=Deletion(),
     )
     await cycle.run_once()
@@ -146,21 +193,25 @@ async def test_worker_skips_malformed_request_and_continues() -> None:
 
 @pytest.mark.asyncio
 async def test_worker_acquires_only_admitted_movies() -> None:
-    source = FakeSource(pages=[[
-        {"source_id": "42", "media_key": "movie:tmdb:10", "kind": "movie"},
-        {"source_id": "43", "media_key": "movie:tmdb:11", "kind": "movie"},
-        {"source_id": "44", "media_key": "season:tvdb:12", "kind": "season"},
-    ]])
-    scheduler = FakeScheduler([
-        ReservationResult(True, reservation_id="r1"),
-        ReservationResult(False, reason="waiting_space"),
-        ReservationResult(True, reservation_id="r3"),
-    ])
+    source = FakeSource(
+        pages=[
+            [
+                {"source_id": "42", "media_key": "movie:tmdb:10", "kind": "movie"},
+                {"source_id": "43", "media_key": "movie:tmdb:11", "kind": "movie"},
+                {"source_id": "44", "media_key": "season:tvdb:12", "kind": "season"},
+            ]
+        ]
+    )
+    scheduler = FakeScheduler(
+        [
+            ReservationResult(True, reservation_id="r1"),
+            ReservationResult(False, reason="waiting_space"),
+            ReservationResult(True, reservation_id="r3"),
+        ]
+    )
     acquirer = FakeAcquirer()
     finalizer = FakeFinalizer()
-    cycle = WorkerCycle(
-        source=source, scheduler=scheduler, acquirer=acquirer, finalizer=finalizer
-    )
+    cycle = WorkerCycle(source=source, scheduler=scheduler, acquirer=acquirer, finalizer=finalizer)
 
     report = await cycle.run_once()
 
@@ -171,19 +222,27 @@ async def test_worker_acquires_only_admitted_movies() -> None:
 
 @pytest.mark.asyncio
 async def test_worker_dispatches_only_reserved_seasons_to_series_pipeline() -> None:
-    source = FakeSource(pages=[[
-        {"source_id": "3:4", "media_key": "season:tmdb:97546:4", "kind": "season"},
-        {"source_id": "4:2", "media_key": "season:tmdb:111:2", "kind": "season"},
-    ]])
-    scheduler = FakeScheduler([
-        ReservationResult(True, reservation_id="r1"),
-        ReservationResult(False, reason="waiting_space"),
-    ])
+    source = FakeSource(
+        pages=[
+            [
+                {"source_id": "3:4", "media_key": "season:tmdb:97546:4", "kind": "season"},
+                {"source_id": "4:2", "media_key": "season:tmdb:111:2", "kind": "season"},
+            ]
+        ]
+    )
+    scheduler = FakeScheduler(
+        [
+            ReservationResult(True, reservation_id="r1"),
+            ReservationResult(False, reason="waiting_space"),
+        ]
+    )
     acquirer = FakeAcquirer()
     finalizer = FakeFinalizer()
     cycle = WorkerCycle(
-        source=source, scheduler=scheduler,
-        series_acquirer=acquirer, series_finalizer=finalizer,
+        source=source,
+        scheduler=scheduler,
+        series_acquirer=acquirer,
+        series_finalizer=finalizer,
     )
     report = await cycle.run_once()
     assert acquirer.calls == [("season:tmdb:97546:4", "r1")]
@@ -193,14 +252,18 @@ async def test_worker_dispatches_only_reserved_seasons_to_series_pipeline() -> N
 
 @pytest.mark.asyncio
 async def test_worker_continues_pages_after_seerr_expands_one_request_to_seasons() -> None:
-    source = FakeSource(pages=[
-        [{"source_id": "3:4", "media_key": "season:tmdb:97546:4", "kind": "season"}],
-        [{"source_id": "4", "media_key": "movie:tmdb:123", "kind": "movie"}],
-    ])
-    scheduler = FakeScheduler([
-        ReservationResult(False, reason="waiting_space"),
-        ReservationResult(False, reason="waiting_space"),
-    ])
+    source = FakeSource(
+        pages=[
+            [{"source_id": "3:4", "media_key": "season:tmdb:97546:4", "kind": "season"}],
+            [{"source_id": "4", "media_key": "movie:tmdb:123", "kind": "movie"}],
+        ]
+    )
+    scheduler = FakeScheduler(
+        [
+            ReservationResult(False, reason="waiting_space"),
+            ReservationResult(False, reason="waiting_space"),
+        ]
+    )
     report = await WorkerCycle(source=source, scheduler=scheduler).run_once()
     assert report.processed == 2
     assert len(scheduler.candidates) == 2
@@ -208,9 +271,13 @@ async def test_worker_continues_pages_after_seerr_expands_one_request_to_seasons
 
 @pytest.mark.asyncio
 async def test_worker_reconciles_withdrawn_requests_after_pagination() -> None:
-    source = FakeSource(pages=[[
-        {"source_id": "7", "media_key": "movie:tmdb:10", "kind": "movie"},
-    ]])
+    source = FakeSource(
+        pages=[
+            [
+                {"source_id": "7", "media_key": "movie:tmdb:10", "kind": "movie"},
+            ]
+        ]
+    )
     scheduler = FakeScheduler([ReservationResult(False, reason="waiting_space")])
     cancellation = FakeCancellation()
     cycle = WorkerCycle(source=source, scheduler=scheduler, cancellation=cancellation)
@@ -224,7 +291,8 @@ async def test_worker_reconciles_withdrawn_requests_after_pagination() -> None:
 async def test_worker_reconciles_uncertain_sources_even_without_approved_requests() -> None:
     reconciler = FakeSourceReconciler()
     cycle = WorkerCycle(
-        source=FakeSource(pages=[]), scheduler=FakeScheduler([]),
+        source=FakeSource(pages=[]),
+        scheduler=FakeScheduler([]),
         source_reconciler=reconciler,
     )
 
@@ -244,7 +312,8 @@ async def test_worker_reconciles_uncertain_sources_before_polling_seerr() -> Non
             raise RuntimeError("Seerr unavailable")
 
     cycle = WorkerCycle(
-        source=InspectingSource(), scheduler=FakeScheduler([]),
+        source=InspectingSource(),
+        scheduler=FakeScheduler([]),
         source_reconciler=reconciler,
     )
 
@@ -264,7 +333,8 @@ async def test_worker_skips_priority_if_seerr_is_unavailable() -> None:
             raise RuntimeError("Seerr unavailable")
 
     cycle = WorkerCycle(
-        source=FailingSource(), scheduler=FakeScheduler([]),
+        source=FailingSource(),
+        scheduler=FakeScheduler([]),
         movie_prioritizer=prioritizer,
     )
 
@@ -289,11 +359,16 @@ async def test_worker_prioritizes_only_after_series_queue_reconciliation() -> No
             return "reordered"
 
     cycle = WorkerCycle(
-        source=FakeSource(pages=[[
-            {"source_id": "series", "media_key": "season:tmdb:123:1", "kind": "season"},
-        ]]),
+        source=FakeSource(
+            pages=[
+                [
+                    {"source_id": "series", "media_key": "season:tmdb:123:1", "kind": "season"},
+                ]
+            ]
+        ),
         scheduler=FakeScheduler([ReservationResult(True, reservation_id="r1")]),
-        series_acquirer=ReconciledSeries(), movie_prioritizer=Priority(),
+        series_acquirer=ReconciledSeries(),
+        movie_prioritizer=Priority(),
     )
     await cycle.run_once()
     assert events == ["series", "priority"]
@@ -308,11 +383,16 @@ async def test_worker_skips_priority_when_series_reconciliation_fails() -> None:
             raise RuntimeError("Sonarr unavailable")
 
     cycle = WorkerCycle(
-        source=FakeSource(pages=[[
-            {"source_id": "series", "media_key": "season:tmdb:123:1", "kind": "season"},
-        ]]),
+        source=FakeSource(
+            pages=[
+                [
+                    {"source_id": "series", "media_key": "season:tmdb:123:1", "kind": "season"},
+                ]
+            ]
+        ),
         scheduler=FakeScheduler([ReservationResult(True, reservation_id="r1")]),
-        series_acquirer=FailingSeries(), movie_prioritizer=prioritizer,
+        series_acquirer=FailingSeries(),
+        movie_prioritizer=prioritizer,
     )
     await cycle.run_once()
     assert prioritizer.calls == 0
@@ -322,9 +402,13 @@ async def test_worker_skips_priority_when_series_reconciliation_fails() -> None:
 async def test_worker_skips_priority_when_a_season_is_deferred() -> None:
     prioritizer = FakeMoviePrioritizer()
     cycle = WorkerCycle(
-        source=FakeSource(pages=[[
-            {"source_id": "series", "media_key": "season:tmdb:123:1", "kind": "season"},
-        ]]),
+        source=FakeSource(
+            pages=[
+                [
+                    {"source_id": "series", "media_key": "season:tmdb:123:1", "kind": "season"},
+                ]
+            ]
+        ),
         scheduler=FakeScheduler([ReservationResult(False, reason="filesystem_unavailable")]),
         movie_prioritizer=prioritizer,
     )
@@ -338,13 +422,19 @@ async def test_priority_failure_does_not_block_approved_requests() -> None:
         async def prioritize(self) -> str:
             raise RuntimeError("qBittorrent unavailable")
 
-    source = FakeSource(pages=[[
-        {"source_id": "42", "media_key": "movie:tmdb:10", "kind": "movie"},
-    ]])
+    source = FakeSource(
+        pages=[
+            [
+                {"source_id": "42", "media_key": "movie:tmdb:10", "kind": "movie"},
+            ]
+        ]
+    )
     scheduler = FakeScheduler([ReservationResult(True, reservation_id="r1")])
     acquirer = FakeAcquirer()
     cycle = WorkerCycle(
-        source=source, scheduler=scheduler, acquirer=acquirer,
+        source=source,
+        scheduler=scheduler,
+        acquirer=acquirer,
         movie_prioritizer=FailingPrioritizer(),
     )
 
@@ -356,14 +446,18 @@ async def test_priority_failure_does_not_block_approved_requests() -> None:
 
 @pytest.mark.asyncio
 async def test_worker_admits_every_page_before_slow_acquisition() -> None:
-    source = FakeSource(pages=[
-        [{"source_id": "1", "media_key": "movie:tmdb:10", "kind": "movie"}],
-        [{"source_id": "2", "media_key": "movie:tmdb:11", "kind": "movie"}],
-    ])
-    scheduler = FakeScheduler([
-        ReservationResult(True, reservation_id="r1"),
-        ReservationResult(True, reservation_id="r2"),
-    ])
+    source = FakeSource(
+        pages=[
+            [{"source_id": "1", "media_key": "movie:tmdb:10", "kind": "movie"}],
+            [{"source_id": "2", "media_key": "movie:tmdb:11", "kind": "movie"}],
+        ]
+    )
+    scheduler = FakeScheduler(
+        [
+            ReservationResult(True, reservation_id="r1"),
+            ReservationResult(True, reservation_id="r2"),
+        ]
+    )
     seen_admissions: list[int] = []
 
     class InspectingAcquirer:
@@ -371,8 +465,7 @@ async def test_worker_admits_every_page_before_slow_acquisition() -> None:
             seen_admissions.append(len(scheduler.candidates))
             return "no_eligible_release"
 
-    cycle = WorkerCycle(source=source, scheduler=scheduler,
-                        acquirer=InspectingAcquirer())
+    cycle = WorkerCycle(source=source, scheduler=scheduler, acquirer=InspectingAcquirer())
     report = await cycle.run_once()
     assert report.accepted == 2
     assert [item.request_id for item in scheduler.candidates] == ["seerr:1", "seerr:2"]
@@ -392,8 +485,13 @@ def test_worker_reads_subdl_key_from_private_file(tmp_path, monkeypatch) -> None
     monkeypatch.setenv("HOMESERVER_SONARR_API_KEY", "sonarr-test")
     monkeypatch.setenv("HOMESERVER_ARR_TOKEN", "gateway-test")
     monkeypatch.setenv("HOMESERVER_RECOVERY_MODE", str(tmp_path / "RECOVERY_MODE"))
+    monkeypatch.setenv("HOMESERVER_HTTP_TIMEOUT_SECONDS", "37")
+    monkeypatch.setenv("HOMESERVER_SEARCH_TIMEOUT_SECONDS", "123")
     cycle = _build_cycle(tmp_path / "control.sqlite")
     assert cycle is not None
+    assert cycle.source.client.timeout.read == 37
+    assert cycle.acquirer.search_timeout_seconds == 123
+    assert cycle.series_acquirer.search_timeout_seconds == 123
     assert cycle.acquirer.subtitle_source.api_key == "test-subdl-key"
     assert cycle.series_acquirer.subtitle_source.api_key == "test-subdl-key"
     assert cycle.series_acquirer.gateway_url == "http://download-gateway:8081"

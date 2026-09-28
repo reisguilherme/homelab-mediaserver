@@ -1,14 +1,36 @@
-from homeserver_control.worker.release_quality import release_rank
+from homeserver_control.worker.release_quality import ReleasePolicy, release_rank
 
 
-def _release(*, source="bluray", modifier="remux", resolution=2160,
-             title="Film 2160p BluRay REMUX DV Atmos", size=10_000,
-             seeders=None):
+def test_configured_resolution_and_source_order():
+    policy = ReleasePolicy.from_environment(
+        {"HOMESERVER_MEDIA_RESOLUTIONS": "720,1080", "HOMESERVER_MEDIA_SOURCES": "webdl,remux"}
+    )
+    offered = _release()
+    offered["quality"]["quality"]["resolution"] = 720
+    assert policy.rank(offered) is not None
+    offered["quality"]["quality"]["resolution"] = 2160
+    assert policy.rank(offered) is None
+
+
+def _release(
+    *,
+    source="bluray",
+    modifier="remux",
+    resolution=2160,
+    title="Film 2160p BluRay REMUX DV Atmos",
+    size=10_000,
+    seeders=None,
+):
     release = {
-        "title": title, "size": size,
-        "quality": {"quality": {
-            "source": source, "modifier": modifier, "resolution": resolution,
-        }},
+        "title": title,
+        "size": size,
+        "quality": {
+            "quality": {
+                "source": source,
+                "modifier": modifier,
+                "resolution": resolution,
+            }
+        },
     }
     if seeders is not None:
         release["seeders"] = seeders

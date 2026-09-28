@@ -19,11 +19,15 @@ def test_production_publishes_only_qbittorrent_peer_port_on_lan_ip(
     expected_ip: str,
     expected_port: int,
 ) -> None:
-    if shutil.which("docker") is None:
+    docker = shutil.which("docker.exe") or shutil.which("docker")
+    if docker is None:
         pytest.skip("Docker Compose is unavailable")
-    if subprocess.run(
-        ["docker", "compose", "version"], capture_output=True, text=True, check=False
-    ).returncode != 0:
+    if (
+        subprocess.run(
+            [docker, "compose", "version"], capture_output=True, text=True, check=False
+        ).returncode
+        != 0
+    ):
         pytest.skip("Docker Compose is unavailable")
 
     env = os.environ.copy()
@@ -35,16 +39,19 @@ def test_production_publishes_only_qbittorrent_peer_port_on_lan_ip(
         HOMESERVER_MEDIA_UUID="test-media-uuid",
         HOMESERVER_JELLYFIN_API_KEY="test-jellyfin-key",
     )
-    env.pop("LAN_BIND_IP", None)
-    env.pop("QBITTORRENT_PEER_PORT", None)
+    env.pop("HOMESERVER_QBIT_PEER_BIND_IP", None)
+    env.pop("HOMESERVER_QBIT_PEER_PORT", None)
     if lan_ip is not None:
-        env["LAN_BIND_IP"] = lan_ip
+        env["HOMESERVER_QBIT_PEER_BIND_IP"] = lan_ip
     if peer_port is not None:
-        env["QBITTORRENT_PEER_PORT"] = peer_port
+        env["HOMESERVER_QBIT_PEER_PORT"] = peer_port
+    if os.name != "nt" and docker.endswith(".exe"):
+        variables = ("HOMESERVER_QBIT_PEER_BIND_IP", "HOMESERVER_QBIT_PEER_PORT")
+        env["WSLENV"] = ":".join([env.get("WSLENV", ""), *(f"{name}/w" for name in variables)])
 
     result = subprocess.run(
         [
-            "docker",
+            docker,
             "compose",
             "-f",
             "deploy/compose.yaml",
