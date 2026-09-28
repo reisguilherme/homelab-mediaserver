@@ -74,7 +74,9 @@ async def read_capacity_evidence(
         stopped = item.get("state") in {"stoppedDL", "stoppedUP", "pausedDL", "pausedUP"}
         if not isinstance(infohash, str) or len(infohash) != 40 or not isinstance(admitted, bool):
             raise ValueError("invalid gateway queue identity")
-        if admitted and stopped:
+        # Historical superseded sources are not admitted for download, but
+        # their stopped state is still required before another safe failover.
+        if stopped:
             paused.add(infohash.lower())
         known = (isinstance(total, int) and not isinstance(total, bool) and total > 0
                  and isinstance(left, int) and not isinstance(left, bool) and 0 <= left <= total)

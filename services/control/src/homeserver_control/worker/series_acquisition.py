@@ -21,10 +21,10 @@ from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStor
 from .acquisition import (
     _SUBTITLE_SUFFIXES,
     _VIDEO_SUFFIXES,
+    AcquisitionCandidate,
     MovieAcquirer,
     _is_sample_video,
     _queue_only_rejection,
-    _replacement_has_peers,
 )
 from .capacity_evidence import CapacityEvidence
 from .release_quality import release_rank, release_seeders
@@ -80,6 +80,7 @@ class SeriesAcquirer(MovieAcquirer):
         gateway_url: str | None = None, arr_token: str | None = None,
         health_store: SourceHealthStore | None = None,
         is_tombstoned: Callable[[str], bool] | None = None,
+        availability_probe: Callable[[bytes, str], Awaitable[int | None]] | None = None,
     ) -> None:
         super().__init__(
             repository=repository, permits=permits, radarr_url=sonarr_url,
@@ -89,6 +90,7 @@ class SeriesAcquirer(MovieAcquirer):
             torrent_store=torrent_store,
             capacity_provider=capacity_provider,
             health_store=health_store, gateway_url=gateway_url, arr_token=arr_token,
+            availability_probe=availability_probe,
         )
         self.sonarr_url = sonarr_url.rstrip("/")
         if bool(gateway_url) != bool(arr_token):
@@ -229,9 +231,9 @@ class SeriesAcquirer(MovieAcquirer):
         self, *, series_id: int, episode_id: int, season: int, episode: int,
         tmdb_id: int,
         replacement_reason: str | None = None,
-    ) -> AsyncIterator[
-        tuple[dict[str, object], tuple[str, str, tuple[str, ...], int], bytes | None, bytes]
-    ]:
+        excluded_infohashes: set[str] | None = None,
+    ) -> AsyncIterator[AcquisitionCandidate]:
+        excluded_infohashes = excluded_infohashes or set()
         response = await self.client.get(
             f"{self.sonarr_url}/api/v3/release",
             params={"seriesId": series_id, "episodeId": episode_id},
@@ -259,6 +261,9 @@ class SeriesAcquirer(MovieAcquirer):
                 or not self._trusted_download_url(release.get("downloadUrl"))
             ):
                 continue
+            claimed = release.get("infoHash")
+            if isinstance(claimed, str) and claimed.lower() in excluded_infohashes:
+                continue
             torrent = await self._metadata(release["downloadUrl"])
             if torrent is None:
                 continue
@@ -268,18 +273,11 @@ class SeriesAcquirer(MovieAcquirer):
             )
             if manifest is None:
                 continue
-            claimed = release.get("infoHash")
-            if claimed and (not isinstance(claimed, str) or claimed.lower() != manifest[0]):
+            if manifest[0] in excluded_infohashes or claimed and (
+                not isinstance(claimed, str) or claimed.lower() != manifest[0]
+            ):
                 continue
-            external: bytes | None = None
-            if not any(PurePosixPath(name).suffix.lower() in _SUBTITLE_SUFFIXES
-                       for name in manifest[2]):
-                assert self.subtitle_source is not None
-                external = await self.subtitle_source.fetch(
-                    tmdb_id=tmdb_id, release_title=release["title"],
-                    season=season, episode=episode,
-                )
-            yield release, manifest, external, torrent
+            yield release, manifest, None, torrent
 
     async def acquire(self, media_key: str, reservation_id: str) -> str:
         reservation = self.repository.active_reservation(reservation_id)
@@ -416,8 +414,6 @@ class SeriesAcquirer(MovieAcquirer):
             if item.get("hasFile") is True:
                 return "waiting_episodes"
             if existing is not None and existing.state == "confirmed":
-                if self.permits.had_superseded(reservation_id, scope_key=scope):
-                    continue
                 replacement_reason, old_health = await self._source_status(existing)
                 if replacement_reason is None:
                     continue
@@ -434,24 +430,32 @@ class SeriesAcquirer(MovieAcquirer):
                 continue
             if time.monotonic() < self._next_search.get(f"{reservation_id}:{scope}", 0):
                 continue
-            self._next_search[f"{reservation_id}:{scope}"] = time.monotonic() + self.retry_seconds
+            self._next_search[f"{reservation_id}:{scope}"] = time.monotonic() + (
+                min(self.retry_seconds, 300) if replacement_reason else self.retry_seconds
+            )
             found_candidate = False
-            async for candidate in self._eligible_releases(
+            excluded = {source.infohash for source in self.permits.list_source_history(
+                reservation_id, scope_key=scope
+            )} if replacement_reason else set()
+            candidates = self._eligible_releases(
                 series_id=series["id"], episode_id=item["id"],
                 season=season, episode=number, tmdb_id=tmdb_id,
                 replacement_reason=replacement_reason,
+                excluded_infohashes=excluded,
+            )
+            async for candidate in self._prioritize_replacements(
+                candidates, old=existing, reason=replacement_reason, health=old_health,
+                rank=_series_rank,
             ):
                 found_candidate = True
                 release, (infohash, digest, files, bytes_total), external, torrent = candidate
-                if replacement_reason and (
-                    existing is None or old_health is None
-                    or infohash == existing.infohash
-                    or not self._replacement_paths_available(existing, torrent)
-                    or not _replacement_has_peers(
-                        release, replacement_reason, old_health.num_seeds
+                if not any(PurePosixPath(name).suffix.lower() in _SUBTITLE_SUFFIXES
+                           for name in files):
+                    assert self.subtitle_source is not None
+                    external = await self.subtitle_source.fetch(
+                        tmdb_id=tmdb_id, release_title=release["title"],
+                        season=season, episode=number,
                     )
-                ):
-                    continue
                 if external is not None:
                     assert self.subtitle_store is not None
                     self.subtitle_store.put(reservation_id, scope, infohash, external)

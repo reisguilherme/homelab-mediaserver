@@ -703,7 +703,10 @@ async def test_acquirer_rejects_redirecting_torrent_cache(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_movie_replaces_persistently_stalled_source_with_verified_seeded_release(tmp_path):
+@pytest.mark.parametrize("previous_failover", [False, True])
+async def test_movie_replaces_persistently_stalled_source_with_verified_seeded_release(
+    tmp_path, previous_failover,
+):
     repo, permits, reservation_id = _reserve(tmp_path, budget=0)
     old_torrent = _torrent(subtitle=True)
     new_torrent = _torrent(
@@ -730,6 +733,32 @@ async def test_movie_replaces_persistently_stalled_source_with_verified_seeded_r
     )
     torrents = TorrentArtifactStore(repo.path)
     torrents.put(old, old_torrent)
+    original = old
+    original_metadata = old_metadata
+    stopped_hashes = set()
+    if previous_failover:
+        middle_torrent = _torrent(
+            subtitle=True, video_bytes=1_550_000_000,
+            root_name=b"Film.Previous", video_name=b"movie.previous.mkv",
+        )
+        middle_metadata = inspect_torrent(middle_torrent)
+        stopped_hashes.add(original.infohash)
+        old = permits.replace_confirmed(
+            original.token, infohash=middle_metadata.infohash,
+            metadata_sha256=middle_metadata.metadata_sha256,
+            selected_files=tuple(item.path for item in middle_metadata.files),
+            budget_bytes=middle_metadata.total_bytes,
+            capacity=CapacityEvidence(
+                free_bytes=2_000_000_000, remaining_by_hash={},
+                paused_hashes=frozenset(stopped_hashes),
+            ), expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        )
+        torrents.put(old, middle_torrent)
+        permits.authorize(
+            token=old.token, infohash=old.infohash, destination=old.destination,
+            metadata_sha256=old.metadata_sha256, effect=lambda _: {"accepted": True},
+        )
+        old_metadata = middle_metadata
     SourceHealthStore(tmp_path / "control.sqlite").observe(
         old.permit_id,
         TorrentHealth(
@@ -741,6 +770,8 @@ async def test_movie_replaces_persistently_stalled_source_with_verified_seeded_r
     )
     events = []
     stopped = False
+    metadata_requests = []
+    probed = []
 
     def release(guid, metadata, seeds):
         return {
@@ -758,8 +789,17 @@ async def test_movie_replaces_persistently_stalled_source_with_verified_seeded_r
         nonlocal stopped
         if request.url.path == "/internal/torrent-health":
             assert request.headers["X-Arr-Token"] == "worker-secret"
-            assert request.headers["X-Admission-Permit"] == old.token
             assert "permit_token" not in request.url.params
+            if request.headers["X-Admission-Permit"] != old.token:
+                current = permits.get_for_reservation(reservation_id)
+                assert current is not None and current.infohash == new_metadata.infohash
+                assert request.headers["X-Admission-Permit"] == current.token
+                return httpx.Response(200, json={
+                    "hash": current.infohash, "downloaded": 1_000,
+                    "amount_left": current.budget_bytes - 1_000,
+                    "num_seeds": 5, "dlspeed": 2_000_000,
+                    "state": "downloading", "progress": 0.001,
+                })
             return httpx.Response(200, json={
                 "hash": old.infohash, "downloaded": 0,
                 "amount_left": old_metadata.total_bytes,
@@ -774,11 +814,15 @@ async def test_movie_replaces_persistently_stalled_source_with_verified_seeded_r
             }])
         if request.url.path == "/api/v3/release" and request.method == "GET":
             return httpx.Response(200, json=[
+                # The retired original advertises the most seeds. It must
+                # never be inspected or admitted again after a prior failover.
+                release("original", original_metadata, 500),
                 release("old", old_metadata, 0), release("new", new_metadata, 42),
             ])
         if request.url.path == "/2/download":
+            metadata_requests.append(request.url.params["id"])
             return httpx.Response(200, content={
-                "old": old_torrent, "new": new_torrent,
+                "original": old_torrent, "new": new_torrent,
             }[request.url.params["id"]])
         if request.url.path == "/internal/source-state":
             body = request.read().decode()
@@ -786,6 +830,7 @@ async def test_movie_replaces_persistently_stalled_source_with_verified_seeded_r
             assert '"permit_token":"' + old.token + '"' in body
             assert '"action":"stop"' in body
             stopped = True
+            stopped_hashes.add(old.infohash)
             events.append("stop")
             return httpx.Response(200, json={"state": "stopped"})
         if request.url.path == "/api/v2/torrents/add":
@@ -810,8 +855,13 @@ async def test_movie_replaces_persistently_stalled_source_with_verified_seeded_r
         return CapacityEvidence(
             free_bytes=2_000_000_000,
             remaining_by_hash={old.infohash: old_metadata.total_bytes},
-            paused_hashes=frozenset({old.infohash}) if stopped else frozenset(),
+            paused_hashes=frozenset(stopped_hashes),
         )
+
+    async def availability_probe(torrent, infohash):
+        assert torrent == new_torrent
+        probed.append(infohash)
+        return 42
 
     async with httpx.AsyncClient(transport=_transport(handler)) as client:
         acquirer = MovieAcquirer(
@@ -821,14 +871,28 @@ async def test_movie_replaces_persistently_stalled_source_with_verified_seeded_r
             gateway_url="http://download-gateway:8081", arr_token="worker-secret",
             health_store=SourceHealthStore(tmp_path / "control.sqlite"),
             torrent_store=torrents,
+            availability_probe=availability_probe,
         )
-        await acquirer.acquire("movie:tmdb:1101383", reservation_id)
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "replaced"
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == (
+            "already_permitted"
+        )
 
     replacement = permits.get_for_reservation(reservation_id)
     assert replacement is not None and replacement.infohash == new_metadata.infohash
     assert replacement.state == "confirmed"
     assert replacement.reported_seeders == 42
     assert permits.is_admitted(old.infohash) is False
+    assert permits.is_admitted(original.infohash) is False
+    assert metadata_requests == ["new"]
+    assert probed == [new_metadata.infohash]
+    assert events.count("add") == 1
+    assert {source.infohash: source.state for source in permits.list_source_history(
+        reservation_id
+    )} == {
+        **{original.infohash: "superseded", old.infohash: "superseded"},
+        new_metadata.infohash: "confirmed",
+    }
     assert events.index("stop") < events.index("capacity") < events.index("add")
 
 
@@ -1199,6 +1263,14 @@ async def test_movie_reconciles_uncertain_replacement_without_duplicate_add(
             reconciled.append(replacement.token)
             permits.confirm_replacement(replacement.token)
             return httpx.Response(200, json={"state": "confirmed"})
+        if request.url.path == "/internal/torrent-health":
+            assert request.headers["X-Admission-Permit"] == replacement.token
+            return httpx.Response(200, json={
+                "hash": replacement.infohash, "downloaded": 1000,
+                "amount_left": replacement.budget_bytes - 1000,
+                "num_seeds": 5, "dlspeed": 2_000_000,
+                "state": "downloading", "progress": 0.001,
+            })
         raise AssertionError(
             "reconciliation must not search, add or resume a source: "
             f"{request.method} {request.url}"
@@ -1224,6 +1296,55 @@ async def test_movie_reconciles_uncertain_replacement_without_duplicate_add(
     assert permits.get(old.token).state == "superseded"
     assert permits.get_for_reservation(reservation_id).state == "confirmed"
     assert permits.get_for_reservation(reservation_id).infohash == replacement.infohash
+
+
+@pytest.mark.asyncio
+async def test_movie_replacement_protects_paths_of_all_retained_sources(tmp_path):
+    repo, permits, _, old, current, torrents, _ = _uncertain_movie_replacement(
+        tmp_path, state="confirmed",
+    )
+    overlap = _torrent(subtitle=True, video_bytes=1_700_000_000)
+    assert inspect_torrent(overlap).infohash != old.infohash
+    assert set(item.path for item in inspect_torrent(overlap).files).isdisjoint(
+        item.path for item in inspect_torrent(torrents.get(current)).files
+    )
+    async with httpx.AsyncClient() as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
+            client=client, torrent_store=torrents,
+        )
+        assert not acquirer._replacement_paths_available(current, overlap)
+
+
+@pytest.mark.asyncio
+async def test_movie_unexpired_retry_rechecks_that_retained_source_is_stopped(tmp_path):
+    repo, permits, reservation_id, old, replacement, torrents, _ = (
+        _uncertain_movie_replacement(tmp_path, state="authorized")
+    )
+    assert replacement.expires_at > datetime.now(UTC) + timedelta(minutes=2)
+
+    async def capacity_provider():
+        return CapacityEvidence(
+            free_bytes=4_000_000_000,
+            remaining_by_hash={old.infohash: old.budget_bytes},
+            paused_hashes=frozenset(),
+        )
+
+    def handler(request):
+        raise AssertionError("active retained source must block gateway retry")
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
+            client=client, torrent_store=torrents, capacity_provider=capacity_provider,
+            gateway_url="http://download-gateway:8081", arr_token="worker-secret",
+            health_store=SourceHealthStore(repo.path),
+        )
+        with pytest.raises(PermissionError, match="source_not_stopped"):
+            await acquirer.acquire("movie:tmdb:1101383", reservation_id)
+    assert permits.get(replacement.token).state == "authorized"
 
 
 @pytest.mark.asyncio
@@ -1297,6 +1418,14 @@ async def test_movie_renews_expired_authorized_replacement_before_gateway_add(tm
             )
             additions.append(current.permit_id)
             return httpx.Response(200, json={"accepted": True})
+        if request.url.path == "/internal/torrent-health":
+            assert request.headers["X-Admission-Permit"] == replacement.token
+            return httpx.Response(200, json={
+                "hash": replacement.infohash, "downloaded": 1000,
+                "amount_left": replacement.budget_bytes - 1000,
+                "num_seeds": 5, "dlspeed": 2_000_000,
+                "state": "downloading", "progress": 0.001,
+            })
         raise AssertionError(
             "renewal must not search releases or restart the old source: "
             f"{request.method} {request.url}"

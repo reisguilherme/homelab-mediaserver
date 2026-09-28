@@ -910,7 +910,11 @@ async def test_unconfirmed_permit_does_not_block_preexisting_episode_file(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_series_replaces_stalled_first_episode_without_starting_later_episode(tmp_path):
+@pytest.mark.parametrize("previous_attempt", [False, True])
+@pytest.mark.parametrize("tracker_mode", [None, "verified", "unknown", "capacity"])
+async def test_series_replaces_stalled_first_episode_without_starting_later_episode(
+    tmp_path, previous_attempt, tracker_mode,
+):
     repo, permits, reservation_id = _reserve(tmp_path, budget=0)
     old_torrent = _torrent()
     new_torrent = _torrent(
@@ -920,14 +924,31 @@ async def test_series_replaces_stalled_first_episode_without_starting_later_epis
     )
     old_metadata = inspect_torrent(old_torrent)
     new_metadata = inspect_torrent(new_torrent)
+    first_torrent = _torrent(root_suffix=b".FirstAttempt")
+    first_metadata = inspect_torrent(first_torrent)
+    dead_torrent = _torrent(root_suffix=b".StaleIndexerCount")
+    dead_metadata = inspect_torrent(dead_torrent)
+    unknown_torrent = _torrent(root_suffix=b".NoScrapeSupport")
+    unknown_metadata = inspect_torrent(unknown_torrent)
+    chosen_torrent = unknown_torrent if tracker_mode == "unknown" else new_torrent
+    chosen_metadata = inspect_torrent(chosen_torrent)
+    large_torrents = {
+        f"large-{number}": _torrent(
+            video_bytes=5_000_000_000, root_suffix=f".Large{number}".encode(),
+        ) for number in range(12)
+    } if tracker_mode == "capacity" else {}
+    large_metadata = {
+        guid: inspect_torrent(torrent) for guid, torrent in large_torrents.items()
+    }
     assert {item.path for item in old_metadata.files}.isdisjoint(
         item.path for item in new_metadata.files
     )
+    initial_metadata = first_metadata if previous_attempt else old_metadata
     old = permits.issue(
-        infohash=old_metadata.infohash, metadata_sha256=old_metadata.metadata_sha256,
+        infohash=initial_metadata.infohash, metadata_sha256=initial_metadata.metadata_sha256,
         destination="/data/torrents", category="sonarr", reservation_id=reservation_id,
-        scope_key="S04E01", selected_files=tuple(item.path for item in old_metadata.files),
-        budget_bytes=old_metadata.total_bytes,
+        scope_key="S04E01", selected_files=tuple(item.path for item in initial_metadata.files),
+        budget_bytes=initial_metadata.total_bytes,
         expires_at=datetime.now(UTC) + timedelta(minutes=30),
         capacity=CapacityEvidence(free_bytes=4_000_000_000, remaining_by_hash={}),
     )
@@ -937,6 +958,23 @@ async def test_series_replaces_stalled_first_episode_without_starting_later_epis
         effect=lambda _: {"accepted": True},
     )
     torrents = TorrentArtifactStore(repo.path)
+    if previous_attempt:
+        torrents.put(old, first_torrent)
+        old = permits.replace_confirmed(
+            old.token, infohash=old_metadata.infohash,
+            metadata_sha256=old_metadata.metadata_sha256,
+            selected_files=tuple(item.path for item in old_metadata.files),
+            budget_bytes=old_metadata.total_bytes,
+            expires_at=datetime.now(UTC) + timedelta(minutes=30),
+            capacity=CapacityEvidence(
+                free_bytes=4_000_000_000, remaining_by_hash={},
+                paused_hashes=frozenset({first_metadata.infohash}),
+            ),
+        )
+        permits.authorize(
+            token=old.token, infohash=old.infohash, destination=old.destination,
+            metadata_sha256=old.metadata_sha256, effect=lambda _: {"accepted": True},
+        )
     torrents.put(old, old_torrent)
     SourceHealthStore(tmp_path / "control.sqlite").observe(
         old.permit_id,
@@ -950,6 +988,8 @@ async def test_series_replaces_stalled_first_episode_without_starting_later_epis
     stopped = False
     searched = []
     events = []
+    probed = []
+    metadata_fetched = []
 
     def release(guid, metadata, seeds):
         return {
@@ -1002,22 +1042,32 @@ async def test_series_replaces_stalled_first_episode_without_starting_later_epis
             searched.append(request.url.params["episodeId"])
             assert request.url.params["episodeId"] == "41"
             return httpx.Response(200, json=[
-                release("old", old_metadata, 0), release("new", new_metadata, 36),
+                release("old", old_metadata, 10000),
+                *([release("first", first_metadata, 10000)] if previous_attempt else []),
+                *([
+                    release("dead", dead_metadata, 1000),
+                    release("unknown", unknown_metadata, 100),
+                ] if tracker_mode in {"verified", "unknown"} else []),
+                *[release(guid, metadata, 1000) for guid, metadata in large_metadata.items()],
+                release("new", new_metadata, 0 if tracker_mode == "verified" else 36),
             ])
         if request.url.path == "/2/download":
+            metadata_fetched.append(request.url.params["id"])
             return httpx.Response(200, content={
                 "old": old_torrent, "new": new_torrent,
+                "first": first_torrent, "dead": dead_torrent, "unknown": unknown_torrent,
+                **large_torrents,
             }[request.url.params["id"]])
         if request.url.path == "/internal/source-state":
-            assert json.loads(request.content) == {
-                "permit_token": old.token, "action": "stop",
-            }
-            stopped = True
-            events.append("stop")
-            return httpx.Response(200, json={"state": "stopped"})
+            payload = json.loads(request.content)
+            assert payload["permit_token"] == old.token
+            assert payload["action"] in {"start", "stop"}
+            stopped = payload["action"] == "stop"
+            events.append("stop" if stopped else "resume")
+            return httpx.Response(200, json={"state": "stopped" if stopped else "started"})
         if request.url.path == "/api/v2/torrents/add":
             assert stopped
-            assert new_torrent in request.content
+            assert chosen_torrent in request.content
             replacement = permits.get_for_reservation(
                 reservation_id, scope_key="S04E01"
             )
@@ -1041,24 +1091,50 @@ async def test_series_replaces_stalled_first_episode_without_starting_later_epis
             paused_hashes=frozenset({old.infohash}) if stopped else frozenset(),
         )
 
+    async def history_capacity():
+        current = await capacity()
+        return CapacityEvidence(
+            free_bytes=current.free_bytes, remaining_by_hash=current.remaining_by_hash,
+            paused_hashes=current.paused_hashes | (
+                frozenset({first_metadata.infohash}) if previous_attempt else frozenset()
+            ),
+        )
+
+    async def availability(torrent, infohash):
+        assert inspect_torrent(torrent).infohash == infohash
+        probed.append(infohash)
+        return {
+            dead_metadata.infohash: 0, unknown_metadata.infohash: None,
+            new_metadata.infohash: 7 if tracker_mode in {"verified", "capacity"} else 0,
+            **{metadata.infohash: 3 for metadata in large_metadata.values()},
+        }[infohash]
+
     async with httpx.AsyncClient(transport=_transport(handler)) as client:
         acquirer = SeriesAcquirer(
             repository=repo, permits=permits, sonarr_url="http://sonarr:8989",
             sonarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
-            client=client, capacity_provider=capacity,
+            client=client, capacity_provider=history_capacity,
             gateway_url="http://download-gateway:8081", arr_token="worker-secret",
             health_store=SourceHealthStore(tmp_path / "control.sqlite"),
             torrent_store=torrents,
+            **({"availability_probe": availability} if tracker_mode else {}),
         )
         await acquirer.acquire("season:tmdb:97546:4", reservation_id)
 
     replacement = permits.get_for_reservation(reservation_id, scope_key="S04E01")
-    assert replacement is not None and replacement.infohash == new_metadata.infohash
+    assert replacement is not None and replacement.infohash == chosen_metadata.infohash
     assert replacement.state == "confirmed"
     assert permits.is_admitted(old.infohash) is False
     assert permits.get_for_reservation(reservation_id, scope_key="S04E02") is None
     assert searched == ["41"]
     assert events.index("stop") < events.index("capacity_after_stop") < events.index("add")
+    assert "old" not in metadata_fetched and "first" not in metadata_fetched
+    if tracker_mode:
+        assert set(probed) == ({
+            dead_metadata.infohash, unknown_metadata.infohash, new_metadata.infohash,
+        } if tracker_mode != "capacity" else {
+            new_metadata.infohash, *(metadata.infohash for metadata in large_metadata.values()),
+        })
 
 
 @pytest.mark.asyncio

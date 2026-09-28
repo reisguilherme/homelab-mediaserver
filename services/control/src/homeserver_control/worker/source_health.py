@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _ACTIVE_DOWNLOAD_STATES = frozenset({"downloading", "stalledDL", "forcedDL"})
-_STALLED_SECONDS = 30 * 60
+_STALLED_SECONDS = 5 * 60
 _SLOW_SECONDS = 60 * 60
 _SLOW_BYTES_PER_SECOND = 1024 * 1024
 

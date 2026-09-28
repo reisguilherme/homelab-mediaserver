@@ -320,6 +320,17 @@ O pedido aprovado é registrado com compromisso inicial de zero byte. Quando uma
 - Para torrents de episódios já admitidos antes desta regra, parar os posteriores sem apagar seus dados ou permissões e retomar somente o próximo da sequência após a importação validada do anterior. Antes de cada retomada, conferir o espaço livre e os bytes pendentes da fila; sem evidência recente ou espaço suficiente, manter o torrent pausado.
 - Episódios já validados não são substituídos automaticamente por versões de qualidade diferente.
 
+Fontes ainda não importadas são monitoradas continuamente, inclusive depois de
+uma substituição. Cinco minutos sem progresso útil, com zero seeds conectados e
+velocidade zero, iniciam uma busca por outro hash; lentidão persistente mantém a
+janela de uma hora.
+O histórico do filme ou episódio impede repetir fontes já tentadas. Seeds positivos
+consultados nos trackers têm preferência sobre disponibilidade desconhecida; uma
+medição incompleta não comprova ausência de seeds. Antes de cada troca, confirmar a
+parada da fonte atual e de todas as anteriores preservadas, proteger seus caminhos
+e recalcular a capacidade pelo tamanho real da alternativa. A troca não libera o
+episódio seguinte nem apaga arquivos parciais automaticamente.
+
 ### 9.4 Temporadas em lançamento
 
 Episódios futuros não consomem espaço antes de existir uma release verificável. Quando um novo episódio for lançado, o controlador consulta novamente o espaço livre e a fila, e emite uma permissão exata apenas se couber. A sequência considera apenas as temporadas solicitadas da série: o próximo episódio e a próxima temporada aguardam a importação dos anteriores, sem bloquear outros pedidos.

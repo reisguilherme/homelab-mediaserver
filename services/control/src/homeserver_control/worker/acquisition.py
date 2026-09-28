@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from urllib.parse import urlsplit
@@ -31,6 +32,9 @@ _VIDEO_SUFFIXES = {".mkv", ".mp4", ".m4v", ".avi", ".mov"}
 _SUBTITLE_SUFFIXES = {".srt", ".ass", ".ssa", ".vtt"}
 _MAX_METADATA = 16 * 1024 * 1024
 _TORRENT_CACHE = "https://itorrents.net/torrent"
+AcquisitionCandidate = tuple[
+    dict[str, object], tuple[str, str, tuple[str, ...], int], bytes | None, bytes
+]
 
 
 def _queue_only_rejection(release: dict[str, object]) -> bool:
@@ -81,6 +85,7 @@ class MovieAcquirer:
         health_store: SourceHealthStore | None = None,
         gateway_url: str | None = None,
         arr_token: str | None = None,
+        availability_probe: Callable[[bytes, str], Awaitable[int | None]] | None = None,
     ) -> None:
         if not radarr_api_key:
             raise ValueError("Radarr API key is required")
@@ -104,6 +109,7 @@ class MovieAcquirer:
         self.health_store = health_store
         self.gateway_url = gateway_url.rstrip("/") if gateway_url else None
         self.arr_token = arr_token
+        self.availability_probe = availability_probe
         self._next_search: dict[str, float] = {}
         self._next_health_check: dict[str, float] = {}
         self._posted: set[str] = set()
@@ -218,18 +224,16 @@ class MovieAcquirer:
         if torrent is None:
             return None
         capacity = await self.capacity_provider()
-        if permit.expires_at <= datetime.now(UTC) + timedelta(minutes=2):
-            try:
-                permit = self.permits.renew_replacement_authorized(
-                    permit.token, capacity=capacity,
-                    expires_at=datetime.now(UTC) + timedelta(minutes=30),
-                )
-            except PermissionError as error:
-                if str(error) == "waiting_space":
-                    return "waiting_space"
-                raise
-        elif self.permits.pending_bytes(capacity) > capacity.free_bytes:
-            return "waiting_space"
+        # Recheck retained sources on every retry, even before the permit expires.
+        try:
+            permit = self.permits.renew_replacement_authorized(
+                permit.token, capacity=capacity,
+                expires_at=datetime.now(UTC) + timedelta(minutes=30),
+            )
+        except PermissionError as error:
+            if str(error) == "waiting_space":
+                return "waiting_space"
+            raise
         await self._add_verified_torrent(permit, torrent)
         return "replaced"
 
@@ -358,20 +362,128 @@ class MovieAcquirer:
         return isinstance(payload, dict) and payload.get("copyUsingHardlinks") is True
 
     def _replacement_paths_available(self, old, candidate_torrent: bytes) -> bool:
-        """Do not let a replacement write any path held by the stopped torrent."""
+        """Protect paths belonging to every retained source for this slot."""
         if self.torrent_store is None:
             return False
-        old_torrent = self.torrent_store.get(old)
-        if old_torrent is None:
-            return False
         try:
-            previous = inspect_torrent(old_torrent)
             candidate = inspect_torrent(candidate_torrent)
         except TorrentBytesError:
             return False
-        return {item.path for item in previous.files}.isdisjoint(
-            item.path for item in candidate.files
-        )
+        candidate_paths = {item.path for item in candidate.files}
+        retained = [old, *(item for item in self.permits.list_source_history(
+            old.reservation_id, scope_key=old.scope_key
+        ) if item.state == "superseded")]
+        for source in retained:
+            torrent = self.torrent_store.get(source)
+            if torrent is None:
+                return False
+            try:
+                if not candidate_paths.isdisjoint(
+                    item.path for item in inspect_torrent(torrent).files
+                ):
+                    return False
+            except TorrentBytesError:
+                return False
+        return True
+
+    async def _prioritize_replacements(
+        self, candidates: AsyncIterator[AcquisitionCandidate], *, old,
+        reason: str | None, health: TorrentHealth | None, rank=release_rank,
+    ) -> AsyncIterator[AcquisitionCandidate]:
+        if reason is None:
+            async for candidate in candidates:
+                yield candidate
+            return
+        assert old is not None and health is not None
+        attempted = {source.infohash for source in self.permits.list_source_history(
+            old.reservation_id, scope_key=old.scope_key
+        )}
+        unknown: list[AcquisitionCandidate] = []
+        batch: list[AcquisitionCandidate] = []
+
+        async def probe_batch():
+            assert self.availability_probe is not None
+            results = await asyncio.gather(*(
+                self.availability_probe(item[3], item[1][0]) for item in batch
+            ))
+            available = []
+            for candidate, seeds in zip(batch, results, strict=True):
+                if seeds is None:
+                    if _replacement_has_peers(candidate[0], reason, health.num_seeds):
+                        unknown.append(candidate)
+                elif seeds > 0:
+                    release, manifest, external, torrent = candidate
+                    verified = {**release, "seeders": seeds}
+                    if _replacement_has_peers(verified, reason, health.num_seeds):
+                        available.append((verified, manifest, external, torrent))
+            return sorted(available, key=lambda item: rank(item[0]), reverse=True)
+
+        async for candidate in candidates:
+            release, manifest, _external, torrent = candidate
+            infohash = manifest[0]
+            if (
+                infohash in attempted
+                or not self._replacement_paths_available(old, torrent)
+            ):
+                continue
+            attempted.add(infohash)
+            if self.availability_probe is None:
+                if _replacement_has_peers(release, reason, health.num_seeds):
+                    yield candidate
+                continue
+            batch.append(candidate)
+            if len(batch) == 12:
+                available = await probe_batch()
+                if available:
+                    for item in available:
+                        yield item
+                batch.clear()
+        if batch:
+            available = await probe_batch()
+            if available:
+                for item in available:
+                    yield item
+        # These are reached only if measured-live candidates could not be admitted.
+        # Unsupported/unknown trackers are never classified as an empty swarm.
+        for candidate in unknown:
+            yield candidate
+
+    async def _eligible_movie_releases(
+        self, ordered: list[dict[str, object]], *, replacement_reason: str | None,
+        excluded_infohashes: set[str],
+    ) -> AsyncIterator[AcquisitionCandidate]:
+        for release in ordered:
+            if (release_rank(release) is None or
+                    release.get("rejected") is not False and not (
+                        replacement_reason and _queue_only_rejection(release)
+                    )):
+                continue
+            reported = release.get("size")
+            if isinstance(reported, bool) or not isinstance(reported, int) or reported <= 0:
+                continue
+            claimed_hash = release.get("infoHash")
+            if isinstance(claimed_hash, str) and claimed_hash.lower() in excluded_infohashes:
+                continue
+            url = release.get("downloadUrl")
+            if not self._trusted_download_url(url):
+                continue
+            torrent = await self._metadata(url)
+            if torrent is None:
+                continue
+            manifest = self._eligible_manifest(
+                torrent, allow_external_subtitle=self.subtitle_source is not None
+            )
+            if manifest is None:
+                continue
+            infohash, digest, files = manifest
+            if infohash in excluded_infohashes or claimed_hash and (
+                not isinstance(claimed_hash, str) or claimed_hash.lower() != infohash
+            ):
+                continue
+            yield (
+                release, (infohash, digest, files, inspect_torrent(torrent).total_bytes),
+                None, torrent,
+            )
 
     async def acquire(self, media_key: str, reservation_id: str) -> str:
         reservation = self.repository.active_reservation(reservation_id)
@@ -392,8 +504,6 @@ class MovieAcquirer:
             if reconciled is not None:
                 return reconciled
             if existing.state == "confirmed":
-                if self.permits.had_superseded(reservation_id):
-                    return "already_permitted"
                 replacement_reason, old_health = await self._source_status(existing)
                 if replacement_reason is None:
                     return "already_permitted"
@@ -408,7 +518,9 @@ class MovieAcquirer:
         now = time.monotonic()
         if now < self._next_search.get(reservation_id, 0):
             return "search_deferred"
-        self._next_search[reservation_id] = now + self.retry_seconds
+        self._next_search[reservation_id] = now + (
+            min(self.retry_seconds, 300) if replacement_reason else self.retry_seconds
+        )
         match = re.fullmatch(r"movie:tmdb:([0-9]+)", media_key)
         if match is None:
             return "unsupported_media"
@@ -455,47 +567,19 @@ class MovieAcquirer:
             reverse=True,
         )
         waiting_space = False
-        for release in ordered:
-            if (release_rank(release) is None or
-                    release.get("rejected") is not False and not (
-                        replacement_reason and _queue_only_rejection(release)
-                    )):
-                continue
-            if replacement_reason and (
-                existing is None or old_health is None or not _replacement_has_peers(
-                    release, replacement_reason, old_health.num_seeds
-                )
-            ):
-                continue
-            reported = release.get("size")
-            if isinstance(reported, bool) or not isinstance(reported, int) or reported <= 0:
-                continue
-            url = release.get("downloadUrl")
-            if not self._trusted_download_url(url):
-                continue
-            torrent = await self._metadata(url)
-            if torrent is None:
-                continue
-            manifest = self._eligible_manifest(
-                torrent, allow_external_subtitle=self.subtitle_source is not None
-            )
-            if manifest is None:
-                continue
-            infohash, metadata_sha256, selected_files = manifest
-            if replacement_reason and existing is not None and not (
-                self._replacement_paths_available(existing, torrent)
-            ):
-                continue
-            exact_bytes = inspect_torrent(torrent).total_bytes
-            claimed_hash = release.get("infoHash")
-            if claimed_hash and (
-                not isinstance(claimed_hash, str) or claimed_hash.lower() != infohash
-            ):
-                continue
+        excluded = {source.infohash for source in self.permits.list_source_history(
+            reservation_id
+        )} if replacement_reason else set()
+        candidates = self._eligible_movie_releases(
+            ordered, replacement_reason=replacement_reason, excluded_infohashes=excluded,
+        )
+        async for candidate in self._prioritize_replacements(
+            candidates, old=existing, reason=replacement_reason, health=old_health,
+        ):
+            release, manifest, _, torrent = candidate
+            infohash, metadata_sha256, selected_files, exact_bytes = manifest
             if replacement_reason is not None:
                 assert existing is not None
-                if infohash == existing.infohash:
-                    continue
                 try:
                     return await self._dispatch_replacement(
                         old=existing, infohash=infohash,

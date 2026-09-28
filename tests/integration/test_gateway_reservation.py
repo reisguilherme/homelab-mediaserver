@@ -386,15 +386,34 @@ def test_confirmed_source_replacement_preserves_old_permit_and_exact_capacity(tm
         destination=replacement.destination, metadata_sha256=replacement.metadata_sha256,
         effect=lambda _: {"accepted": True},
     )
-    with pytest.raises(PermissionError, match="replacement_limit"):
-        permits.replace_confirmed(
-            replacement.token, infohash="e" * 40, metadata_sha256="f" * 64,
-            selected_files=("third.mkv",), budget_bytes=2_500,
-            capacity=CapacityEvidence(
-                free_bytes=3_000, remaining_by_hash={replacement.infohash: 2_000},
-                paused_hashes=frozenset({replacement.infohash}),
-            ), expires_at=datetime.now(UTC) + timedelta(minutes=5),
-        )
+    third = permits.replace_confirmed(
+        replacement.token, infohash="e" * 40, metadata_sha256="f" * 64,
+        selected_files=("third.mkv",), budget_bytes=2_500,
+        capacity=CapacityEvidence(
+            free_bytes=3_000, remaining_by_hash={replacement.infohash: 2_000},
+            paused_hashes=frozenset({old.infohash, replacement.infohash}),
+        ), expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    permits.authorize(
+        token=third.token, infohash=third.infohash, destination=third.destination,
+        metadata_sha256=third.metadata_sha256, effect=lambda _: {"accepted": True},
+    )
+    fourth = permits.replace_confirmed(
+        third.token, infohash="1" * 40, metadata_sha256="2" * 64,
+        selected_files=("fourth.mkv",), budget_bytes=2_600,
+        capacity=CapacityEvidence(
+            free_bytes=3_000, remaining_by_hash={third.infohash: 2_000},
+            paused_hashes=frozenset({old.infohash, replacement.infohash, third.infohash}),
+        ), expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    assert PermitRegistry(database).get_for_reservation(
+        reservation.reservation_id, scope_key="S01E01"
+    ).permit_id == fourth.permit_id
+    assert {item.infohash: item.state for item in permits.list_source_history(
+        reservation.reservation_id, scope_key="S01E01"
+    )} == {"a" * 40: "superseded", "c" * 40: "superseded",
+          "e" * 40: "superseded", "1" * 40: "authorized"}
+    assert repository.active_reservation(reservation.reservation_id)["budget_bytes"] == 2_600
 
 
 def test_source_replacement_rejects_unstopped_reused_or_unaffordable_candidate(tmp_path) -> None:
@@ -604,6 +623,142 @@ def test_retired_replacement_cannot_be_reissued_as_an_initial_source(tmp_path) -
             budget_bytes=2_500, expires_at=datetime.now(UTC) + timedelta(minutes=5),
             capacity=CapacityEvidence(free_bytes=10_000, remaining_by_hash={}),
         )
+
+
+def _confirmed_source_pair(tmp_path):
+    database = tmp_path / "control.sqlite"
+    repository = ReservationRepository(database)
+    repository.initialize()
+    permits = PermitRegistry(database)
+    reservation = repository.reserve(
+        request_id="seerr:chain", source_id="chain", media_key="movie:tmdb:21",
+        filesystem_id="fixture", budget_bytes=0, free_bytes=10_000, total_bytes=20_000,
+    )
+    old = permits.issue(
+        infohash="a" * 40, metadata_sha256="b" * 64,
+        destination="/data/torrents", category="radarr",
+        reservation_id=reservation.reservation_id, selected_files=("original.mkv",),
+        budget_bytes=2_000, expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        capacity=CapacityEvidence(free_bytes=10_000, remaining_by_hash={}),
+    )
+    permits.authorize(
+        token=old.token, infohash=old.infohash, destination=old.destination,
+        metadata_sha256=old.metadata_sha256, effect=lambda _: {"accepted": True},
+    )
+    current = permits.replace_confirmed(
+        old.token, infohash="c" * 40, metadata_sha256="d" * 64,
+        selected_files=("second.mkv",), budget_bytes=2_500,
+        capacity=CapacityEvidence(
+            free_bytes=4_000, remaining_by_hash={}, paused_hashes=frozenset({old.infohash}),
+        ), expires_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+    permits.authorize(
+        token=current.token, infohash=current.infohash, destination=current.destination,
+        metadata_sha256=current.metadata_sha256, effect=lambda _: {"accepted": True},
+    )
+    return database, repository, permits, old, current
+
+
+def test_repeated_replacement_requires_all_retained_sources_stopped(tmp_path) -> None:
+    _, _, permits, old, current = _confirmed_source_pair(tmp_path)
+    with pytest.raises(PermissionError, match="source_not_stopped"):
+        permits.replace_confirmed(
+            current.token, infohash="e" * 40, metadata_sha256="f" * 64,
+            selected_files=("third.mkv",), budget_bytes=2_500,
+            capacity=CapacityEvidence(
+                free_bytes=4_000, remaining_by_hash={current.infohash: 1_000},
+                paused_hashes=frozenset({current.infohash}),
+            ), expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        )
+    assert permits.get(old.token).state == "superseded"
+    assert permits.get(current.token).state == "confirmed"
+
+
+def test_repeated_replacement_never_reuses_a_prior_source(tmp_path) -> None:
+    _, _, permits, old, current = _confirmed_source_pair(tmp_path)
+    with pytest.raises(ValueError, match="same_infohash_or_prior_source"):
+        permits.replace_confirmed(
+            current.token, infohash=old.infohash, metadata_sha256=old.metadata_sha256,
+            selected_files=old.selected_files, budget_bytes=old.budget_bytes,
+            capacity=CapacityEvidence(
+                free_bytes=4_000, remaining_by_hash={},
+                paused_hashes=frozenset({old.infohash, current.infohash}),
+            ), expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        )
+    assert permits.get(current.token).state == "confirmed"
+
+
+def test_repeated_replacement_uses_free_bytes_after_retained_partials(tmp_path) -> None:
+    _, repository, permits, old, current = _confirmed_source_pair(tmp_path)
+    with pytest.raises(PermissionError, match="waiting_space"):
+        permits.replace_confirmed(
+            current.token, infohash="e" * 40, metadata_sha256="f" * 64,
+            selected_files=("third.mkv",), budget_bytes=2_500,
+            capacity=CapacityEvidence(
+                free_bytes=2_000, remaining_by_hash={current.infohash: 100},
+                paused_hashes=frozenset({old.infohash, current.infohash}),
+            ), expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        )
+    assert repository.active_reservation(current.reservation_id)["budget_bytes"] == 2_500
+    assert permits.get(current.token).state == "confirmed"
+
+
+def test_concurrent_repeated_replacements_leave_one_active_source(tmp_path) -> None:
+    database, _, permits, old, current = _confirmed_source_pair(tmp_path)
+    capacity = CapacityEvidence(
+        free_bytes=4_000, remaining_by_hash={},
+        paused_hashes=frozenset({old.infohash, current.infohash}),
+    )
+
+    def replace(digit):
+        registry = PermitRegistry(database)
+        try:
+            return registry.replace_confirmed(
+                current.token, infohash=digit * 40, metadata_sha256="f" * 64,
+                selected_files=(f"third-{digit}.mkv",), budget_bytes=2_500,
+                capacity=capacity, expires_at=datetime.now(UTC) + timedelta(minutes=30),
+            ).infohash
+        except PermissionError as error:
+            assert str(error) == "confirmed_source_required"
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(replace, ("e", "1")))
+    assert sum(result is not None for result in results) == 1
+    active = permits.get_for_reservation(current.reservation_id)
+    assert active is not None and active.infohash in results
+    assert permits.get(current.token).state == "superseded"
+    assert len(permits.list_source_history(current.reservation_id)) == 3
+
+
+@pytest.mark.parametrize("stopped_source", ["original", "current"])
+def test_repeated_replacement_renewal_checks_every_prior_source(
+    tmp_path, stopped_source,
+) -> None:
+    _, _, permits, old, current = _confirmed_source_pair(tmp_path)
+    third = permits.replace_confirmed(
+        current.token, infohash="e" * 40, metadata_sha256="f" * 64,
+        selected_files=("third.mkv",), budget_bytes=2_500,
+        capacity=CapacityEvidence(
+            free_bytes=4_000, remaining_by_hash={},
+            paused_hashes=frozenset({old.infohash, current.infohash}),
+        ), expires_at=datetime.now(UTC) + timedelta(minutes=30),
+    )
+    only_stopped = old.infohash if stopped_source == "original" else current.infohash
+    with pytest.raises(PermissionError, match="source_not_stopped"):
+        permits.renew_replacement_authorized(
+            third.token, capacity=CapacityEvidence(
+                free_bytes=4_000, remaining_by_hash={},
+                paused_hashes=frozenset({only_stopped}),
+            ), expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+    renewed = permits.renew_replacement_authorized(
+        third.token, capacity=CapacityEvidence(
+            free_bytes=4_000, remaining_by_hash={},
+            paused_hashes=frozenset({old.infohash, current.infohash}),
+        ), expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    assert renewed.permit_id == third.permit_id
 
 
 def test_list_uncertain_includes_active_episode_scopes_only_and_caps_limit(tmp_path) -> None:

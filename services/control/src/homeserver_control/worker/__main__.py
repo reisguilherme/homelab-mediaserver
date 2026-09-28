@@ -34,6 +34,7 @@ from .series_finalization import SeriesFinalizer
 from .source_health import SourceHealthStore
 from .source_reconciliation import SourceReconciler
 from .subdl import SubDLSource
+from .tracker_availability import TrackerAvailabilityProbe
 
 LOGGER = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     if permits is not None:
         repository.normalize_verified_budgets()
     health_store = SourceHealthStore(database) if permits is not None and arr_token else None
+    availability_probe = TrackerAvailabilityProbe()
     async def capacity_provider():
         if not arr_token:
             raise ValueError("gateway token is required for capacity evidence")
@@ -121,6 +123,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
             health_store=health_store,
             gateway_url="http://download-gateway:8081" if arr_token else None,
             arr_token=arr_token,
+            availability_probe=availability_probe,
         )
         if arr_token:
             finalizer_client = httpx.AsyncClient(timeout=httpx.Timeout(15.0))
@@ -158,6 +161,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
             arr_token=arr_token,
             health_store=health_store,
             is_tombstoned=deletion_jobs.is_tombstoned,
+            availability_probe=availability_probe,
         )
         if arr_token:
             series_finalizer_client = httpx.AsyncClient(timeout=httpx.Timeout(15.0))

@@ -13,19 +13,19 @@ def _health(*, downloaded=0, left=100_000_000_000, seeds=0, speed=0,
     )
 
 
-def test_zero_peer_stall_requires_30_minutes_without_progress_and_survives_restart(tmp_path):
+def test_zero_peer_stall_retries_after_five_minutes_and_survives_restart(tmp_path):
     path = tmp_path / "control.sqlite"
     store = SourceHealthStore(path)
     assert store.observe("permit-1", _health(), now=1000) is None
-    assert SourceHealthStore(path).observe("permit-1", _health(), now=2799) is None
-    assert SourceHealthStore(path).observe("permit-1", _health(), now=2800) == "stalled"
+    assert SourceHealthStore(path).observe("permit-1", _health(), now=1299) is None
+    assert SourceHealthStore(path).observe("permit-1", _health(), now=1300) == "stalled"
 
 
 def test_progress_and_queue_pause_reset_stall_window(tmp_path):
     store = SourceHealthStore(tmp_path / "control.sqlite")
     assert store.observe("permit-1", _health(), now=1000) is None
     assert store.observe("permit-1", _health(downloaded=10, left=99_999_990_000), now=2700) is None
-    assert store.observe("permit-1", _health(downloaded=10, left=99_999_990_000), now=4400) is None
+    assert store.observe("permit-1", _health(downloaded=10, left=99_999_990_000), now=2999) is None
     assert store.observe("permit-1", _health(downloaded=10, left=99_999_990_000,
                                               state="queuedDL"), now=4600) is None
     assert store.observe("permit-1", _health(downloaded=10, left=99_999_990_000), now=4700) is None

@@ -108,5 +108,7 @@ async def test_capacity_excludes_known_stopped_torrents_but_counts_active_and_un
             snapshot_path=snapshot, data_root=tmp_path,
             gateway_url="http://gateway:8081", arr_token="private", client=client)
     assert evidence.remaining_by_hash == {"a" * 40: 2000, "b" * 40: 1500}
-    assert evidence.paused_hashes == frozenset({"a" * 40, "f" * 40})
+    # Superseded sources are no longer admitted, but their stopped state must
+    # still be available when renewing or replacing their next source.
+    assert evidence.paused_hashes == frozenset({"a" * 40, "c" * 40, "f" * 40})
     assert evidence.other_pending_bytes == 900

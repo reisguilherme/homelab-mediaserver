@@ -266,6 +266,58 @@ def test_replacement_persists_reported_seeders(tmp_path) -> None:
     assert PermitRegistry(database).get(new.token).reported_seeders == 50
 
 
+def test_in_memory_repeated_failover_keeps_history_scoped_to_the_episode() -> None:
+    registry = PermitRegistry()
+    old = registry.issue(
+        infohash="a" * 40, metadata_sha256="b" * 64,
+        destination="/data/torrents", category="sonarr", reservation_id="season",
+        scope_key="S01E01", selected_files=("original.mkv",), budget_bytes=100,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    other_episode = registry.issue(
+        infohash="1" * 40, destination="/data/torrents", category="sonarr",
+        reservation_id="season", scope_key="S01E02",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    registry.authorize(
+        token=old.token, infohash=old.infohash, destination=old.destination,
+        metadata_sha256=old.metadata_sha256, effect=lambda _: {"accepted": True},
+    )
+    current = registry.replace_confirmed(
+        old.token, infohash="c" * 40, metadata_sha256="d" * 64,
+        selected_files=("second.mkv",), budget_bytes=100,
+        capacity=CapacityEvidence(
+            free_bytes=1_000, remaining_by_hash={}, paused_hashes=frozenset({old.infohash}),
+        ), expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    registry.authorize(
+        token=current.token, infohash=current.infohash, destination=current.destination,
+        metadata_sha256=current.metadata_sha256, effect=lambda _: {"accepted": True},
+    )
+    with pytest.raises(PermissionError, match="source_not_stopped"):
+        registry.replace_confirmed(
+            current.token, infohash="e" * 40, metadata_sha256="f" * 64,
+            selected_files=("third.mkv",), budget_bytes=100,
+            capacity=CapacityEvidence(
+                free_bytes=1_000, remaining_by_hash={},
+                paused_hashes=frozenset({current.infohash}),
+            ), expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+    third = registry.replace_confirmed(
+        current.token, infohash="e" * 40, metadata_sha256="f" * 64,
+        selected_files=("third.mkv",), budget_bytes=100,
+        capacity=CapacityEvidence(
+            free_bytes=1_000, remaining_by_hash={},
+            paused_hashes=frozenset({old.infohash, current.infohash}),
+        ), expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    assert {item.infohash: item.state for item in registry.list_source_history(
+        "season", scope_key="S01E01"
+    )} == {"a" * 40: "superseded", "c" * 40: "superseded", "e" * 40: "authorized"}
+    assert registry.list_source_history("season", scope_key="S01E02") == [other_episode]
+    assert registry.get_for_reservation("season", scope_key="S01E01") == third
+
+
 def test_active_confirmed_movie_list_excludes_series_and_inactive_reservations(tmp_path) -> None:
     database = tmp_path / "control.sqlite"
     repo = ReservationRepository(database)

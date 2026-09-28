@@ -44,20 +44,26 @@ peers de entrada da Internet; a velocidade ainda depende dos seeds da release.
 ## Troca de fonte sem progresso
 
 O worker mede o progresso de cada filme e do primeiro episódio pendente de cada
-série. Só procura outra fonte após 30 minutos sem avanço, sem seeds conectados
+série. Procura outra fonte após cinco minutos sem avanço, sem seeds conectados
 e com velocidade zero, ou após uma hora com média abaixo de 1 MiB/s. Um
 episódio pausado por ordem cronológica não entra nessa avaliação. A alternativa
-precisa ter seeds reportados, qualidade permitida, metadados verificáveis,
-caminho de arquivo distinto e espaço livre suficiente para seu tamanho exato.
+precisa ter qualidade permitida, metadados verificáveis, caminhos distintos dos
+arquivos de todas as fontes preservadas e espaço livre para seu tamanho exato.
+Na troca, o worker consulta trackers UDP públicos e prefere seeds confirmados.
+Uma resposta zero completa descarta a candidata; timeout ou tracker sem suporte
+mantém a disponibilidade desconhecida. Seeds medidos prevalecem sobre números
+antigos do indexador. Se nenhuma alternativa confirmada puder ser admitida,
+fontes com disponibilidade desconhecida e seeds reportados ainda são tentadas.
 O gateway para a fonte anterior, verifica a parada e só
 então autoriza a nova. Os arquivos parciais antigos permanecem no disco.
 Para episódios sem sidecar, a nova fonte também exige SRT elegível no preflight.
 
-Há no máximo uma troca automática por filme ou episódio para evitar que várias
-fontes parciais consumam o armazenamento. Se a segunda fonte também parar ou
-não existir candidata segura, verificar os logs do worker e os seeds nos
-indexadores; escolher outra fonte manualmente exige uma nova análise de espaço
-e dos arquivos parciais preservados.
+A nova fonte continua sendo monitorada e pode ser trocada novamente. O histórico
+impede retornar a hashes já tentados; as buscas de substituição se repetem a cada
+cinco minutos quando necessário. Todas as fontes anteriores precisam permanecer
+paradas. Seus arquivos parciais contam no espaço físico usado e não são apagados
+automaticamente. Sem candidata segura ou espaço suficiente, o episódio aguarda;
+os posteriores da mesma série continuam parados até a importação validada.
 
 Se a resposta ao envio da nova fonte se perder, o worker consulta o qBittorrent
 e confirma o permit apenas quando hash, categoria, destino e tamanho coincidirem

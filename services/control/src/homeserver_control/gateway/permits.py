@@ -570,8 +570,30 @@ class PermitRegistry:
                 episodes.append((f"season:tmdb:{match.group(1)}", self._permit_from_row(row)))
         return episodes
 
+    def list_source_history(
+        self, reservation_id: str, *, scope_key: str | None = None,
+    ) -> list[Permit]:
+        """Return every prior source for this exact movie or episode slot.
+
+        Superseded rows retain metadata identity and must stay available to
+        reject previously tried hashes and writes into their partial payloads.
+        """
+        if self._db_path is None:
+            with self._lock:
+                return sorted((
+                    item for item in self._permits.values()
+                    if item.reservation_id == reservation_id and item.scope_key == scope_key
+                ), key=lambda item: item.permit_id)
+        with self._session() as connection:
+            rows = connection.execute(
+                "SELECT * FROM gateway_permits WHERE reservation_id = ? "
+                "AND scope_key IS ? ORDER BY permit_id",
+                (reservation_id, scope_key),
+            ).fetchall()
+        return [self._permit_from_row(row) for row in rows]
+
     def had_superseded(self, reservation_id: str, *, scope_key: str | None = None) -> bool:
-        """Report whether this exact movie or episode slot has used its one failover."""
+        """Report whether this exact movie or episode slot has failover history."""
         if self._db_path is None:
             with self._lock:
                 return any(
@@ -711,13 +733,13 @@ class PermitRegistry:
                     or permit.reservation_id is None or permit.budget_bytes is None
                 ):
                     raise PermissionError("authorized_replacement_required")
-                old = next((
-                    item for item in self._permits.values()
+                old_hashes = {
+                    item.infohash for item in self._permits.values()
                     if item.reservation_id == permit.reservation_id
                     and item.scope_key == permit.scope_key
                     and item.state == "superseded"
-                ), None)
-                if old is None or old.infohash not in capacity.paused_hashes:
+                }
+                if not old_hashes or not old_hashes.issubset(capacity.paused_hashes):
                     raise PermissionError("source_not_stopped")
                 if permit.budget_bytes > max(
                     0, capacity.free_bytes - capacity.other_pending_bytes
@@ -738,12 +760,12 @@ class PermitRegistry:
                 or permit.budget_bytes is None or permit.budget_bytes <= 0
             ):
                 raise PermissionError("authorized_replacement_required")
-            old = connection.execute(
+            old_hashes = {row["infohash"] for row in connection.execute(
                 "SELECT infohash FROM gateway_permits WHERE reservation_id = ? "
-                "AND scope_key IS ? AND state = 'superseded' LIMIT 1",
+                "AND scope_key IS ? AND state = 'superseded'",
                 (permit.reservation_id, permit.scope_key),
-            ).fetchone()
-            if old is None or old["infohash"] not in capacity.paused_hashes:
+            ).fetchall()}
+            if not old_hashes or not old_hashes.issubset(capacity.paused_hashes):
                 raise PermissionError("source_not_stopped")
             if not connection.execute(
                 "SELECT 1 FROM reservations WHERE id = ? "
@@ -808,14 +830,13 @@ class PermitRegistry:
                 old = self._permits.get(old_token)
                 if old is None or old.state != "confirmed" or old.reservation_id is None:
                     raise PermissionError("confirmed_source_required")
-                if old.infohash not in capacity.paused_hashes:
-                    raise PermissionError("source_not_stopped")
-                if any(
-                    item.reservation_id == old.reservation_id
+                stopped_sources = {old.infohash} | {
+                    item.infohash for item in self._permits.values()
+                    if item.reservation_id == old.reservation_id
                     and item.scope_key == old.scope_key and item.state == "superseded"
-                    for item in self._permits.values()
-                ):
-                    raise PermissionError("replacement_limit")
+                }
+                if not stopped_sources.issubset(capacity.paused_hashes):
+                    raise PermissionError("source_not_stopped")
                 if any(
                     item.infohash == new_hash and item.reservation_id == old.reservation_id
                     and item.scope_key == old.scope_key for item in self._permits.values()
@@ -836,14 +857,13 @@ class PermitRegistry:
             old = self._permit_from_row(row) if row is not None else None
             if old is None or old.state != "confirmed" or old.reservation_id is None:
                 raise PermissionError("confirmed_source_required")
-            if old.infohash not in capacity.paused_hashes:
-                raise PermissionError("source_not_stopped")
-            if connection.execute(
-                "SELECT 1 FROM gateway_permits WHERE reservation_id = ? "
-                "AND scope_key IS ? AND state = 'superseded' LIMIT 1",
+            stopped_sources = {old.infohash} | {row["infohash"] for row in connection.execute(
+                "SELECT infohash FROM gateway_permits WHERE reservation_id = ? "
+                "AND scope_key IS ? AND state = 'superseded'",
                 (old.reservation_id, old.scope_key),
-            ).fetchone():
-                raise PermissionError("replacement_limit")
+            ).fetchall()}
+            if not stopped_sources.issubset(capacity.paused_hashes):
+                raise PermissionError("source_not_stopped")
             reservation = connection.execute(
                 "SELECT media_key FROM reservations WHERE id = ? "
                 "AND state IN ('reserved', 'downloading', 'waiting_episodes')",

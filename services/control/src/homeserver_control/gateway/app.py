@@ -300,7 +300,8 @@ def create_app(
         if action == "start" and not stopped:
             return {"state": "already_started"}
         upstream.set_running(permit.infohash, running=action == "start")
-        for attempt in range(5):
+        # qBittorrent applies these changes asynchronously; allow five seconds for readback.
+        for attempt in range(26):
             updated = source_info(permit)
             updated_state = updated.get("state")
             if not isinstance(updated_state, str):
@@ -312,7 +313,7 @@ def create_app(
             now_stopped = updated_state in {"stoppedDL", "stoppedUP", "pausedDL", "pausedUP"}
             if now_stopped == (action == "stop"):
                 return {"state": "stopped" if action == "stop" else "started"}
-            if attempt < 4:
+            if attempt < 25:
                 await asyncio.sleep(0.2)
         raise HTTPException(status_code=409, detail="torrent state not confirmed")
 

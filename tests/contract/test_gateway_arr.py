@@ -927,7 +927,19 @@ def test_internal_source_state_rejects_completed_or_changed_torrent() -> None:
     assert upstream.mutations == []
 
 
-def test_internal_source_state_waits_for_bounded_qbit_stop_readback() -> None:
+@pytest.mark.parametrize(
+    ("action", "confirmed_after", "completed_after", "expected_status", "expected_body"),
+    [
+        ("stop", 7, None, 200, {"state": "stopped"}),
+        ("start", 7, None, 200, {"state": "started"}),
+        ("stop", None, None, 409, {"detail": "torrent state not confirmed"}),
+        ("start", None, None, 409, {"detail": "torrent state not confirmed"}),
+        ("stop", 7, 7, 409, {"detail": "source completed during stop"}),
+    ],
+)
+def test_internal_source_state_waits_for_bounded_qbit_readback(
+    monkeypatch, action, confirmed_after, completed_after, expected_status, expected_body,
+) -> None:
     inspected = inspect_torrent(TORRENT)
     permits = PermitRegistry()
     permit = permits.issue(
@@ -944,37 +956,48 @@ def test_internal_source_state_waits_for_bounded_qbit_stop_readback() -> None:
     )
 
     class DelayedUpstream(Upstream):
-        reads_after_stop = 0
-        stop_requested = False
+        reads_after_change = 0
+        change_requested = False
 
         def read(self, path, params=None):
             if path == "/api/v2/torrents/info":
-                if self.stop_requested:
-                    self.reads_after_stop += 1
-                state = (
-                    "stoppedDL" if self.stop_requested and self.reads_after_stop >= 3
-                    else "downloading"
+                if self.change_requested:
+                    self.reads_after_change += 1
+                confirmed = (
+                    confirmed_after is not None
+                    and self.reads_after_change >= confirmed_after
                 )
+                completed = (
+                    completed_after is not None
+                    and self.reads_after_change >= completed_after
+                )
+                stopped = (action == "stop") if confirmed else (action == "start")
                 return [{
                     "hash": inspected.infohash, "category": "radarr",
-                    "save_path": "/data/torrents", "progress": 0.5,
-                    "amount_left": 61, "state": state,
+                    "save_path": "/data/torrents", "progress": 1 if completed else 0.5,
+                    "amount_left": 0 if completed else 61,
+                    "state": "stoppedDL" if stopped else "downloading",
                 }]
             return super().read(path, params)
 
         def set_running(self, infohash, *, running):
-            assert infohash == inspected.infohash and running is False
-            self.stop_requested = True
+            assert infohash == inspected.infohash and running is (action == "start")
+            self.change_requested = True
+
+    async def skip_poll_delay(_seconds):
+        return None
+
+    monkeypatch.setattr("homeserver_control.gateway.app.asyncio.sleep", skip_poll_delay)
 
     upstream = DelayedUpstream()
     client = TestClient(create_app(permits=permits, upstream=upstream, arr_token="secret"))
     response = client.post(
         "/internal/source-state",
-        json={"permit_token": permit.token, "action": "stop"},
+        json={"permit_token": permit.token, "action": action},
         headers={"X-Arr-Token": "secret"},
     )
-    assert response.json() == {"state": "stopped"}
-    assert upstream.reads_after_stop == 3
+    assert response.status_code == expected_status
+    assert response.json() == expected_body
 
 
 @pytest.mark.parametrize("uncertain_state", ["unknown", "dispatching"])
