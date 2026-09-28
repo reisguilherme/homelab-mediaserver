@@ -1275,7 +1275,9 @@ async def test_seerr_arr_connection_uses_adopted_quality_id_and_no_autonomous_se
             )
         if "/settings/radarr" in request.url.path:
             if request.method == "PUT":
-                state[0] = json.loads(request.content)
+                state[0] = json.loads(request.content) | {
+                    "id": int(request.url.path.rsplit("/", 1)[-1])
+                }
             return httpx.Response(200, json=state)
         return httpx.Response(
             200,

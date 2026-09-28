@@ -149,7 +149,9 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 gateway_url=gateway_url,
                 arr_token=arr_token,
                 client=capacity_client,
-                expected_filesystem_id=os.environ.get("HOMESERVER_MEDIA_UUID"),
+                expected_filesystem_id=_media_filesystem_id(
+                    Path("/data"), os.environ.get("HOMESERVER_MEDIA_UUID")
+                ),
                 max_age_seconds=float(
                     os.environ.get("HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS", "30")
                 ),

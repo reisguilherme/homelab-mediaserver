@@ -66,6 +66,7 @@ def create_app(
             status_code=200 if available else 503,
         )
 
+    @app.get("/", response_class=HTMLResponse)
     @app.get("/ui/status", response_class=HTMLResponse)
     def status_page(request: Request) -> HTMLResponse:
         template = Path(__file__).parent / "templates" / "status.html"

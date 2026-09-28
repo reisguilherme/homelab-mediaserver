@@ -33,6 +33,78 @@ def test_worker_snapshot_enforces_configured_uuid_and_age(tmp_path):
     assert not valid.usable(now=1061)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "configured_uuid,snapshot_identity,accepted",
+    [("", "device:66305", True), ("existing-uuid", "existing-uuid", True),
+     ("", "device:other", False)],
+)
+async def test_worker_capacity_enforces_actual_device_without_configured_uuid(
+    tmp_path, monkeypatch, configured_uuid, snapshot_identity, accepted,
+):
+    import json
+    import os
+    import time
+    from types import SimpleNamespace
+
+    import httpx
+
+    import homeserver_control.worker.__main__ as worker
+
+    snapshot = tmp_path / "capacity.json"
+    snapshot.write_text(json.dumps({
+        "filesystem_id": snapshot_identity, "measured_at": time.time(),
+        "free_bytes": 1_000_000_000, "total_bytes": 2_000_000_000,
+    }))
+    for key, value in {
+        "SEERR_URL": "http://seerr:5055", "SEERR_API_KEY": "fixture",
+        "SONARR_URL": "http://sonarr:8989", "SONARR_API_KEY": "fixture",
+        "ARR_TOKEN": "fixture", "MEDIA_UUID": configured_uuid,
+        "CAPACITY_SNAPSHOT": str(snapshot), "RECOVERY_MODE": str(tmp_path / "RECOVERY_MODE"),
+    }.items():
+        monkeypatch.setenv("HOMESERVER_" + key, value)
+    original_stat = os.stat
+    monkeypatch.setattr(os, "stat", lambda path, **kwargs: (
+        SimpleNamespace(st_dev=66305) if str(path) == "/data" else original_stat(path, **kwargs)
+    ))
+    monkeypatch.setattr(os.path, "ismount", lambda _path: True)
+    monkeypatch.setattr(os, "statvfs", lambda _path: SimpleNamespace(
+        f_bavail=1_000_000, f_frsize=1000,
+    ))
+    requests, clients = [], []
+
+    def handler(request):
+        assert request.headers["X-Arr-Token"] == "fixture"
+        requests.append(request.url.path)
+        return httpx.Response(200, json=[{
+            "hash": "a" * 40, "total_size": 3000, "amount_left": 2000,
+            "admitted": True, "state": "downloading",
+        }])
+
+    original_client = httpx.AsyncClient
+
+    def client_factory(**kwargs):
+        client = original_client(transport=httpx.MockTransport(handler), **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(worker.httpx, "AsyncClient", client_factory)
+    try:
+        cycle = worker._build_cycle(tmp_path / "control.sqlite")
+        assert cycle is not None and cycle.series_acquirer is not None
+        if accepted:
+            capacity = await cycle.series_acquirer.capacity_provider()
+            assert capacity.free_bytes == 1_000_000_000
+            assert capacity.remaining_by_hash == {"a" * 40: 2000}
+        else:
+            with pytest.raises(ValueError, match="filesystem_snapshot_unavailable"):
+                await cycle.series_acquirer.capacity_provider()
+    finally:
+        for client in clients:
+            await client.aclose()
+    assert requests == ["/internal/queue-capacity"]
+
+
 @dataclass
 class FakeSource:
     pages: list[list[dict[str, object]]]

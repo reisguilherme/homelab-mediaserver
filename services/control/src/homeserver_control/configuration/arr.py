@@ -258,6 +258,12 @@ async def collection(service, client, endpoint, desired, identity, mode, *, sett
     changes = plan_settings(service, await managed_values(current), comparison)
     if changes and mode == "apply":
         payload = current | desired
+        if service == "seerr" and endpoint in (
+            "/api/v1/settings/radarr", "/api/v1/settings/sonarr"
+        ):
+            # Seerr identifies existing instances through the route; its schema
+            # rejects the read-only id in a request body.
+            payload.pop("id", None)
         if "fields" in desired and current:
             values = {field["name"]: field for field in desired["fields"]}
             payload["fields"] = [

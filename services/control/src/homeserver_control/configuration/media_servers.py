@@ -287,7 +287,9 @@ async def reconcile_seerr(settings, client, mode, *, transport=None):
     changes = plan_settings("seerr", actual, desired)
     if changes and mode == "apply":
         try:
-            response = await client.post(endpoint, json=actual | desired)
+            # Native POST merges connection fields into existing settings. GET
+            # also exposes read-only name/libraries, which cannot be echoed back.
+            response = await client.post(endpoint, json=desired)
             response.raise_for_status()
         except httpx.TransportError:
             pass
