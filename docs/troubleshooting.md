@@ -30,6 +30,7 @@ privadas. Reiniciar sem corrigir a causa costuma repetir o erro.
 | Busca de temporada demora verificando episódios avulsos | Conferir o filtro `fullSeason` do Sonarr; a busca nativa também retorna episódios de outras temporadas. Esses resultados são descartados antes de buscar metadados do pacote. |
 | Torrent pequeno anunciado como 1080p | Conferir bytes do vídeo principal e duração contra o piso MiB/min; samples/sidecars não contam. |
 | qBit 100%, mas nada no Jellyfin | Ver validação, legenda e importação worker; episódio pronto aguarda anteriores importados. Depois conferir sync Arr/Jellyfin/Seerr; manter CDH desabilitado e hardlinks habilitados. |
+| Episódio lento bloqueia novos downloads após os seguintes terminarem | A janela deve contar episódios ainda não baixados. Confira evidência atual do gateway/qBit: torrents confirmados com zero bytes restantes liberam vagas mesmo antes da importação; sem essa evidência, permanecem na janela. |
 | Fonte lenta sem troca | Conferir janela, qualidade/edição, peers medidos, capacidade conjunta e ETA; pausa/completo ou candidata inferior não deve ser promovida. |
 | Preferência alterada sem efeito | Rodar operator apply e reiniciar os cinco consumidores conforme o guia do operador. |
 | Painel sem métricas | Ver logs de host-metrics/telemetry e idade dos snapshots; primeira amostra não tem taxa. |

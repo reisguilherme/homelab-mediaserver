@@ -364,6 +364,34 @@ class SeriesAcquirer(MovieAcquirer):
             or self.repository.episode_import_state(permit.permit_id) == "complete"
         )
 
+    async def _download_pending(self, pending, reservations_by_season):
+        """Completed payloads await ordered import without occupying download slots."""
+        if self.capacity_provider is None:
+            return pending
+        sources = {
+            item["id"]: self.permits.get_for_reservation(
+                reservations_by_season[item["seasonNumber"]],
+                scope_key=_episode_tag(item["seasonNumber"], item["episodeNumber"]),
+            )
+            for item in pending
+        }
+        if not any(
+            source is not None and source.state == "confirmed" for source in sources.values()
+        ):
+            return pending
+        try:
+            capacity = await self.capacity_provider()
+        except Exception as error:
+            LOGGER.warning("series progress evidence unavailable: %s", type(error).__name__)
+            return pending
+        return [
+            item for item in pending
+            if not (
+                (source := sources[item["id"]]) is not None and source.state == "confirmed"
+                and capacity.remaining_by_hash.get(source.infohash) == 0
+            )
+        ]
+
     @staticmethod
     def _eligible_episode_manifest(
         torrent: bytes,
@@ -800,7 +828,8 @@ class SeriesAcquirer(MovieAcquirer):
             and _episode_aired(item) is True
             and item["id"] not in imported_episode_ids
         ]
-        window = pending[:self.download_window] if earlier_catalog_complete else []
+        download_pending = await self._download_pending(pending, reservations_by_season)
+        window = download_pending[:self.download_window] if earlier_catalog_complete else []
         active_episode_ids = {item["id"] for item in window}
         queue_status = await self._reconcile_existing_queue(
             episodes=chronological,

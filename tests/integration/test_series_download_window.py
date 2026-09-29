@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -254,3 +255,161 @@ async def test_series_window_can_prefetch_next_season_without_importing_previous
         )
         assert await acquirer.acquire("season:tmdb:10:2", reservation) == "no_eligible_release"
     assert searched == ["2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("requested_season,expected_search", [(2, 215), (3, 301)])
+@pytest.mark.parametrize("evidence_state", [
+    "fresh", "missing_provider", "failed_provider", "unknown_hash", "authorized",
+])
+async def test_completed_downloads_waiting_for_import_release_acquisition_window_slots(
+    tmp_path, requested_season, expected_search, evidence_state,
+):
+    repo = ReservationRepository(tmp_path / "control.sqlite")
+    repo.initialize()
+    season_two_reservation = _reserve(repo, 2)
+    reservation = _reserve(repo, 3) if requested_season == 3 else season_two_reservation
+    permits = PermitRegistry(repo.path)
+    remaining = {}
+    for number in range(5, 15):
+        metadata = inspect_torrent(_torrent(2, number))
+        permit = permits.issue(
+            infohash=metadata.infohash, metadata_sha256=metadata.metadata_sha256,
+            destination="/data/torrents", category="sonarr",
+            reservation_id=season_two_reservation, scope_key=f"S02E{number:02d}",
+            selected_files=tuple(item.path for item in metadata.files),
+            budget_bytes=metadata.total_bytes,
+            capacity=CapacityEvidence(free_bytes=100_000_000_000, remaining_by_hash=remaining),
+            expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        )
+        permits.authorize(
+            token=permit.token, infohash=permit.infohash, destination=permit.destination,
+            metadata_sha256=permit.metadata_sha256, effect=lambda _: {"accepted": True},
+        )
+        remaining[permit.infohash] = permit.budget_bytes if number == 5 else 0
+        if evidence_state == "authorized" and number != 5:
+            with sqlite3.connect(repo.path) as connection:
+                connection.execute(
+                    "UPDATE gateway_permits SET state='authorized' WHERE token=?", (permit.token,),
+                )
+        if evidence_state == "unknown_hash" and number != 5:
+            del remaining[permit.infohash]
+    searched = []
+
+    def handler(request):
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/config/mediamanagement":
+            return httpx.Response(200, json={"copyUsingHardlinks": True})
+        if request.url.path == "/api/v3/series":
+            return httpx.Response(200, json=[{"id": 1, "tmdbId": 10, "monitored": True}])
+        if request.url.path == "/api/v3/episode":
+            return httpx.Response(200, json=[
+                {"id": season * 100 + number, "seasonNumber": season, "episodeNumber": number,
+                 "monitored": True, "hasFile": season == 2 and number < 5,
+                 "airDateUtc": (datetime.now(UTC) - timedelta(days=1)).isoformat()}
+                for season, numbers in ((2, range(1, 21)), (3, range(1, 3))) for number in numbers
+            ])
+        if request.url.path == "/api/v3/release":
+            searched.append(int(request.url.params["episodeId"]))
+            return httpx.Response(200, json=[])
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async def capacity():
+        if evidence_state == "failed_provider":
+            raise ValueError("fixture stale snapshot")
+        return CapacityEvidence(free_bytes=100_000_000_000, remaining_by_hash=remaining)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        acquirer = SeriesAcquirer(
+            repository=repo, permits=permits, sonarr_url="http://sonarr:8989",
+            sonarr_api_key="fixture", prowlarr_url="http://prowlarr:9696", client=client,
+            capacity_provider=None if evidence_state == "missing_provider" else capacity,
+            download_window=10, max_active_downloads=10,
+        )
+        await acquirer.acquire(f"season:tmdb:10:{requested_season}", reservation)
+    assert (expected_search in searched) is (evidence_state == "fresh")
+    assert permits.get_for_reservation(season_two_reservation, scope_key="S02E05").infohash == (
+        inspect_torrent(_torrent(2, 5)).infohash
+    )
+    assert all(repo.episode_import_state(source.permit_id) is None for source in
+               permits.list_source_history(season_two_reservation, scope_key="S02E06"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pack_remaining", [0, 1])
+async def test_complete_pack_parent_releases_slots_but_partial_parent_keeps_season_priority(
+    tmp_path, pack_remaining,
+):
+    repo = ReservationRepository(tmp_path / "control.sqlite")
+    repo.initialize()
+    earlier_reservation, requested_reservation = _reserve(repo, 2), _reserve(repo, 3)
+    permits, remaining = PermitRegistry(repo.path), {}
+
+    def admit(torrent, scope):
+        metadata = inspect_torrent(torrent)
+        permit = permits.issue(
+            infohash=metadata.infohash, metadata_sha256=metadata.metadata_sha256,
+            destination="/data/torrents", category="sonarr", reservation_id=earlier_reservation,
+            scope_key=scope, selected_files=tuple(item.path for item in metadata.files),
+            budget_bytes=metadata.total_bytes,
+            capacity=CapacityEvidence(free_bytes=100_000_000_000, remaining_by_hash=remaining),
+            expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        )
+        permits.authorize(
+            token=permit.token, infohash=permit.infohash, destination=permit.destination,
+            metadata_sha256=permit.metadata_sha256, effect=lambda _: {"accepted": True},
+        )
+        remaining[permit.infohash] = permit.budget_bytes
+        return permit
+
+    active = admit(_torrent(2, 1), "S02E01")
+    torrent = _bencode({b"info": {
+        b"files": [
+            {b"length": 2_000_000_000 if suffix == "mkv" else 1000,
+             b"path": [f"Show.S02E{number:02d}.{suffix}".encode()]}
+            for number in (1, 2) for suffix in ("mkv", "pt-BR.srt")
+        ],
+        b"name": b"pack", b"piece length": 16_777_216, b"pieces": b"a" * (20 * 239),
+    }})
+    parent = admit(torrent, "S02PACK")
+    permits.bind_season_pack(parent.token, episode_files={
+        "S02E02": tuple(path for path in parent.selected_files if "S02E02" in path),
+    })
+    remaining[parent.infohash] = pack_remaining
+    searched = []
+
+    def handler(request):
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/config/mediamanagement":
+            return httpx.Response(200, json={"copyUsingHardlinks": True})
+        if request.url.path == "/api/v3/series":
+            return httpx.Response(200, json=[{"id": 1, "tmdbId": 10, "monitored": True}])
+        if request.url.path == "/api/v3/episode":
+            return httpx.Response(200, json=[
+                {"id": season * 100 + number, "seasonNumber": season, "episodeNumber": number,
+                 "monitored": True, "hasFile": False,
+                 "airDateUtc": (datetime.now(UTC) - timedelta(days=1)).isoformat()}
+                for season, numbers in ((2, (1, 2)), (3, (1,))) for number in numbers
+            ])
+        if request.url.path == "/api/v3/release":
+            searched.append(int(request.url.params["episodeId"]))
+            return httpx.Response(200, json=[])
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async def capacity():
+        return CapacityEvidence(free_bytes=100_000_000_000, remaining_by_hash=remaining)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        acquirer = SeriesAcquirer(
+            repository=repo, permits=permits, sonarr_url="http://sonarr:8989",
+            sonarr_api_key="fixture", prowlarr_url="http://prowlarr:9696", client=client,
+            capacity_provider=capacity, download_window=2, max_active_downloads=2,
+        )
+        await acquirer.acquire("season:tmdb:10:3", requested_reservation)
+    assert searched == ([301] if pack_remaining == 0 else [])
+    assert permits.get(active.token).state == "confirmed"
+    child = permits.get_for_reservation(earlier_reservation, scope_key="S02E02")
+    assert child.season_pack_parent_id == parent.permit_id
+    assert repo.episode_import_state(child.permit_id) is None
