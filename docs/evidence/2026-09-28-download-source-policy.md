@@ -85,4 +85,20 @@ lentos contados na fila e upload preservado em 2.499.584 bytes/s. Ratio, tempo
 total e tempo inativo de seeding ficaram sem teto. Os 43 torrents concluídos
 permaneceram presentes; o S02E07 concluído foi retomado para seeding.
 
-A aceitação da nova transferência é registrada após a busca real de S02E05.
+Uma tentativa direcionada com o worker parado foi recusada pelo gateway com
+`503 admission blocked by worker health`. Após reativar o serviço normal, o
+permit de S02E05 foi confirmado e a transferência começou. A guarda de saúde
+permaneceu ativa durante toda a operação.
+
+A amostra final mostrou oito downloads simultâneos de The Rookie S02:
+E05 e E08–E14, todos UIndex, 1080p, DSNP/playWEB. Tinham peers conectados e
+progresso; a soma observada foi 7.856.547 bytes/s, aproximadamente 7,86 MB/s.
+E06/E07 permaneciam 100% concluídos e disponíveis para seeding. A transferência
+de E08 estava mais avançada que E05, mas os arquivos da biblioteca de E05–E08
+ainda não tinham sido importados: a sequência continuava protegida.
+
+O inventário ficou em 51 torrents, preservando os 43 concluídos anteriores.
+Os 15 containers esperados estavam rodando, com healthchecks definidos
+positivos. Control, telemetry, Jellyfin e Seerr responderam HTTP 200 pelo IP
+Tailscale a partir do desktop. Taxas e número de peers descrevem essa amostra,
+sem garantir a velocidade futura de cada fonte.
