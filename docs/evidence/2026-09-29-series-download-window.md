@@ -45,3 +45,15 @@ Na primeira ativação, S02E15 e S02E16 foram adquiridos pelo UIndex na família
 DSNP/playWEB. S03 começou como torrent completo 1080p AMZN pela fonte 1337x,
 com 25 seeds conectados e cerca de 4,65 MB/s em uma amostra. O hash de S02E05
 e os 50 torrents que já estavam completos foram preservados.
+
+Após aplicar a contagem por torrent físico, S04 também foi adquirida como
+pack completo 1080p AMZN/Vyndros. A leitura final mostrou nove downloads:
+S02E05, S02E15–20, S03PACK e S04PACK, somando 37,17 MB/s naquele instante.
+O episódio 5 mantinha um seed conectado; sua lentidão não bloqueava os demais.
+O Sonarr continuava com apenas S02E01–04 importados, sem arquivos da S03/S04
+publicados fora de ordem. Todos os 50 torrents inicialmente completos estavam
+preservados e o disco tinha cerca de 108,5 GiB livres.
+
+O worker estava saudável, sem reinícios inesperados. Controlador, Jellyfin
+e Seerr responderam HTTP 200 pelo IP Tailscale. Esses dados são amostras
+da validação no servidor, não garantias de velocidade futura.
