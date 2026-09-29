@@ -24,6 +24,8 @@ privadas. Reiniciar sem corrigir a causa costuma repetir o erro.
 | Requested por horas | Conferir Arr/qBit/controlador: pode aguardar espaço, fonte, janela de episódios, legenda ou importação. |
 | Fonte aparece no site, mas Arr não encontra | Conferir indexador, categorias/caps e sincronização Prowlarr; proxy Byparr deve compartilhar a tag gerenciada com a fonte. |
 | Indexador responde 429 | Revisar seleção do proxy e limitação da fonte; respeitar o retry configurado. |
+| Seeds no UIndex, mas nenhum conectado no qBit | Conferir a release/hash e os trackers; magnets precisam manter os `tr` ao usar cache de metadados. Seeds anunciados não são peers conectados. |
+| Pack de temporada recusado | Conferir cobertura completa e piso MiB/min de cada episódio; mais seeds não permitem baixar vídeos abaixo da qualidade definida. |
 | Torrent pequeno anunciado como 1080p | Conferir bytes do vídeo principal e duração contra o piso MiB/min; samples/sidecars não contam. |
 | qBit 100%, mas nada no Jellyfin | Ver validação, legenda e importação worker; episódio pronto aguarda anteriores importados. Depois conferir sync Arr/Jellyfin/Seerr; manter CDH desabilitado e hardlinks habilitados. |
 | Fonte lenta sem troca | Conferir janela, qualidade/edição, peers medidos, capacidade conjunta e ETA; pausa/completo ou candidata inferior não deve ser promovida. |

@@ -29,7 +29,9 @@ def _write_counter_fixture(root: Path, *, cpu: str, rx: int, tx: int) -> None:
     (network / "tx_bytes").write_text(str(tx), encoding="utf-8")
 
 
-def test_host_snapshot_derives_cpu_and_network_rate_from_two_samples(tmp_path: Path) -> None:
+def test_host_snapshot_derives_cpu_and_network_rate_from_two_samples(
+    tmp_path: Path, monkeypatch
+) -> None:
     metrics = _module()
     _write_counter_fixture(
         tmp_path,
@@ -37,6 +39,10 @@ def test_host_snapshot_derives_cpu_and_network_rate_from_two_samples(tmp_path: P
         rx=1000,
         tx=2000,
     )
+    # Other processes can allocate bytes between two statvfs calls. Use one
+    # captured filesystem sample while testing CPU/network counter deltas.
+    usage = shutil.disk_usage(tmp_path)
+    monkeypatch.setattr(metrics.shutil, "disk_usage", lambda _path: usage)
     first = metrics.collect(
         media_path=tmp_path,
         proc_root=tmp_path / "proc",
@@ -46,7 +52,7 @@ def test_host_snapshot_derives_cpu_and_network_rate_from_two_samples(tmp_path: P
     assert first["host"]["cpu_percent"] is None
     assert first["network"]["rx_bps"] is None
     assert first["network"]["tx_bps"] is None
-    assert first["storage"]["used_bytes"] == shutil.disk_usage(tmp_path).used
+    assert first["storage"]["used_bytes"] == usage.used
 
     _write_counter_fixture(
         tmp_path,
@@ -90,18 +96,14 @@ def test_network_change_does_not_report_a_false_zero_rate(tmp_path: Path) -> Non
 
 def test_cpu_guest_time_is_not_counted_twice(tmp_path: Path) -> None:
     metrics = _module()
-    _write_counter_fixture(
-        tmp_path, cpu="cpu  100 0 0 100 0 0 0 0 20 0\n", rx=1, tx=1
-    )
+    _write_counter_fixture(tmp_path, cpu="cpu  100 0 0 100 0 0 0 0 20 0\n", rx=1, tx=1)
     first = metrics.collect(
         media_path=tmp_path,
         proc_root=tmp_path / "proc",
         network_root=tmp_path / "net",
         sampled_at=100.0,
     )
-    _write_counter_fixture(
-        tmp_path, cpu="cpu  150 0 0 150 0 0 0 0 70 0\n", rx=1, tx=1
-    )
+    _write_counter_fixture(tmp_path, cpu="cpu  150 0 0 150 0 0 0 0 70 0\n", rx=1, tx=1)
     second = metrics.collect(
         media_path=tmp_path,
         proc_root=tmp_path / "proc",
@@ -150,9 +152,16 @@ def test_docker_collector_writes_live_capacity_without_an_env_file(tmp_path, mon
     output = tmp_path / "run/host.json"
     from types import SimpleNamespace
 
-    monkeypatch.setattr(metrics.os, "statvfs", lambda _path: SimpleNamespace(
-        f_bavail=100, f_bfree=100, f_frsize=4096, f_blocks=200,
-    ))
+    monkeypatch.setattr(
+        metrics.os,
+        "statvfs",
+        lambda _path: SimpleNamespace(
+            f_bavail=100,
+            f_bfree=100,
+            f_frsize=4096,
+            f_blocks=200,
+        ),
+    )
     monkeypatch.setenv("HOMESERVER_MEDIA_ROOT", str(tmp_path))
     monkeypatch.setattr("sys.argv", ["host-metrics.py", "--output", str(output)])
     assert metrics.main() == 0

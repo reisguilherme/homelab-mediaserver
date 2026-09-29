@@ -69,7 +69,8 @@ async def test_acquisition_prefers_original_language_from_native_media_context(t
             }])
         if path == "/api/v3/release" and request.method == "GET":
             return httpx.Response(200, json=[{
-                "guid": key, "title": title + " 1080p BluRay", "rejected": False,
+                "guid": key, "indexer": "UIndex", "title": title + " 1080p BluRay",
+                "rejected": False,
                 "size": inspect_torrent(torrent).total_bytes,
                 "infoHash": inspect_torrent(torrent).infohash,
                 "seeders": 2 if key == "original" else 40,

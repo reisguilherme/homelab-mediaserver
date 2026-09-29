@@ -47,6 +47,10 @@ Confira a definição e os campos na instância Prowlarr antes de usar outra fon
 Nomes/fields desconhecidos retornam unsupported; não invente campos. Preserve
 credenciais de trackers diretamente nesse JSON privado, quando necessárias.
 Teste a fonte no Prowlarr e confirme sua sincronização no Sonarr/Radarr.
+O padrão `RELEASE_INDEXER_PRIORITY=uindex,1337x` habilita somente essas duas
+fontes nos três aplicativos. Outras definições existentes são preservadas,
+mas ficam desativadas. UIndex é avaliado primeiro pelo worker; 1337x serve de
+alternativa se não houver release elegível ou houver poucos seeds anunciados.
 
 Quando Byparr está habilitado, o operator vincula proxy e indexadores pela
 tag gerenciada `homeserver-byparr`. Um proxy sem tag correspondente pode

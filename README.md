@@ -62,10 +62,14 @@ e abra `http://IP_TAILSCALE:18080`. A API nativa qBit
 
 ## Preferências
 
-O `.env` permite ajustar downloads e seedings simultâneos, banda, conexões,
+O `.env` permite ajustar downloads simultâneos, banda, conexões,
 resoluções, fontes, Dolby Vision/Atmos, idiomas, legendas, indexadores e busca
-de alternativas lentas. Filmes priorizam qualidade e depois seeds; séries
-podem baixar episódios em paralelo, com janela configurável; a importação
+de alternativas. O padrão permite 10 downloads e seeding sem limite de arquivos,
+com upload limitado a 20 Mbit/s. A seleção usa UIndex primeiro e 1337x como
+alternativa para fontes ausentes ou com poucos seeds. Filmes preferem 4K,
+com fallback em 1080p; séries usam 1080p com piso de tamanho por duração.
+Temporadas completas e a mesma família de releases são preferidas quando elegíveis.
+Episódios podem baixar em paralelo, com janela configurável; a importação
 no Jellyfin mantém a sequência de temporada e episódio. Capacidade usa bytes reais
 pendentes, sem reserva fixa por filme nem teto de tamanho.
 

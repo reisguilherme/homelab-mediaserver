@@ -96,16 +96,16 @@ register("INTEL_RENDER_DEVICE", "/dev/dri/renderD128", "path", editable=False)
 register("TRANSCODE_THREADS", 0, "int", "jellyfin", minimum=0)
 register("JELLYFIN_ENABLE_MEDIA_DELETION", "", "optionalbool", "jellyfin")
 for name, default in {
-    "DOWNLOAD_MAX_ACTIVE": 4,
-    "SEED_MAX_ACTIVE": 8,
-    "TORRENT_MAX_ACTIVE": 12,
+    "DOWNLOAD_MAX_ACTIVE": 10,
     "TORRENT_MAX_CONNECTIONS": 500,
     "TORRENT_MAX_CONNECTIONS_PER_TORRENT": 100,
     "UPLOAD_SLOTS": 20,
     "UPLOAD_SLOTS_PER_TORRENT": 4,
 }.items():
     register(name, default, "int", "qbittorrent", minimum=1, application="native")
-register("QUEUE_IGNORE_SLOW_TORRENTS", True, "bool", "qbittorrent", application="native")
+register("SEED_MAX_ACTIVE TORRENT_MAX_ACTIVE", -1, "int", "qbittorrent", minimum=-1,
+         application="native", unit="-1 unlimited; otherwise positive")
+register("QUEUE_IGNORE_SLOW_TORRENTS", False, "bool", "qbittorrent", application="native")
 register("UPLOAD_LIMIT_MBIT", 20.0, "float", "qbittorrent", unit="Mbit/s", minimum=0)
 register("DOWNLOAD_LIMIT_MBIT", 0.0, "float", "qbittorrent", unit="Mbit/s", minimum=0)
 register("SEED_RATIO_LIMIT", -1.0, "float", "qbittorrent", minimum=-1)
@@ -119,7 +119,11 @@ register(
 )
 register("MOVIE_QUEUE_PRIORITY", "seeders", consumer="worker", choices=("seeders",), editable=False)
 register("SERIES_ORDER", "sequential", consumer="worker", choices=("sequential",), editable=False)
-register("SERIES_DOWNLOAD_WINDOW", 4, "int", "worker", minimum=1)
+register("SERIES_DOWNLOAD_WINDOW", 10, "int", "worker", minimum=1)
+register("SERIES_PREFER_SEASON_PACK SERIES_RELEASE_AFFINITY", True, "bool", "worker")
+register("RELEASE_INDEXER_PRIORITY", ("uindex", "1337x"), "list", "worker",
+         choices=("uindex", "1337x"))
+register("INDEXER_FALLBACK_MIN_SEEDERS", 5, "int", "worker", minimum=1)
 for name, value in {
     "WORKER_INTERVAL_SECONDS": 5,
     "SEARCH_RETRY_SECONDS": 300,
@@ -152,6 +156,7 @@ for name, value in {
 register("SOURCE_MIN_RATE_KIB", 1024, "float", "worker", unit="KiB/s", minimum=0)
 register("SOURCE_MIN_TIME_GAIN_PERCENT", 20, "float", "worker", unit="percent", minimum=0)
 register("SOURCE_PROBE_ENABLED", True, "bool", "worker")
+register("SOURCE_SLOW_REPLACEMENT_ENABLED", False, "bool", "worker")
 register(
     "SOURCE_PROTECTED_HASHES",
     (),
@@ -164,7 +169,10 @@ register(
     "WORKER_HEARTBEAT_MAX_AGE_SECONDS", 90, "float", "health", unit="seconds", minimum=1,
     editable=False,
 )
-register("MEDIA_RESOLUTIONS", ("2160", "1080"), "list", "quality", choices=("720", "1080", "2160"))
+register("MEDIA_RESOLUTIONS", ("2160", "1080"), "list", "quality",
+         choices=("1080", "2160"), editable=False)
+register("MOVIE_RESOLUTIONS", ("2160", "1080"), "list", "quality", choices=("1080", "2160"))
+register("SERIES_RESOLUTIONS", ("1080",), "list", "quality", choices=("1080",))
 register(
     "MEDIA_SOURCES",
     ("remux", "bluray", "webdl"),

@@ -61,8 +61,11 @@ class SourceHealthStore:
         stalled_seconds: int = _STALLED_SECONDS,
         probe_seconds: int = 60,
         min_eta_gain: float = 0.2,
+        slow_replacement_enabled: bool = True,
     ) -> None:
         if (
+            not isinstance(slow_replacement_enabled, bool)
+            or
             any(
                 isinstance(value, bool)
                 or not isinstance(value, (int, float))
@@ -85,6 +88,7 @@ class SourceHealthStore:
         self.stalled_seconds = stalled_seconds
         self.probe_seconds = probe_seconds
         self.min_eta_gain = min_eta_gain
+        self.slow_replacement_enabled = slow_replacement_enabled
         self.db_path = str(db_path)
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
@@ -145,6 +149,8 @@ class SourceHealthStore:
         if not parent_id or not candidate_id or not math.isfinite(now) or now < 0:
             raise ValueError("invalid probe observation")
         if old.amount_left <= 0 or old.progress >= 1 or self.is_protected(old.infohash):
+            return "reject"
+        if not self.slow_replacement_enabled and (old.num_seeds > 0 or old.dlspeed > 0):
             return "reject"
         if old.state not in _ACTIVE_DOWNLOAD_STATES:
             return "reject"
@@ -283,7 +289,10 @@ class SourceHealthStore:
             window_started_at = row["window_started_at"]
             window_left = row["window_left"]
             average = (window_left - health.amount_left) / elapsed if elapsed > 0 else 0
-            slow = elapsed >= self.slow_seconds and average < self.slow_bytes_per_second
+            slow = (
+                self.slow_replacement_enabled
+                and elapsed >= self.slow_seconds and average < self.slow_bytes_per_second
+            )
             if elapsed >= self.slow_seconds and not slow:
                 window_started_at, window_left = now, health.amount_left
             connection.execute(

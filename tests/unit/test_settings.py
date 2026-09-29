@@ -117,6 +117,33 @@ def test_search_timeout_has_a_positive_canonical_default(tmp_path):
         load_settings(path)
 
 
+def test_download_preferences_default_to_ten_downloads_and_unlimited_seeding(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text("")
+    settings = load_settings(path)
+    assert settings.download_max_active == settings.series_download_window == 10
+    assert settings.seed_max_active == settings.torrent_max_active == -1
+    assert settings.queue_ignore_slow_torrents is False
+    assert settings.source_slow_replacement_enabled is False
+    assert settings.release_indexer_priority == ("uindex", "1337x")
+    assert settings.indexer_fallback_min_seeders == 5
+    assert settings.movie_resolutions == ("2160", "1080")
+    assert settings.series_resolutions == ("1080",)
+
+
+@pytest.mark.parametrize("key", ["SEED_MAX_ACTIVE", "TORRENT_MAX_ACTIVE"])
+@pytest.mark.parametrize("value,accepted", [("-1", True), ("12", True), ("0", False),
+                                           ("-2", False)])
+def test_active_seed_and_total_limits_accept_unlimited_or_positive(tmp_path, key, value, accepted):
+    path = tmp_path / ".env"
+    path.write_text(f"HOMESERVER_{key}={value}\n")
+    if accepted:
+        assert getattr(load_settings(path), key.lower()) == int(value)
+    else:
+        with pytest.raises(ValueError, match=key):
+            load_settings(path)
+
+
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
 def test_worker_cycle_timeout_is_finite_and_positive(tmp_path, value):
     path = tmp_path / ".env"

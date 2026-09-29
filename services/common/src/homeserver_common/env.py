@@ -15,6 +15,7 @@ ALIASES = {
     "ARR_GID": "SERVICE_GID",
     "WORKER_INTERVAL": "WORKER_INTERVAL_SECONDS",
     "SOURCE_SLOW_SECONDS": "SOURCE_SLOW_WINDOW_SECONDS",
+    "MEDIA_RESOLUTIONS": "MOVIE_RESOLUTIONS",
     "TELEMETRY_PORT": "STATUS_PORT",
 }
 INTERNAL = {
@@ -179,7 +180,15 @@ def load_settings(path: Path, *, mode="dev") -> Settings:
     ]
     if len(ports) != len(set(ports)):
         raise ValueError("HOMESERVER_*_PORT: duplicate published ports")
-    if values["torrent_max_active"] < max(values["download_max_active"], values["seed_max_active"]):
+    for name in ("seed_max_active", "torrent_max_active"):
+        if values[name] == 0:
+            raise ValueError(f"HOMESERVER_{name.upper()}: expected -1 or positive active limit")
+    if (
+        values["seed_max_active"] > 0 and values["torrent_max_active"] > 0
+        and values["torrent_max_active"] < max(
+            values["download_max_active"], values["seed_max_active"]
+        )
+    ):
         raise ValueError("HOMESERVER_TORRENT_MAX_ACTIVE: incompatible active limits")
     if values["source_min_time_gain_percent"] >= 100:
         raise ValueError("HOMESERVER_SOURCE_MIN_TIME_GAIN_PERCENT: must be below 100")

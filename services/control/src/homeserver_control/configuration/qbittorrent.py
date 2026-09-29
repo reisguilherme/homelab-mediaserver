@@ -43,14 +43,18 @@ def qbit_preferences(settings) -> dict[str, object]:
         if exact and int(exact) >= 0
         else int(Decimal(env.get("HOMESERVER_UPLOAD_LIMIT_MBIT", "20")) * 125_000)
     )
+    active_seeds = integer("SEED_MAX_ACTIVE", -1)
+    # A finite combined limit would still queue finished torrents even when
+    # seeding itself is unlimited. Keep the download limit independent.
+    active_total = -1 if active_seeds == -1 else integer("TORRENT_MAX_ACTIVE", -1)
     return {
         # Router mappings are prohibited, including WebUI mappings.
         "upnp": False,
         "web_ui_upnp": False,
         "queueing_enabled": env.get("HOMESERVER_QBIT_QUEUEING_ENABLED", "true") == "true",
-        "max_active_downloads": integer("DOWNLOAD_MAX_ACTIVE", 4),
-        "max_active_uploads": integer("SEED_MAX_ACTIVE", 8),
-        "max_active_torrents": integer("TORRENT_MAX_ACTIVE", 12),
+        "max_active_downloads": integer("DOWNLOAD_MAX_ACTIVE", 10),
+        "max_active_uploads": active_seeds,
+        "max_active_torrents": active_total,
         "max_connec": integer("TORRENT_MAX_CONNECTIONS", 500),
         "max_connec_per_torrent": integer("TORRENT_MAX_CONNECTIONS_PER_TORRENT", 100),
         "up_limit": upload,
@@ -62,7 +66,7 @@ def qbit_preferences(settings) -> dict[str, object]:
         "max_inactive_seeding_time_enabled": integer("SEED_INACTIVE_LIMIT_MINUTES", -1) >= 0,
         "max_uploads": integer("UPLOAD_SLOTS", 20),
         "max_uploads_per_torrent": integer("UPLOAD_SLOTS_PER_TORRENT", 4),
-        "dont_count_slow_torrents": env.get("HOMESERVER_QUEUE_IGNORE_SLOW_TORRENTS", "true")
+        "dont_count_slow_torrents": env.get("HOMESERVER_QUEUE_IGNORE_SLOW_TORRENTS", "false")
         == "true",
         "dl_limit": integer("DOWNLOAD_LIMIT_BYTES", -1)
         if integer("DOWNLOAD_LIMIT_BYTES", -1) >= 0

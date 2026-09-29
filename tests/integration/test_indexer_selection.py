@@ -1,0 +1,134 @@
+import json
+from datetime import UTC, datetime, timedelta
+
+import httpx
+import pytest
+
+from homeserver_control.domain.torrent_bytes import inspect_torrent
+from homeserver_control.gateway.permits import PermitRegistry
+from homeserver_control.persistence.db import ReservationRepository
+from homeserver_control.worker.acquisition import MovieAcquirer
+from homeserver_control.worker.capacity_evidence import CapacityEvidence
+from homeserver_control.worker.release_quality import ReleasePolicy
+from homeserver_control.worker.series_acquisition import SeriesAcquirer
+
+
+def _encode(value):
+    if isinstance(value, int):
+        return b"i" + str(value).encode() + b"e"
+    if isinstance(value, bytes):
+        return str(len(value)).encode() + b":" + value
+    if isinstance(value, list):
+        return b"l" + b"".join(_encode(item) for item in value) + b"e"
+    return b"d" + b"".join(
+        _encode(key) + _encode(item) for key, item in sorted(value.items())
+    ) + b"e"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["movie", "series"])
+@pytest.mark.parametrize("fallback_threshold", [5, 20])
+@pytest.mark.parametrize(
+    "offers,expected,inspected_names",
+    [
+        ([('primary', 'UIndex (Prowlarr)', 1080, 10, 2_000_000_000),
+          ('backup', '1337x', 1080, 100, 2_000_000_000)], 'primary', ['primary']),
+        ([('primary', 'UIndex', 1080, 2, 2_000_000_000),
+          ('backup', '1337x (Prowlarr)', 1080, 20, 2_000_000_000)], 'backup',
+         ['primary', 'backup']),
+        ([('bad', 'UIndex', 1080, 100, 400_000_000),
+          ('backup', '1337x', 1080, 10, 2_000_000_000)], 'backup', ['bad', 'backup']),
+        ([('denied', 'BitSearch', 1080, 100, 2_000_000_000)], None, []),
+        ([('unknown', None, 1080, 100, 2_000_000_000)], None, []),
+        ([('unknown-seeds', 'UIndex.org', 1080, None, 2_000_000_000),
+          ('backup', '1337x', 1080, 10, 2_000_000_000)], 'backup',
+         ['unknown-seeds', 'backup']),
+    ],
+)
+async def test_movie_and_series_choose_uindex_then_seed_fallback_after_real_quality_validation(
+    tmp_path, kind, fallback_threshold, offers, expected, inspected_names,
+):
+    if expected == "primary" and fallback_threshold == 20:
+        expected, inspected_names = "backup", ["primary", "backup"]
+    repo = ReservationRepository(tmp_path / "control.sqlite")
+    repo.initialize()
+    media_key = "season:tmdb:101:1" if kind == "series" else "movie:tmdb:101"
+    reserved = repo.reserve(
+        request_id="fixture", source_id="fixture", media_key=media_key,
+        filesystem_id="fixture", budget_bytes=0, free_bytes=50_000_000_000,
+        total_bytes=100_000_000_000,
+    )
+    permits = PermitRegistry(repo.path)
+    title = "Fixture.S01E01" if kind == "series" else "Fixture"
+    torrents = {}
+    releases = []
+    for name, indexer, resolution, seeds, video_bytes in offers:
+        torrents[name] = _encode({b"info": {
+            b"name": name.encode(), b"piece length": 16_777_216,
+            b"pieces": b"a" * (20 * ((video_bytes + 1000 + 16_777_215) // 16_777_216)),
+            b"files": [
+                {b"path": [f"{title}.{name}.mkv".encode()], b"length": video_bytes},
+                {b"path": [f"{title}.{name}.pt-BR.srt".encode()], b"length": 1000},
+            ],
+        }})
+        metadata = inspect_torrent(torrents[name])
+        releases.append({
+            "guid": name, "indexer": indexer, "indexerId": 1, "seeders": seeds,
+            "title": f"{title} {resolution}p WEB-DL", "rejected": False,
+            "size": metadata.total_bytes, "infoHash": metadata.infohash,
+            "downloadUrl": f"http://prowlarr:9696/1/download?id={name}",
+            "languages": [{"name": "English"}],
+            "quality": {"quality": {
+                "source": "web" if kind == "series" else "webdl",
+                "modifier": "none", "resolution": resolution, "name": f"WEBDL-{resolution}p",
+            }},
+        })
+    inspected_names_actual, posted = [], []
+
+    def handler(request):
+        path = request.url.path
+        if path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if path == "/api/v3/config/mediamanagement":
+            return httpx.Response(200, json={"copyUsingHardlinks": True})
+        if path in ("/api/v3/movie", "/api/v3/series"):
+            return httpx.Response(200, json=[{
+                "id": 1, "tmdbId": 101, "monitored": True, "hasFile": False, "runtime": 45,
+                "originalLanguage": {"name": "English"},
+            }])
+        if path == "/api/v3/episode":
+            return httpx.Response(200, json=[{
+                "id": 1, "seasonNumber": 1, "episodeNumber": 1, "monitored": True,
+                "hasFile": False, "airDateUtc": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+            }])
+        if path == "/api/v3/release" and request.method == "GET":
+            return httpx.Response(200, json=releases)
+        if path == "/1/download":
+            name = request.url.params["id"]
+            inspected_names_actual.append(name)
+            return httpx.Response(200, content=torrents[name])
+        if path == "/api/v3/release" and request.method == "POST":
+            posted.append(json.loads(request.content)["guid"])
+            return httpx.Response(200, json={"accepted": True})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async def capacity():
+        return CapacityEvidence(free_bytes=50_000_000_000, remaining_by_hash={})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        options = dict(
+            repository=repo, permits=permits, prowlarr_url="http://prowlarr:9696", client=client,
+            capacity_provider=capacity, release_policy=ReleasePolicy.from_environment(
+                {"HOMESERVER_INDEXER_FALLBACK_MIN_SEEDERS": str(fallback_threshold)},
+                media_kind=kind,
+            ),
+        )
+        acquirer = (
+            SeriesAcquirer(sonarr_url="http://sonarr:8989", sonarr_api_key="fixture", **options)
+            if kind == "series" else
+            MovieAcquirer(radarr_url="http://radarr:7878", radarr_api_key="fixture", **options)
+        )
+        status = await acquirer.acquire(media_key, reserved.reservation_id)
+    assert status == ("grabbed" if expected else "no_eligible_release")
+    assert posted == ([expected] if expected else [])
+    assert inspected_names_actual == inspected_names

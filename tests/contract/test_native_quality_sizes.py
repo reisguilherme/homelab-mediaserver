@@ -300,6 +300,30 @@ async def test_legacy_partial_environment_never_reads_or_writes_quality_sizes():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("service, expected", [("sonarr", {3}), ("radarr", {3, 31})])
+async def test_movie_and_series_resolution_preferences_have_distinct_native_profiles(
+    service, expected
+):
+    native = NativeArr(
+        [
+            native_definition(11, 3, "WEBDL-1080p", "web", 1080, 20, None, 95),
+            native_definition(13, 31, "Bluray-2160p Remux", "blurayRaw", 2160, 50, None, 95),
+        ]
+    )
+    env = settings(HOMESERVER_MOVIE_RESOLUTIONS="2160,1080", HOMESERVER_SERIES_RESOLUTIONS="1080")
+    async with httpx.AsyncClient(
+        base_url=f"http://{service}", transport=httpx.MockTransport(native.request)
+    ) as client:
+        outcome = await reconcile_arr(service, env, client, "apply")
+    assert outcome.status == "verified"
+    assert {
+        item["quality"]["id"]
+        for item in native.collections["qualityprofile"][0]["items"]
+        if item["allowed"]
+    } == expected
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("service", ["radarr", "sonarr"])
 async def test_arr_import_guards_apply_without_overwriting_native_fields_and_are_idempotent(
     service,

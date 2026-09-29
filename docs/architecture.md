@@ -21,7 +21,8 @@ flowchart LR
 O worker escolhe fontes elegíveis e reserva os bytes pendentes reais.
 Episódios podem baixar em paralelo na janela configurada por série;
 a importação no Jellyfin mantém temporadas e episódios em ordem estrita. A fonte atual continua durante a avaliação
-de uma alternativa; qualidade, edição e velocidade medida governam a troca.
+de uma alternativa; qualidade e edição governam a recuperação. Troca por
+velocidade está desligada por padrão e pode ser habilitada no `.env`.
 Seeds anunciados são um sinal de disponibilidade, não garantia de throughput.
 
 Antes de publicar no Jellyfin, o fluxo valida arquivo, legenda e importação.

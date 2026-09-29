@@ -203,7 +203,9 @@ class SeriesFinalizer(MovieFinalizer):
         )
         if torrent is None:
             return None
-        if torrent.get("progress") != 1 or torrent.get("amount_left") != 0:
+        if permit.season_pack_parent_id is None and (
+            torrent.get("progress") != 1 or torrent.get("amount_left") != 0
+        ):
             return None
         content_path = torrent.get("content_path")
         if not isinstance(content_path, str):
@@ -218,6 +220,13 @@ class SeriesFinalizer(MovieFinalizer):
         files = response.json()
         if not isinstance(files, list):
             raise ValidationError("gateway file response is invalid")
+        if permit.season_pack_parent_id is not None:
+            completed = {
+                item["name"] for item in files if isinstance(item, dict)
+                and isinstance(item.get("name"), str) and item.get("progress") == 1
+            }
+            if not set(permit.selected_files).issubset(completed):
+                return None
         sizes = {
             item["name"]: item["size"]
             for item in files
@@ -270,7 +279,13 @@ class SeriesFinalizer(MovieFinalizer):
         original_ptbr = self.subtitle_policy.waives_subtitles(validated.probe)
         name = torrent.get("name")
         return (
-            content_path,
+            # Scanning the complete pack folder lets Sonarr import later files
+            # before this controller validates their subtitles and episode order.
+            "/data/torrents/" + next(
+                relative for relative in permit.selected_files
+                if PurePosixPath(relative).suffix.lower() in _VIDEO
+            )
+            if permit.season_pack_parent_id is not None else content_path,
             brazilian_ready,
             english_ready,
             original_ptbr,

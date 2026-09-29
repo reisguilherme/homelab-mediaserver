@@ -94,11 +94,14 @@ def test_bcp47_matching_preserves_explicit_regions():
         ({}, "Fixture Atmos"),
     ],
 )
-def test_audio_preference_does_not_override_existing_quality_preferences(quality, title):
+def test_resolution_precedes_audio_while_source_and_hdr_are_tiebreakers(quality, title):
     policy = ReleasePolicy(audio_languages=("pt-BR",))
     higher_quality = _release(languages=["en"], title=title, **quality)
     preferred_audio = _release(languages=["pt-BR"], seeders=100)
-    assert policy.rank(higher_quality) > policy.rank(preferred_audio)
+    if quality.get("resolution") == 2160:
+        assert policy.rank(higher_quality) > policy.rank(preferred_audio)
+    else:
+        assert policy.rank(preferred_audio) > policy.rank(higher_quality)
 
 
 @pytest.mark.parametrize("languages", [None, True, [True, {}, {"id": 1}], ["Unknown"]])

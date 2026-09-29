@@ -574,4 +574,26 @@ def test_worker_reads_subdl_key_from_environment(tmp_path, monkeypatch) -> None:
     assert cycle.series_acquirer.subtitle_source.api_key == "test-subdl-key"
     assert cycle.series_acquirer.gateway_url == "http://download-gateway:8081"
     assert cycle.series_acquirer.arr_token == "gateway-test"
+    assert cycle.acquirer.health_store.slow_replacement_enabled is False
+    assert cycle.series_acquirer.health_store.slow_replacement_enabled is False
+    assert cycle.acquirer.release_policy.resolutions == (2160, 1080)
+    assert cycle.series_acquirer.release_policy.resolutions == (1080,)
+    assert cycle.series_acquirer.prefer_season_pack is True
+    assert cycle.series_acquirer.release_affinity is True
     assert cycle.movie_prioritizer.gateway_url == "http://download-gateway:8081"
+
+
+def test_worker_can_disable_pack_and_affinity_preferences(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HOMESERVER_SEERR_URL", "http://seerr:5055")
+    monkeypatch.setenv("HOMESERVER_SEERR_API_KEY", "fixture")
+    monkeypatch.setenv("HOMESERVER_CAPACITY_SNAPSHOT", str(tmp_path / "capacity.json"))
+    monkeypatch.setenv("HOMESERVER_RECOVERY_MODE", str(tmp_path / "RECOVERY_MODE"))
+    monkeypatch.setenv("HOMESERVER_SONARR_URL", "http://sonarr:8989")
+    monkeypatch.setenv("HOMESERVER_SONARR_API_KEY", "fixture")
+    monkeypatch.setenv("HOMESERVER_ARR_TOKEN", "fixture")
+    monkeypatch.setenv("HOMESERVER_SERIES_PREFER_SEASON_PACK", "false")
+    monkeypatch.setenv("HOMESERVER_SERIES_RELEASE_AFFINITY", "false")
+    cycle = _build_cycle(tmp_path / "control.sqlite")
+    assert cycle is not None
+    assert cycle.series_acquirer.prefer_season_pack is False
+    assert cycle.series_acquirer.release_affinity is False

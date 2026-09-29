@@ -62,6 +62,19 @@ def release_seeders(release: dict[str, object]) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
+def release_indexer(release: dict[str, object]) -> str | None:
+    """Trust the Arr indexer label, never a torrent title claiming another source."""
+    name = release.get("indexer")
+    if not isinstance(name, str):
+        return None
+    name = re.sub(r"\s*\(prowlarr\)\s*$", "", name.strip(), flags=re.I).lower()
+    if name in ("uindex", "uindex.org", "www.uindex.org"):
+        return "uindex"
+    if name in ("1337x", "1337x.to", "www.1337x.to"):
+        return "1337x"
+    return None
+
+
 @dataclass(frozen=True)
 class ReleasePolicy:
     resolutions: tuple[int, ...] = (2160, 1080)
@@ -71,12 +84,23 @@ class ReleasePolicy:
     automatic_upgrades: bool = False
     audio_languages: tuple[str, ...] = ("original",)
     minimum_mib_per_min: tuple[tuple[int, float], ...] = ((720, 10), (1080, 20), (2160, 50))
+    indexer_priority: tuple[str, ...] = ("uindex", "1337x")
+    indexer_fallback_min_seeders: int = 5
 
     @classmethod
-    def from_environment(cls, environment: Mapping[str, str]):
+    def from_environment(cls, environment: Mapping[str, str], *, media_kind="movie"):
+        if media_kind not in {"movie", "series"}:
+            raise ValueError("invalid release media kind")
+        configured_resolutions = (
+            environment.get("HOMESERVER_SERIES_RESOLUTIONS", "1080")
+            if media_kind == "series" else environment.get(
+                "HOMESERVER_MOVIE_RESOLUTIONS",
+                environment.get("HOMESERVER_MEDIA_RESOLUTIONS", "2160,1080"),
+            )
+        )
         resolutions = tuple(
             int(value)
-            for value in environment.get("HOMESERVER_MEDIA_RESOLUTIONS", "2160,1080").split(",")
+            for value in configured_resolutions.split(",")
         )
         sources = tuple(
             environment.get("HOMESERVER_MEDIA_SOURCES", "remux,bluray,webdl").split(",")
@@ -99,6 +123,10 @@ class ReleasePolicy:
                 )
                 for resolution, minimum in ((720, 10), (1080, 20), (2160, 50))
             ),
+            tuple(environment.get(
+                "HOMESERVER_RELEASE_INDEXER_PRIORITY", "uindex,1337x"
+            ).split(",")),
+            int(environment.get("HOMESERVER_INDEXER_FALLBACK_MIN_SEEDERS", "5")),
         )
 
     def rank(self, release: dict[str, object], *, original_language: object = None):
@@ -168,11 +196,11 @@ def release_rank(
     size = release.get("size")
     seeders = release_seeders(release)
     return (
-        tier,
-        len(policy.resolutions) - policy.resolutions.index(resolution),
-        int(policy.prefer_dolby_vision and bool(_DOLBY_VISION.search(title))),
-        int(policy.prefer_atmos and bool(_ATMOS.search(title))),
+        resolution,
         _audio_preference(release, policy.audio_languages, original_language),
         seeders if seeders is not None else -1,
+        tier,
+        int(policy.prefer_dolby_vision and bool(_DOLBY_VISION.search(title))),
+        int(policy.prefer_atmos and bool(_ATMOS.search(title))),
         size if isinstance(size, int) and size > 0 else 0,
     )

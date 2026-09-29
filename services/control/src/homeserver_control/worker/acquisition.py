@@ -8,6 +8,7 @@ import re
 import sqlite3
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import aclosing
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from urllib.parse import urlsplit
@@ -15,14 +16,18 @@ from urllib.parse import urlsplit
 import httpx
 
 from homeserver_control.domain.magnet import magnet_infohash
-from homeserver_control.domain.torrent_bytes import TorrentBytesError, inspect_torrent
+from homeserver_control.domain.torrent_bytes import (
+    TorrentBytesError,
+    inspect_torrent,
+    merge_magnet_trackers,
+)
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
 from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 
 from .capacity_evidence import CapacityEvidence
-from .release_quality import release_rank, release_seeders
+from .release_quality import release_indexer, release_rank, release_seeders
 from .source_health import SourceHealthStore, TorrentHealth
 from .source_probe import (
     LiveSourceProbes,
@@ -175,6 +180,36 @@ class MovieAcquirer(LiveSourceProbes):
             if self.release_policy
             else release_rank(release, original_language=original_language)
         )
+
+    async def _preferred_indexer_candidates(self, ordered, *, eligible, rank):
+        """Inspect the primary source first; open fallback only for weak/no results."""
+        if self.release_policy is None:
+            async with aclosing(eligible(ordered)) as candidates:
+                async for candidate in candidates:
+                    yield candidate
+            return
+        priorities = self.release_policy.indexer_priority
+        primary_releases = [item for item in ordered if release_indexer(item) == priorities[0]]
+        fallback_releases = [item for item in ordered if release_indexer(item) in priorities[1:]]
+        async with aclosing(eligible(primary_releases)) as primary:
+            first = await anext(primary, None)
+            seeds = release_seeders(first[0]) if first is not None else None
+            if seeds is not None and seeds >= self.release_policy.indexer_fallback_min_seeders:
+                yield first
+                async for candidate in primary:
+                    yield candidate
+                return
+            async with aclosing(eligible(fallback_releases)) as fallback:
+                second = await anext(fallback, None)
+                while first is not None or second is not None:
+                    if second is None or (
+                        first is not None and rank(first[0]) >= rank(second[0])
+                    ):
+                        yield first
+                        first = await anext(primary, None)
+                    else:
+                        yield second
+                        second = await anext(fallback, None)
 
     def _acceptable_video_size(self, release, torrent, runtime_minutes):
         if self.release_policy is None:
@@ -422,9 +457,9 @@ class MovieAcquirer(LiveSourceProbes):
                     try:
                         if inspect_torrent(cached).infohash != infohash:
                             return None
+                        return merge_magnet_trackers(cached, response.headers["location"])
                     except TorrentBytesError:
                         return None
-                    return cached
                 if response.status_code != 200:
                     return None
                 content_length = response.headers.get("content-length")
@@ -715,11 +750,13 @@ class MovieAcquirer(LiveSourceProbes):
             if replacement_reason
             else set()
         )
-        candidates = self._eligible_movie_releases(
+        candidates = self._preferred_indexer_candidates(
             ordered,
-            replacement_reason=replacement_reason,
-            excluded_infohashes=excluded,
-            runtime_minutes=movie.get("runtime"),
+            eligible=lambda group: self._eligible_movie_releases(
+                group, replacement_reason=replacement_reason,
+                excluded_infohashes=excluded, runtime_minutes=movie.get("runtime"),
+            ),
+            rank=rank,
         )
         async for candidate in self._prioritize_replacements(
             candidates,

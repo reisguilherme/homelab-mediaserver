@@ -8,6 +8,57 @@ from .credential_state import CredentialState
 from .native_config import NativeConfigurationError, ServiceOutcome, environment, plan_settings
 
 
+def configured_resolutions(service, env):
+    field = (
+        "HOMESERVER_MOVIE_RESOLUTIONS" if service == "radarr" else "HOMESERVER_SERIES_RESOLUTIONS"
+    )
+    legacy = env.get("HOMESERVER_MEDIA_RESOLUTIONS", "2160,1080" if service == "radarr" else "1080")
+    return set(map(int, env.get(field, legacy).split(",")))
+
+
+async def reconcile_indexer_filters(service, settings, client, mode):
+    """Keep native search restricted to the same named sources as worker selection."""
+    env = environment(settings)
+    if "HOMESERVER_RELEASE_INDEXER_PRIORITY" not in env:
+        return []
+    from homeserver_control.worker.release_quality import release_indexer
+
+    allowed = set(env["HOMESERVER_RELEASE_INDEXER_PRIORITY"].split(","))
+    endpoint = "/api/v1/indexer" if service == "prowlarr" else "/api/v3/indexer"
+    response = await client.get(endpoint)
+    response.raise_for_status()
+    rows = response.json()
+    if not isinstance(rows, list) or any(
+        not isinstance(row, dict)
+        or type(row.get("id")) is not int
+        or not isinstance(row.get("name"), str)
+        for row in rows
+    ):
+        raise NativeConfigurationError("Native indexer schema unsupported")
+    changes = []
+    for current in rows:
+        enabled = release_indexer({"indexer": current["name"]}) in allowed
+        desired = (
+            {"enable": enabled}
+            if service == "prowlarr"
+            else {
+                "enableRss": False,
+                "enableAutomaticSearch": False,
+                "enableInteractiveSearch": enabled,
+            }
+        )
+        changes += await collection(
+            service,
+            client,
+            endpoint,
+            {"id": current["id"], "name": current["name"], **desired},
+            "name",
+            mode,
+            settings=settings,
+        )
+    return changes
+
+
 def native_quality_source(quality):
     """Normalize native names without treating WEBRip as WEB-DL."""
     source = str(quality.get("source", "")).lower()
@@ -32,7 +83,7 @@ async def reconcile_quality_sizes(service, env, client, mode):
     }
     if not minimums:
         return []
-    resolutions = set(map(int, env.get("HOMESERVER_MEDIA_RESOLUTIONS", "2160,1080").split(",")))
+    resolutions = configured_resolutions(service, env)
     sources = set(env.get("HOMESERVER_MEDIA_SOURCES", "remux,bluray,webdl").split(","))
     endpoint = "/api/v3/qualitydefinition"
     response = await client.get(endpoint)
@@ -259,7 +310,8 @@ async def collection(service, client, endpoint, desired, identity, mode, *, sett
     if changes and mode == "apply":
         payload = current | desired
         if service == "seerr" and endpoint in (
-            "/api/v1/settings/radarr", "/api/v1/settings/sonarr"
+            "/api/v1/settings/radarr",
+            "/api/v1/settings/sonarr",
         ):
             # Seerr identifies existing instances through the route; its schema
             # rejects the read-only id in a request body.
@@ -309,11 +361,19 @@ async def reconcile_arr(service, settings, client, mode):
             service, "unsupported", changes, "Native import guard schema unsupported"
         )
     changes += guard_changes
+    changes += await reconcile_indexer_filters(service, settings, client, mode)
     if root:
         changes += await collection(
             service, client, "/api/v3/rootfolder", {"path": root}, "path", mode
         )
-    if "HOMESERVER_MEDIA_RESOLUTIONS" in env:
+    if any(
+        key in env
+        for key in (
+            "HOMESERVER_MEDIA_RESOLUTIONS",
+            "HOMESERVER_MOVIE_RESOLUTIONS",
+            "HOMESERVER_SERIES_RESOLUTIONS",
+        )
+    ):
         response = await client.get("/api/v3/qualityprofile/schema")
         response.raise_for_status()
         template = response.json()
@@ -324,7 +384,7 @@ async def reconcile_arr(service, settings, client, mode):
         profile = deepcopy(template)
         profile.pop("id", None)
         profile["name"] = "HomeServer"
-        resolutions = set(map(int, env.get("HOMESERVER_MEDIA_RESOLUTIONS", "2160,1080").split(",")))
+        resolutions = configured_resolutions(service, env)
         sources = set(env.get("HOMESERVER_MEDIA_SOURCES", "remux,bluray,webdl").split(","))
 
         def configure(items):

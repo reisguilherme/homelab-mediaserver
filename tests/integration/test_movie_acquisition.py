@@ -4,6 +4,7 @@ import json
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlencode
 
 import httpx
 import pytest
@@ -456,7 +457,7 @@ async def test_acquirer_retries_authorized_permit_after_restart(tmp_path):
                 ("bluray", "Film 2160p BluRay", "bluray", "none", 2160, "1337x"),
                 ("remux", "Film 1080p BluRay REMUX", "bluray", "remux", 1080, "1337x"),
             ],
-            "remux",
+            "bluray",
         ),
         (
             [
@@ -630,6 +631,71 @@ async def test_acquirer_resolves_magnet_to_verified_cached_torrent(tmp_path):
     assert len(grabbed) == 1
     assert b'"downloadUrl":"http://prowlarr:9696/2/download?id=1"' in grabbed[0]
     assert permits.get_for_reservation(reservation_id).infohash == inspected.infohash
+
+
+@pytest.mark.asyncio
+async def test_acquirer_preserves_redirect_trackers_in_cached_gateway_artifact(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path)
+    store = TorrentArtifactStore(repo.path)
+    torrent = _torrent(subtitle=True)
+    inspected = inspect_torrent(torrent)
+    trackers = [
+        "udp://open.demonii.com:1337/announce", "udp://exodus.desync.com:6969/announce",
+        "udp://open.stealth.si:80/announce", "udp://tracker.bittor.pw:1337/announce",
+        "udp://tracker.dler.org:6969/announce", "udp://tracker.opentrackr.org:1337/announce",
+        "udp://tracker.torrent.eu.org:451/announce",
+    ]
+    magnet = "magnet:?" + urlencode([
+        ("xt", f"urn:btih:{inspected.infohash}"), *(("tr", item) for item in trackers),
+    ])
+    metadata_requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/movie":
+            return httpx.Response(200, json=[{"id": 2, "tmdbId": 1101383, "hasFile": False}])
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            return httpx.Response(200, json=[{
+                "guid": "uindex-magnet", "indexerId": 2,
+                "title": "Film 2160p BluRay REMUX DV Atmos", "size": inspected.total_bytes,
+                "downloadUrl": "http://prowlarr:9696/2/download?id=1",
+                "infoHash": inspected.infohash, "rejected": False,
+                "quality": {"quality": {
+                    "source": "bluray", "modifier": "remux", "resolution": 2160,
+                }},
+            }])
+        if request.url.path == "/2/download":
+            metadata_requests.append(str(request.url))
+            return httpx.Response(301, headers={"location": magnet})
+        if request.url.host == "itorrents.net":
+            metadata_requests.append(str(request.url))
+            return httpx.Response(200, content=torrent)
+        if request.url.path == "/api/v3/release" and request.method == "POST":
+            return httpx.Response(200, json={"ok": True})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        acquirer = MovieAcquirer(
+            repository=repo, permits=permits, radarr_url="http://radarr:7878",
+            radarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
+            torrent_store=store,
+        )
+        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "grabbed"
+
+    permit = permits.get_for_reservation(reservation_id)
+    saved = store.get(permit)
+    assert saved is not None
+    assert b"13:announce-list" in saved
+    assert all(item.encode() in saved for item in trackers)
+    assert inspect_torrent(saved).infohash == inspected.infohash
+    assert inspect_torrent(saved).files == inspected.files
+    assert permit.metadata_sha256 == inspect_torrent(saved).metadata_sha256
+    assert permit.metadata_sha256 != inspected.metadata_sha256
+    assert metadata_requests == [
+        "http://prowlarr:9696/2/download?id=1",
+        f"https://itorrents.net/torrent/{inspected.infohash.upper()}.torrent",
+    ]
 
 
 @pytest.mark.asyncio

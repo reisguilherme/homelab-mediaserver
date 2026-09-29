@@ -1,7 +1,7 @@
 import json
 from copy import deepcopy
 
-from .arr import collection
+from .arr import collection, reconcile_indexer_filters
 from .native_config import NativeConfigurationError, ServiceOutcome, environment, plan_settings
 
 BYPARR_TAG = "homeserver-byparr"
@@ -69,6 +69,15 @@ async def bind_byparr_tag(client, endpoint, desired, tag_id):
 async def reconcile_prowlarr(settings, client, mode):
     env = environment(settings)
     desired = json.loads(env.get("HOMESERVER_PROWLARR_INDEXERS", "[]"))
+    if "HOMESERVER_RELEASE_INDEXER_PRIORITY" in env:
+        from homeserver_control.worker.release_quality import release_indexer
+
+        allowed = set(env["HOMESERVER_RELEASE_INDEXER_PRIORITY"].split(","))
+        desired = [
+            item
+            for item in desired
+            if isinstance(item, dict) and release_indexer({"indexer": item.get("name")}) in allowed
+        ]
     changes = []
     byparr_tag_id = None
     for service, port in [("radarr", 7878), ("sonarr", 8989)]:
@@ -149,9 +158,7 @@ async def reconcile_prowlarr(settings, client, mode):
                 changes += plan_settings(
                     "prowlarr", {}, {"byparr.tagId": "Resolve native linkage tag ID after apply"}
                 )
-                return ServiceOutcome(
-                    "prowlarr", "planned" if mode == "plan" else "drift", changes
-                )
+                return ServiceOutcome("prowlarr", "planned" if mode == "plan" else "drift", changes)
             raise NativeConfigurationError("Native proxy linkage tag read-back drift")
         byparr_tag_id = matches[0]["id"]
         proxy = await bind_byparr_tag(client, "/api/v1/indexerProxy", proxy, byparr_tag_id)
@@ -263,6 +270,7 @@ async def reconcile_prowlarr(settings, client, mode):
         changes += await collection(
             "prowlarr", client, "/api/v1/indexer", item, "name", mode, settings=settings
         )
+    changes += await reconcile_indexer_filters("prowlarr", settings, client, mode)
     return ServiceOutcome(
         "prowlarr",
         "drift"

@@ -177,7 +177,7 @@ def create_app(
     async def delete_source(
         request: Request, x_arr_token: str | None = Header(default=None)
     ) -> dict[str, str]:
-        """Remove one explicitly deleted item's exclusive, verified qBit source."""
+        """Remove an exclusive source or retain a pack still serving other episodes."""
         if arr_token == "unconfigured" or not token_matches(x_arr_token, arr_token):
             raise HTTPException(status_code=403, detail="worker credential required")
         if torrent_store is None:
@@ -194,12 +194,26 @@ def create_app(
             or (body["scope_key"] is not None and not isinstance(body["scope_key"], str))
         ):
             raise HTTPException(status_code=422, detail="invalid media source identity")
-        try:
-            permit = permits.deletion_source(
+
+        def resolve_source() -> tuple[Permit, Permit | None]:
+            parent = permits.get(body["permit_token"])
+            if parent is not None and re.fullmatch(r"S[0-9]{2,}PACK", parent.scope_key or ""):
+                episode = permits.season_pack_deletion_source(
+                    token=body["permit_token"],
+                    media_key=body["media_key"],
+                    scope_key=body["scope_key"],
+                )
+                if episode.season_pack_parent_id != parent.permit_id:
+                    raise ValueError("season pack parent changed")
+                return parent, episode
+            return permits.deletion_source(
                 token=body["permit_token"],
                 media_key=body["media_key"],
                 scope_key=body["scope_key"],
-            )
+            ), None
+
+        try:
+            permit, pack_episode = resolve_source()
         except PermissionError as error:
             raise HTTPException(status_code=403, detail=str(error)) from error
         except ValueError as error:
@@ -220,6 +234,10 @@ def create_app(
             or inspected.total_bytes != permit.budget_bytes
         ):
             raise HTTPException(status_code=409, detail="torrent contains other media")
+        if pack_episode is not None and not set(pack_episode.selected_files).issubset(
+            {item.path for item in inspected.files}
+        ):
+            raise HTTPException(status_code=409, detail="season pack episode files changed")
 
         entries = upstream.read("/api/v2/torrents/info", {"hashes": permit.infohash})
         if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
@@ -261,17 +279,35 @@ def create_app(
         if len(files) != len(actual_files) or actual_files != expected_files:
             raise HTTPException(status_code=409, detail="torrent files changed")
 
-        # Recheck the persistent permit immediately before the destructive call.
+        # Recheck the binding and the physical owner before retaining or deleting.
         try:
-            current_permit = permits.deletion_source(
-                token=body["permit_token"],
-                media_key=body["media_key"],
-                scope_key=body["scope_key"],
-            )
+            current_permit, current_episode = resolve_source()
         except (PermissionError, ValueError) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
-        if current_permit.permit_id != permit.permit_id:
+        if current_permit != permit or current_episode != pack_episode:
             raise HTTPException(status_code=409, detail="source permit changed")
+        if pack_episode is not None:
+            try:
+                all_deleted = permits.season_pack_fully_deleted(
+                    token=body["permit_token"],
+                    media_key=body["media_key"],
+                )
+            except (PermissionError, ValueError) as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            if not all_deleted:
+                return {"state": "retained_shared"}
+            # Tombstones are durable explicit deletions, never a watched-state signal.
+            # Every bound episode must still be deleted immediately before qBit purge.
+            try:
+                final_owner, final_episode = resolve_source()
+                still_deleted = permits.season_pack_fully_deleted(
+                    token=body["permit_token"],
+                    media_key=body["media_key"],
+                )
+            except (PermissionError, ValueError) as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            if final_owner != permit or final_episode != pack_episode or not still_deleted:
+                raise HTTPException(status_code=409, detail="season pack deletion scope changed")
         upstream.delete_torrent(permit.infohash, delete_files=True)
         after = upstream.read("/api/v2/torrents/info", {"hashes": permit.infohash})
         if not isinstance(after, list) or any(not isinstance(item, dict) for item in after):

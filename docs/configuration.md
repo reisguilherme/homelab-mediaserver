@@ -25,7 +25,8 @@ Valores sem aspas perdem espaços externos; aspas simples delimitam texto
 literal. Aspas duplas usam escapes JSON. O exemplo usa strings JSON:
 
 ```dotenv
-HOMESERVER_MEDIA_RESOLUTIONS="2160,1080"
+HOMESERVER_MOVIE_RESOLUTIONS="2160,1080"
+HOMESERVER_SERIES_RESOLUTIONS="1080"
 HOMESERVER_ADMIN_PASSWORD="preencha sua senha"
 HOMESERVER_SUBTITLE_SKIP_ORIGINAL_AUDIO_LANGUAGES=""
 ```
@@ -41,10 +42,11 @@ arquivo, sem criar arquivos de segredo separados. Veja
 
 | Parâmetro, com prefixo `HOMESERVER_` | Default | Unidade e efeito |
 |---|---|---|
-| `DOWNLOAD_MAX_ACTIVE` | 4 | Downloads simultâneos globais |
-| `SERIES_DOWNLOAD_WINDOW` | 4 | Janela de episódios ainda não importados por série |
-| `SEED_MAX_ACTIVE` | 8 | Torrents em seeding simultâneos |
-| `TORRENT_MAX_ACTIVE` | 12 | Total ativo nativo qBit |
+| `DOWNLOAD_MAX_ACTIVE` | 10 | Downloads simultâneos globais |
+| `SERIES_DOWNLOAD_WINDOW` | 10 | Janela de episódios ainda não importados por série |
+| `SEED_MAX_ACTIVE` | -1 | Torrents em seeding; -1 deixa a quantidade ilimitada |
+| `TORRENT_MAX_ACTIVE` | -1 | Total ativo nativo qBit; -1 deixa a quantidade ilimitada |
+| `QUEUE_IGNORE_SLOW_TORRENTS` | false | Downloads lentos também contam no limite global |
 | `UPLOAD_LIMIT_MBIT` | 20 | Mbit/s; zero é ilimitado |
 | `DOWNLOAD_LIMIT_MBIT` | 0 | Mbit/s; zero é ilimitado |
 | `TORRENT_MAX_CONNECTIONS` | 500 | Conexões globais |
@@ -55,7 +57,10 @@ arquivo, sem criar arquivos de segredo separados. Veja
 
 Mbit/s é decimal: 20 Mbit/s equivale a 2.500.000 bytes/s. qBit pode arredondar
 para KiB inteiros; o read-back mostra o valor efetivo. O total ativo deve
-comportar os limites individuais. Contribuir com seeding depende de upload,
+comportar os limites individuais; se seeding é ilimitado, o total também deve
+ser ilimitado. Os limites de ratio/tempo ficam desligados por padrão: a banda
+de upload limita o envio, sem restringir a quantidade de arquivos disponíveis.
+Contribuir com seeding depende de upload,
 peers e disco disponíveis, não somente do limite configurado.
 
 Capacidade considera tamanho solicitado, bytes já baixados, bytes ainda
@@ -66,20 +71,30 @@ fixa de 80 GB por filme nem teto estático de tamanho.
 
 | Parâmetro | Default | Efeito |
 |---|---|---|
-| `MEDIA_RESOLUTIONS` | 2160,1080 | Resoluções aceitas em ordem de preferência |
+| `MOVIE_RESOLUTIONS` | 2160,1080 | Filmes: 4K com fallback em 1080p |
+| `SERIES_RESOLUTIONS` | 1080 | Séries: somente 1080p |
 | `MEDIA_SOURCES` | remux,bluray,webdl | Fontes aceitas; WEBRip/TV ficam excluídas |
+| `RELEASE_INDEXER_PRIORITY` | uindex,1337x | Fontes nativas habilitadas e ordem de seleção |
+| `INDEXER_FALLBACK_MIN_SEEDERS` | 5 | Consultar alternativas quando a fonte principal tem menos seeds anunciados |
+| `SERIES_PREFER_SEASON_PACK` | true | Preferir torrent de temporada completa elegível com seeds suficientes |
+| `SERIES_RELEASE_AFFINITY` | true | Favorecer o mesmo indexador e família de releases saudáveis na série |
 | `PREFER_DOLBY_VISION`, `PREFER_ATMOS` | true, true | Preferências de vídeo/áudio |
 | `QUALITY_MIN_MIB_PER_MIN_720` | 10 | Piso MiB/min do vídeo principal |
 | `QUALITY_MIN_MIB_PER_MIN_1080` | 20 | Piso MiB/min do vídeo principal |
 | `QUALITY_MIN_MIB_PER_MIN_2160` | 50 | Piso MiB/min do vídeo principal |
 | `AUTOMATIC_UPGRADES` | false | Atualizações automáticas após aquisição |
+| `SOURCE_SLOW_REPLACEMENT_ENABLED` | false | Troca por velocidade desativada; zero progresso ainda pode acionar recuperação |
 | `SOURCE_SLOW_WINDOW_SECONDS`, `SOURCE_STALL_SECONDS` | 300, 300 | Janela de lentidão ou falta de progresso |
 | `SOURCE_MIN_RATE_KIB` | 1024 | KiB/s; limiar de lentidão |
 | `SOURCE_PROBE_SECONDS` | 60 | Medição da candidata |
 | `SOURCE_MIN_TIME_GAIN_PERCENT` | 20 | Melhoria mínima do ETA medido |
 
-Fonte, resolução, Dolby Vision e Atmos precedem idioma de áudio e seeds na
-escolha da release. Filmes elegíveis podem passar à frente por seeds.
+A seleção avalia UIndex primeiro. Quando não encontra uma release elegível ou
+ela tem menos de cinco seeds anunciados, avalia 1337x. As buscas HTTP nativas
+dos Arr podem consultar ambos; a inspeção de metadados e a escolha respeitam
+essa prioridade. Dentro da fonte, maior resolução permitida e idioma original
+declarado precedem seeds; fonte/Dolby Vision/Atmos desempatarão candidatos.
+O piso MiB/min continua obrigatório. Filmes elegíveis podem passar à frente por seeds.
 Séries podem baixar em paralelo dentro de `SERIES_DOWNLOAD_WINDOW`, respeitando
 o limite global. A janela contém os primeiros episódios ainda não importados:
 um episódio sem fonte ou lento não impede buscar os seguintes dessa janela.
@@ -89,17 +104,40 @@ Episódios desmonitorados ou futuros conhecidos não bloqueiam a cadeia.
 Um episódio completo aguardando importação não conta como download ativo.
 Seeds anunciados não garantem velocidade real.
 
+Séries favorecem a mesma família (grupo de release e origem, como AMZN/DSNP)
+quando ela tem seeds suficientes; a afinidade não prende a série a uma fonte
+fraca. Um pacote precisa conter todos os episódios esperados da temporada,
+com um vídeo válido por episódio e piso de qualidade individual. É uma única
+transferência e uma única reserva do tamanho total, incluindo episódios já
+baixados separadamente se o pacote os contém. Os vínculos desses episódios
+preservam os arquivos existentes. Cada importação aponta somente ao arquivo
+do próximo episódio, mantendo a ordem mesmo quando o pacote baixa em paralelo.
+Pacotes com caminhos que colidem com uma fonte preservada são recusados;
+nesses casos a aquisição continua por episódio.
+Ao excluir um episódio pelo Jellyfin, o fluxo remove sua entrada e arquivo
+da biblioteca e dos serviços. Um pacote compartilhado permanece no qBit
+enquanto serve outros episódios; o espaço físico dessa fonte só é liberado
+depois que todos os episódios vinculados forem explicitamente excluídos.
+Nesse momento o gateway revalida o pacote e remove seu torrent e arquivo.
+
+Magnets têm seus trackers incorporados aos metadados verificados antes do
+envio ao qBit. O conteúdo identificado pelo infohash permanece igual.
+
 Os pisos recusam encodes muito pequenos, usando bytes do vídeo principal e
 duração declarada, sem somar samples/sidecars. Tamanho não garante qualidade
 visual. Zero desativa o piso daquela resolução; duração desconhecida não
 comprova um piso habilitado. Essa regra vale também para candidatas de failover,
 sem apagar arquivos existentes.
 
-Após cinco minutos lento ou sem progresso, o worker busca e mede uma candidata
+Com `SOURCE_SLOW_REPLACEMENT_ENABLED=false`, a velocidade baixa não dispara
+troca. Se a flag for habilitada, após cinco minutos lento o worker busca e mede uma candidata
 mantendo o download atual. Promoção exige qualidade/edição compatíveis,
 capacidade conjunta e previsão de término melhor. Pausas por operador/capacidade
-e torrents completos não disparam troca. Alterações da política orientam
+e torrents completos não disparam troca. Ausência sustentada de progresso
+continua sujeita à recuperação após `SOURCE_STALL_SECONDS`. Alterações da política orientam
 seleções futuras; não autorizam cancelar aquisições em andamento.
+Essa recuperação automática atende torrents individuais. Um pacote de temporada
+já admitido ainda requer intervenção se sua fonte ficar sem progresso.
 
 ## Idiomas de áudio e legenda
 
@@ -130,8 +168,12 @@ português genérico não bastam. Valor vazio desativa a dispensa.
 
 ## Indexadores, provedores e credenciais
 
-`PROWLARR_INDEXERS` começa como `[]`. Configure fontes públicas e suas
+`PROWLARR_INDEXERS` começa como `[]`. Cadastre UIndex e 1337x com suas
 definições nativas conforme [o guia dos serviços](runbooks/service-setup.md).
+`RELEASE_INDEXER_PRIORITY` limita tanto a escolha do worker quanto os
+indexadores habilitados no Prowlarr/Arr; os demais ficam desativados, sem apagar
+suas configurações. `MEDIA_RESOLUTIONS` é um alias legado de `MOVIE_RESOLUTIONS`;
+novas instalações usam as duas preferências de resolução separadas.
 `BYPARR_ENABLED` controla o proxy para desafios Cloudflare. Provedores de
 legendas usam `SUBTITLE_PROVIDERS` e `BAZARR_PROVIDERS`, com suas credenciais:
 

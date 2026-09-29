@@ -41,7 +41,7 @@ def example_env():
         elif field.consumer == "qbittorrent" or name == "series_download_window":
             group = "Downloads, conexões e seeding"
         elif field.consumer == "worker":
-            group = "Busca e troca de fontes lentas"
+            group = "Seleção de fontes e recuperação de downloads"
         elif field.consumer == "quality":
             group = "Qualidade e áudio — listas em ordem de preferência"
         elif field.consumer in ("subtitles", "bazarr"):

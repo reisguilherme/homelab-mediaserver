@@ -226,6 +226,22 @@ class DeletionCoordinator:
                     (rows[0]["id"], scope),
                 ).fetchall()
             )
+            pack_table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='season_pack_episodes' AND type='table'"
+            ).fetchone()
+            if permit_table is not None and pack_table is not None and scope is not None:
+                permits.extend(
+                    connection.execute(
+                        "SELECT p.token, p.state FROM gateway_permits p "
+                        "JOIN season_pack_episodes e ON e.parent_permit_id=p.permit_id "
+                        "WHERE p.reservation_id=? AND e.scope_key=? "
+                        "AND p.state IN ('authorized','dispatching','unknown','confirmed')"
+                        + (
+                            " AND p.probe_parent_id IS NULL" if "probe_parent_id" in columns else ""
+                        ),
+                        (rows[0]["id"], scope),
+                    ).fetchall()
+                )
         if len(permits) > 1:
             raise DeletionBlocked("multiple active torrent permits match captured item")
         if permits and permits[0]["state"] != "confirmed":
@@ -384,10 +400,17 @@ class DeletionCoordinator:
             },
         )
         result = self._json(response)
-        if not isinstance(result, dict) or result.get("state") not in {"deleted", "missing"}:
+        if not isinstance(result, dict) or result.get("state") not in {
+            "deleted",
+            "missing",
+            "retained_shared",
+        }:
             raise DeletionRetryable("gateway source removal was not confirmed")
+        retained = result["state"] == "retained_shared"
+        if retained and job["item_type"] != "Episode":
+            raise DeletionBlocked("only an episode may retain a shared season source")
         _path, remaining = self._file(job, must_exist=True)
-        if remaining is not None and remaining.st_nlink > 1:
+        if not retained and remaining is not None and remaining.st_nlink > 1:
             raise DeletionBlocked("media has another hardlink after torrent cleanup")
 
     async def _delete_arr(self, job: dict[str, Any]) -> None:

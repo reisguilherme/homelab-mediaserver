@@ -3,10 +3,10 @@ from homeserver_control.worker.release_quality import ReleasePolicy, release_ran
 
 def test_configured_resolution_and_source_order():
     policy = ReleasePolicy.from_environment(
-        {"HOMESERVER_MEDIA_RESOLUTIONS": "720,1080", "HOMESERVER_MEDIA_SOURCES": "webdl,remux"}
+        {"HOMESERVER_MOVIE_RESOLUTIONS": "1080", "HOMESERVER_MEDIA_SOURCES": "webdl,remux"}
     )
     offered = _release()
-    offered["quality"]["quality"]["resolution"] = 720
+    offered["quality"]["quality"]["resolution"] = 1080
     assert policy.rank(offered) is not None
     offered["quality"]["quality"]["resolution"] = 2160
     assert policy.rank(offered) is None
@@ -43,13 +43,30 @@ def test_more_seeders_beat_larger_file_at_equal_quality() -> None:
     )
 
 
-def test_remux_dolby_vision_and_atmos_still_beat_seed_count() -> None:
+def test_seeds_win_at_same_resolution_before_source_and_hdr_preferences() -> None:
     remux = _release(source="bluray", modifier="remux", seeders=1)
     webdl = _release(source="webdl", modifier="none", seeders=100)
-    assert release_rank(remux) > release_rank(webdl)
-    assert release_rank(_release(seeders=1)) > release_rank(
+    assert release_rank(webdl) > release_rank(remux)
+    assert release_rank(_release(seeders=1)) < release_rank(
         _release(title="Film 2160p BluRay REMUX", seeders=100)
     )
+
+
+def test_movie_highest_allowed_resolution_precedes_seed_count_and_source_family() -> None:
+    uhd = _release(source="webdl", modifier="none", resolution=2160, seeders=1)
+    full_hd = _release(source="bluray", modifier="remux", resolution=1080, seeders=100)
+    assert ReleasePolicy.from_environment({}).rank(uhd) > ReleasePolicy().rank(full_hd)
+
+
+def test_series_only_accepts_full_hd_while_movies_allow_uhd_fallback_full_hd() -> None:
+    from homeserver_control.worker.series_acquisition import _series_rank
+
+    series = ReleasePolicy.from_environment({}, media_kind="series")
+    assert series.resolutions == (1080,)
+    assert ReleasePolicy.from_environment({}).resolutions == (2160, 1080)
+    assert _series_rank(_release(resolution=1080), series) is not None
+    assert _series_rank(_release(resolution=2160), ReleasePolicy()) is None
+    assert _series_rank(_release(resolution=720), ReleasePolicy(resolutions=(720,))) is None
 
 
 def test_invalid_seed_count_does_not_outweigh_known_zero() -> None:

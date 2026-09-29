@@ -82,7 +82,8 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     subtitle_store = SubtitleArtifactStore(database) if subdl_key else None
     torrent_store = TorrentArtifactStore(database)
     subtitle_policy = SubtitlePolicy.from_environment(os.environ)
-    release_policy = ReleasePolicy.from_environment(os.environ)
+    movie_release_policy = ReleasePolicy.from_environment(os.environ, media_kind="movie")
+    series_release_policy = ReleasePolicy.from_environment(os.environ, media_kind="series")
     gateway_url = os.environ.get("HOMESERVER_QBIT_GATEWAY_URL", "http://download-gateway:8081")
     http_timeout = float(os.environ.get("HOMESERVER_HTTP_TIMEOUT_SECONDS", "15"))
     search_timeout = float(os.environ.get("HOMESERVER_SEARCH_TIMEOUT_SECONDS", "90"))
@@ -129,6 +130,9 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
             probe_seconds=float(os.environ.get("HOMESERVER_SOURCE_PROBE_SECONDS", "60")),
             min_eta_gain=float(os.environ.get("HOMESERVER_SOURCE_MIN_TIME_GAIN_PERCENT", "20"))
             / 100,
+            slow_replacement_enabled=os.environ.get(
+                "HOMESERVER_SOURCE_SLOW_REPLACEMENT_ENABLED", "false"
+            ) == "true",
         )
         if permits is not None and arr_token
         else None
@@ -184,7 +188,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
             arr_token=arr_token,
             availability_probe=availability_probe,
             live_source_probes=live_probes,
-            release_policy=release_policy,
+            release_policy=movie_release_policy,
             subtitle_policy=subtitle_policy,
             retry_seconds=retry_seconds,
             source_retry_seconds=source_retry_seconds,
@@ -235,13 +239,19 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
             is_tombstoned=deletion_jobs.is_tombstoned,
             availability_probe=availability_probe,
             live_source_probes=live_probes,
-            release_policy=release_policy,
+            release_policy=series_release_policy,
             subtitle_policy=subtitle_policy,
             retry_seconds=retry_seconds,
             source_retry_seconds=source_retry_seconds,
             search_timeout_seconds=search_timeout,
-            download_window=int(os.environ.get("HOMESERVER_SERIES_DOWNLOAD_WINDOW", "4")),
-            max_active_downloads=int(os.environ.get("HOMESERVER_DOWNLOAD_MAX_ACTIVE", "4")),
+            download_window=int(os.environ.get("HOMESERVER_SERIES_DOWNLOAD_WINDOW", "10")),
+            max_active_downloads=int(os.environ.get("HOMESERVER_DOWNLOAD_MAX_ACTIVE", "10")),
+            prefer_season_pack=(
+                os.environ.get("HOMESERVER_SERIES_PREFER_SEASON_PACK", "true") == "true"
+            ),
+            release_affinity=(
+                os.environ.get("HOMESERVER_SERIES_RELEASE_AFFINITY", "true") == "true"
+            ),
         )
         if arr_token:
             series_finalizer_client = httpx.AsyncClient(timeout=httpx.Timeout(http_timeout))

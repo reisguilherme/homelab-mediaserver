@@ -58,6 +58,26 @@ def test_default_slow_window_is_five_minutes_and_uses_progress(tmp_path):
                          now=1300) == "slow"
 
 
+def test_disabled_slow_replacement_keeps_progressing_source_but_recovers_dead_swarm(tmp_path):
+    path = tmp_path / "control.sqlite"
+    store = SourceHealthStore(path, slow_replacement_enabled=False)
+    assert store.observe("slow", _health(seeds=5, state="downloading"), now=1000) is None
+    assert SourceHealthStore(path, slow_replacement_enabled=False).observe(
+        "slow", _health(downloaded=30_000_000, left=99_970_000_000,
+                        seeds=5, speed=100_000, state="downloading"), now=1300,
+    ) is None
+    assert store.observe("dead", _health(), now=1000) is None
+    assert store.observe("dead", _health(), now=1300) == "stalled"
+
+
+def test_disabled_slow_replacement_rejects_trial_of_progressing_source(tmp_path):
+    store = SourceHealthStore(tmp_path / "control.sqlite", slow_replacement_enabled=False)
+    old = _health(seeds=5, speed=100_000, state="downloading")
+    new = _health(downloaded=1, left=90_000_000_000, seeds=10,
+                  speed=5_000_000, state="downloading")
+    assert store.probe_decision("old", "trial", old, new, now=1000) == "reject"
+
+
 def test_fast_progress_and_completed_torrent_never_trigger_failover(tmp_path):
     store = SourceHealthStore(tmp_path / "control.sqlite")
     assert store.observe("permit-1", _health(seeds=3, state="downloading"), now=1000) is None

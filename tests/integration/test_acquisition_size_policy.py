@@ -59,7 +59,7 @@ async def test_candidates_enforce_actual_video_size_before_grab_or_probe(
     tmp_path, kind, replacement, video_bytes, inflated, accepted
 ):
     offered = {
-        "title": "Fixture.S02E04.1080p.WEB-DL",
+        "title": "Fixture.S02E04.1080p.WEB-DL", "indexer": "UIndex",
         "size": 5_000_000_000,
         "rejected": False,
         "downloadUrl": "http://prowlarr:9696/1/download",
