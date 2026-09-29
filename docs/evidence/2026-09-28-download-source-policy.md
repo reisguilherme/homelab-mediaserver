@@ -45,6 +45,13 @@ Os pacotes UIndex encontrados para The Rookie S02 tinham 10,5/14,1 GiB e não
 atendiam o piso nativo de 17,6 GiB para a temporada. Não foram escolhidos por
 terem mais seeds: a retomada preserva a qualidade por episódio.
 
+Na busca real, o Sonarr também devolveu episódios individuais e resultados de
+outras temporadas. Inspecionar esses itens como pacotes atrasava a retomada.
+O worker agora descarta `fullSeason=false` e temporada explicitamente diferente
+antes de buscar metadados. Campos ausentes continuam sujeitos à inspeção do
+torrent; cobertura e tamanho individual permanecem obrigatórios.
+[Campos oficiais do Sonarr](https://raw.githubusercontent.com/Sonarr/Sonarr/develop/src/Sonarr.Api.V3/Indexers/ReleaseResource.cs).
+
 ## Verificação de implementação
 
 A regressão dos magnets usa cache sem trackers e verifica os sete trackers no
@@ -60,4 +67,22 @@ Os filtros de indexadores preservam IDs, tags e credenciais nativas. O teste
 com credenciais mascaradas reproduziu um erro de validação de indexador
 desativado e foi corrigido: mudar flags não testa nem redefine suas credenciais.
 
-O aceite final da suíte e da nova fila no servidor é registrado após ativação.
+A suíte completa passou com 1.075 testes, sem skips, usando o Caddy real nos
+contratos do monitor. Ruff, compilação, sintaxe Bash/ShellCheck e a varredura de
+segredos passaram. A revisão independente cobriu também exclusão de episódios
+de pacotes e proteção de caminhos entre reservas diferentes.
+
+## Ativação
+
+O servidor recebeu a implementação por Git e build local das imagens. O Compose
+com o override Intel passou na validação; a montagem ext4 foi verificada com o
+UUID esperado antes de ativar os serviços. `config apply` e `config verify`
+confirmaram os sete serviços. As duas séries e os oito filmes já cadastrados
+foram associados ao perfil `HomeServer` atualizado.
+
+A leitura nativa do qBit confirmou 10 downloads, uploads/total em `-1`, downloads
+lentos contados na fila e upload preservado em 2.499.584 bytes/s. Ratio, tempo
+total e tempo inativo de seeding ficaram sem teto. Os 43 torrents concluídos
+permaneceram presentes; o S02E07 concluído foi retomado para seeding.
+
+A aceitação da nova transferência é registrada após a busca real de S02E05.

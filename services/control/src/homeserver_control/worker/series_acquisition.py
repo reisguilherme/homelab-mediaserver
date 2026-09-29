@@ -527,8 +527,12 @@ class SeriesAcquirer(MovieAcquirer):
         minimum = self.release_policy.indexer_fallback_min_seeders if self.release_policy else 5
         for release in ranked:
             seeds = release_seeders(release)
+            native_season = release.get("seasonNumber")
             if (
-                self._rank(release) is None
+                release.get("fullSeason") is False
+                or isinstance(native_season, int) and not isinstance(native_season, bool)
+                and native_season != season
+                or self._rank(release) is None
                 or release.get("rejected") is not False and not _pack_cutoff_rejection(release)
                 or seeds is None or seeds < minimum
                 or not isinstance(release.get("size"), int)

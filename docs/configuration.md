@@ -37,6 +37,9 @@ arquivo; preserve esse owner ou adapte a identidade estrutural no Compose.
 O operator escreve API keys adotadas no mesmo
 arquivo, sem criar arquivos de segredo separados. Veja
 [o procedimento de alteração](operator-guide.md#aplicar-uma-mudança).
+Os Arr e o Seerr usam o perfil `HomeServer`. Em uma instalação antiga que ainda
+associe mídias a outro perfil, selecione `HomeServer` no editor de séries/filmes
+para aplicar também os filtros nativos a esses cadastros.
 
 ## Downloads e seeding
 

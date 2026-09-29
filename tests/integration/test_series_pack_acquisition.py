@@ -46,11 +46,15 @@ class SeriesFixture:
 
     def release(
         self, name, episodes, *, seeds=10, group="GROUP", video_bytes=1_500_000_000,
-        root_name=None, extra_files=(),
+        root_name=None, extra_files=(), season=1,
     ):
         files = [
-            {b"path": [f"Fixture.S01E{number:02d}.1080p.WEB-{group}.{extension}".encode()],
-             b"length": video_bytes if extension == "mkv" else 1000}
+            {
+                b"path": [
+                    f"Fixture.S{season:02d}E{number:02d}.1080p.WEB-{group}.{extension}".encode(),
+                ],
+                b"length": video_bytes if extension == "mkv" else 1000,
+            }
             for number in episodes for extension in ("mkv", "pt-BR.srt")
         ]
         files.extend({b"path": [part.encode() for part in path.split("/")], b"length": 1000}
@@ -64,7 +68,8 @@ class SeriesFixture:
         self.torrents[name] = torrent
         release = {
             "guid": name, "indexer": "UIndex (Prowlarr)", "indexerId": 1,
-            "title": f"Fixture.S01{'E' + str(episodes[0]).zfill(2) if len(episodes) == 1 else ''}"
+            "title": f"Fixture.S{season:02d}"
+                     f"{'E' + str(episodes[0]).zfill(2) if len(episodes) == 1 else ''}"
                      f".1080p.WEB-DL.AMZN-{group}",
             "releaseGroup": group, "seeders": seeds, "size": total, "rejected": False,
             "infoHash": inspected.infohash, "episodeIds": list(episodes),
@@ -416,3 +421,34 @@ async def test_legacy_source_without_artifact_still_protects_selected_video(tmp_
             "season:tmdb:101:1", fixture.reservation,
         ) == "grabbed"
     assert fixture.posts == ["single"]
+
+
+@pytest.mark.asyncio
+async def test_season_search_skips_explicit_single_release_before_fetching_metadata(tmp_path):
+    fixture = SeriesFixture(tmp_path, episode_count=2)
+    fixture.pack_offers = [
+        {**fixture.release("single-decoy", [2], seeds=100), "fullSeason": False},
+        {**fixture.release("pack", [1, 2], seeds=10), "fullSeason": True},
+    ]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handler)) as client:
+        assert await fixture.acquirer(client, prefer_season_pack=True).acquire(
+            "season:tmdb:101:1", fixture.reservation,
+        ) == "grabbed"
+    assert fixture.posts == ["pack"]
+    assert fixture.metadata == ["pack"]
+
+
+@pytest.mark.asyncio
+async def test_season_search_skips_explicit_other_season_pack_before_metadata(tmp_path):
+    fixture = SeriesFixture(tmp_path, episode_count=2)
+    fixture.pack_offers = [
+        {**fixture.release("other-season", [1, 2], seeds=100, season=2),
+         "fullSeason": True, "seasonNumber": 2},
+        {**fixture.release("pack", [1, 2], seeds=10), "fullSeason": True, "seasonNumber": 1},
+    ]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handler)) as client:
+        assert await fixture.acquirer(client, prefer_season_pack=True).acquire(
+            "season:tmdb:101:1", fixture.reservation,
+        ) == "grabbed"
+    assert fixture.posts == ["pack"]
+    assert fixture.metadata == ["pack"]
