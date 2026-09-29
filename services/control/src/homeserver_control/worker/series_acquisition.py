@@ -392,6 +392,29 @@ class SeriesAcquirer(MovieAcquirer):
             )
         ]
 
+    def _select_download_window(self, pending, reservations_by_season):
+        """Count each validated physical season pack once, including its siblings."""
+        selected, identities = [], set()
+        for item in pending:
+            reservation = reservations_by_season[item["seasonNumber"]]
+            scope = _episode_tag(item["seasonNumber"], item["episodeNumber"])
+            identity = ("episode", reservation, scope)
+            source = self.permits.get_for_reservation(reservation, scope_key=scope)
+            if source is not None and source.season_pack_parent_id is not None:
+                parent = self.permits.get(source.token)
+                if (
+                    parent is not None and parent.permit_id == source.season_pack_parent_id
+                    and parent.reservation_id == reservation and parent.infohash == source.infohash
+                    and parent.state in {"authorized", "dispatching", "unknown", "confirmed"}
+                ):
+                    identity = ("pack", parent.permit_id)
+            if identity not in identities:
+                if len(identities) >= self.download_window:
+                    continue
+                identities.add(identity)
+            selected.append(item)
+        return selected
+
     @staticmethod
     def _eligible_episode_manifest(
         torrent: bytes,
@@ -829,7 +852,9 @@ class SeriesAcquirer(MovieAcquirer):
             and item["id"] not in imported_episode_ids
         ]
         download_pending = await self._download_pending(pending, reservations_by_season)
-        window = download_pending[:self.download_window] if earlier_catalog_complete else []
+        window = self._select_download_window(
+            download_pending, reservations_by_season,
+        ) if earlier_catalog_complete else []
         active_episode_ids = {item["id"] for item in window}
         queue_status = await self._reconcile_existing_queue(
             episodes=chronological,

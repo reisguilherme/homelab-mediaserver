@@ -338,8 +338,10 @@ async def test_completed_downloads_waiting_for_import_release_acquisition_window
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pack_remaining", [0, 1])
+@pytest.mark.parametrize("window", [1, 2, 3])
+@pytest.mark.parametrize("parent_state", ["confirmed", "authorized", "unknown"])
 async def test_complete_pack_parent_releases_slots_but_partial_parent_keeps_season_priority(
-    tmp_path, pack_remaining,
+    tmp_path, pack_remaining, window, parent_state,
 ):
     repo = ReservationRepository(tmp_path / "control.sqlite")
     repo.initialize()
@@ -368,15 +370,22 @@ async def test_complete_pack_parent_releases_slots_but_partial_parent_keeps_seas
         b"files": [
             {b"length": 2_000_000_000 if suffix == "mkv" else 1000,
              b"path": [f"Show.S02E{number:02d}.{suffix}".encode()]}
-            for number in (1, 2) for suffix in ("mkv", "pt-BR.srt")
+            for number in (1, 2, 3) for suffix in ("mkv", "pt-BR.srt")
         ],
-        b"name": b"pack", b"piece length": 16_777_216, b"pieces": b"a" * (20 * 239),
+        b"name": b"pack", b"piece length": 16_777_216, b"pieces": b"a" * (20 * 358),
     }})
     parent = admit(torrent, "S02PACK")
     permits.bind_season_pack(parent.token, episode_files={
-        "S02E02": tuple(path for path in parent.selected_files if "S02E02" in path),
+        f"S02E{number:02d}": tuple(
+            path for path in parent.selected_files if f"S02E{number:02d}" in path
+        ) for number in (2, 3)
     })
     remaining[parent.infohash] = pack_remaining
+    if parent_state != "confirmed":
+        with sqlite3.connect(repo.path) as connection:
+            connection.execute(
+                "UPDATE gateway_permits SET state=? WHERE token=?", (parent_state, parent.token),
+            )
     searched = []
 
     def handler(request):
@@ -391,7 +400,7 @@ async def test_complete_pack_parent_releases_slots_but_partial_parent_keeps_seas
                 {"id": season * 100 + number, "seasonNumber": season, "episodeNumber": number,
                  "monitored": True, "hasFile": False,
                  "airDateUtc": (datetime.now(UTC) - timedelta(days=1)).isoformat()}
-                for season, numbers in ((2, (1, 2)), (3, (1,))) for number in numbers
+                for season, numbers in ((2, (1, 2, 3)), (3, (1,))) for number in numbers
             ])
         if request.url.path == "/api/v3/release":
             searched.append(int(request.url.params["episodeId"]))
@@ -405,10 +414,24 @@ async def test_complete_pack_parent_releases_slots_but_partial_parent_keeps_seas
         acquirer = SeriesAcquirer(
             repository=repo, permits=permits, sonarr_url="http://sonarr:8989",
             sonarr_api_key="fixture", prowlarr_url="http://prowlarr:9696", client=client,
-            capacity_provider=capacity, download_window=2, max_active_downloads=2,
+            capacity_provider=capacity, download_window=window, max_active_downloads=window,
         )
+        selected_ids = set()
+        reconcile = acquirer._reconcile_existing_queue
+
+        async def capture_selection(**kwargs):
+            selected_ids.update(kwargs["active_episode_ids"])
+            return await reconcile(**kwargs)
+
+        acquirer._reconcile_existing_queue = capture_selection
         await acquirer.acquire("season:tmdb:10:3", requested_reservation)
-    assert searched == ([301] if pack_remaining == 0 else [])
+    complete_parent = pack_remaining == 0 and parent_state == "confirmed"
+    can_prefetch = window == 3 or complete_parent and window >= 2
+    assert searched == ([301] if can_prefetch else [])
+    assert selected_ids == {
+        201, *(() if complete_parent or window == 1 else (202, 203)),
+        *((301,) if can_prefetch else ()),
+    }
     assert permits.get(active.token).state == "confirmed"
     child = permits.get_for_reservation(earlier_reservation, scope_key="S02E02")
     assert child.season_pack_parent_id == parent.permit_id

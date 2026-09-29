@@ -19,6 +19,9 @@ continuam pendentes para a importação, mas liberam vagas de download.
 Episódios sem evidência, com leitura indisponível ou sem confirmação continuam
 ocupando a janela. Um pack só libera os vínculos quando seu torrent físico
 está completo.
+Enquanto baixa, todos os episódios vinculados ao mesmo parent de pack usam
+uma única vaga. Contar cada vínculo como transferência separada impediria
+alcançar S04 mesmo com poucas transferências físicas em andamento.
 
 A ordem cronológica de seleção, o limite de dez downloads, o orçamento dos
 bytes reais, os filtros de qualidade e a importação sequencial permanecem
@@ -32,3 +35,13 @@ S02E15 e S03E01 passam a ser consultados quando há vagas. Casos sem provider,
 com erro, hash desconhecido e permit apenas autorizado não liberam posições.
 Packs completos/parciais têm cobertura específica. A biblioteca e o ledger
 de importação não são alterados pela aquisição.
+
+A suíte final passou com 1.103 testes, sem skips, em Linux/WSL com Python 3.12,
+dependências do lockfile e Caddy real nos contratos do monitor. Ruff,
+compilação Python, sintaxe Bash e ShellCheck passaram. Houve apenas os dois
+avisos de depreciação já existentes nas dependências do TestClient.
+
+Na primeira ativação, S02E15 e S02E16 foram adquiridos pelo UIndex na família
+DSNP/playWEB. S03 começou como torrent completo 1080p AMZN pela fonte 1337x,
+com 25 seeds conectados e cerca de 4,65 MB/s em uma amostra. O hash de S02E05
+e os 50 torrents que já estavam completos foram preservados.

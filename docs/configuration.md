@@ -46,7 +46,7 @@ para aplicar também os filtros nativos a esses cadastros.
 | Parâmetro, com prefixo `HOMESERVER_` | Default | Unidade e efeito |
 |---|---|---|
 | `DOWNLOAD_MAX_ACTIVE` | 10 | Downloads simultâneos globais |
-| `SERIES_DOWNLOAD_WINDOW` | 10 | Janela de episódios ainda não baixados por série |
+| `SERIES_DOWNLOAD_WINDOW` | 10 | Janela de transferências por série; pack usa uma vaga |
 | `SEED_MAX_ACTIVE` | -1 | Torrents em seeding; -1 deixa a quantidade ilimitada |
 | `TORRENT_MAX_ACTIVE` | -1 | Total ativo nativo qBit; -1 deixa a quantidade ilimitada |
 | `QUEUE_IGNORE_SLOW_TORRENTS` | false | Downloads lentos também contam no limite global |
@@ -99,12 +99,15 @@ essa prioridade. Dentro da fonte, maior resolução permitida e idioma original
 declarado precedem seeds; fonte/Dolby Vision/Atmos desempatarão candidatos.
 O piso MiB/min continua obrigatório. Filmes elegíveis podem passar à frente por seeds.
 Séries podem baixar em paralelo dentro de `SERIES_DOWNLOAD_WINDOW`, respeitando
-o limite global. A janela contém os primeiros episódios ainda não baixados:
+o limite global. A janela contém os primeiros episódios ainda não baixados,
+contando cada torrent de temporada como uma transferência:
 um episódio sem fonte ou lento não impede buscar os seguintes dessa janela.
 Um torrent confirmado com zero bytes restantes no qBit libera sua vaga mesmo
 quando aguarda a importação. A janela avança para os próximos episódios e pode
 alcançar as temporadas seguintes já solicitadas. Sem evidência atual do qBit,
 o episódio continua ocupando a vaga.
+Os episódios vinculados ao mesmo parent de pack compartilham uma vaga; os
+avulsos, inclusive os que ainda não têm fonte, ocupam uma vaga cada.
 Importação/Jellyfin mantém temporada/episódio em ordem: E7 pronto espera E5/E6;
 S2 pode baixar quando couber na janela, mas aguarda S1 para ser importada.
 Episódios desmonitorados ou futuros conhecidos não bloqueiam a cadeia.
