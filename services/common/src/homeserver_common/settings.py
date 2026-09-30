@@ -124,6 +124,7 @@ register("SERIES_PREFER_SEASON_PACK SERIES_RELEASE_AFFINITY", True, "bool", "wor
 register("RELEASE_INDEXER_PRIORITY", ("uindex", "1337x"), "list", "worker",
          choices=("uindex", "1337x"))
 register("INDEXER_FALLBACK_MIN_SEEDERS", 5, "int", "worker", minimum=1)
+register("MOVIE_INDEXER_FALLBACK_MIN_SEEDERS", 20, "int", "worker", minimum=1)
 for name, value in {
     "WORKER_INTERVAL_SECONDS": 5,
     "SEARCH_RETRY_SECONDS": 300,

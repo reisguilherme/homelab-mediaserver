@@ -51,12 +51,16 @@ AcquisitionCandidate = tuple[
 def _queue_only_rejection(release: dict[str, object]) -> bool:
     """Ignore only Arr's existing-queue veto while validating a replacement."""
     reasons = release.get("rejections")
+    prefixes = (
+        "release in queue already meets cutoff:",
+        "quality for release in queue already meets cutoff:",
+    )
     return (
         release.get("rejected") is True
         and isinstance(reasons, list)
         and bool(reasons)
         and all(
-            isinstance(item, str) and item.startswith("Release in queue already meets cutoff:")
+            isinstance(item, str) and item.casefold().startswith(prefixes)
             for item in reasons
         )
     )
@@ -750,12 +754,24 @@ class MovieAcquirer(LiveSourceProbes):
             if replacement_reason
             else set()
         )
-        candidates = self._preferred_indexer_candidates(
-            ordered,
-            eligible=lambda group: self._eligible_movie_releases(
+
+        async def eligible_for_indexer(group):
+            nonlocal waiting_space
+            async for candidate in self._eligible_movie_releases(
                 group, replacement_reason=replacement_reason,
                 excluded_infohashes=excluded, runtime_minutes=movie.get("runtime"),
-            ),
+            ):
+                if existing is None and self.capacity_provider is not None:
+                    capacity = await self.capacity_provider()
+                    available = max(0, capacity.free_bytes - self.permits.pending_bytes(capacity))
+                    if candidate[1][3] > available:
+                        waiting_space = True
+                        continue
+                yield candidate
+
+        candidates = self._preferred_indexer_candidates(
+            ordered,
+            eligible=eligible_for_indexer,
             rank=rank,
         )
         async for candidate in self._prioritize_replacements(

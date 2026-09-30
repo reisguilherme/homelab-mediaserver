@@ -127,6 +127,7 @@ def test_download_preferences_default_to_ten_downloads_and_unlimited_seeding(tmp
     assert settings.source_slow_replacement_enabled is False
     assert settings.release_indexer_priority == ("uindex", "1337x")
     assert settings.indexer_fallback_min_seeders == 5
+    assert settings.movie_indexer_fallback_min_seeders == 20
     assert settings.movie_resolutions == ("2160", "1080")
     assert settings.series_resolutions == ("1080",)
 

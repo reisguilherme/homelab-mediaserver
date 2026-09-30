@@ -50,6 +50,15 @@ async def test_movie_and_series_choose_uindex_then_seed_fallback_after_real_qual
 ):
     if expected == "primary" and fallback_threshold == 20:
         expected, inspected_names = "backup", ["primary", "backup"]
+    status, posted, inspected_names_actual = await _choose_indexer(
+        tmp_path, kind=kind, fallback_threshold=fallback_threshold, offers=offers,
+    )
+    assert status == ("grabbed" if expected else "no_eligible_release")
+    assert posted == ([expected] if expected else [])
+    assert inspected_names_actual == inspected_names
+
+
+async def _choose_indexer(tmp_path, *, kind, fallback_threshold, offers):
     repo = ReservationRepository(tmp_path / "control.sqlite")
     repo.initialize()
     media_key = "season:tmdb:101:1" if kind == "series" else "movie:tmdb:101"
@@ -116,10 +125,14 @@ async def test_movie_and_series_choose_uindex_then_seed_fallback_after_real_qual
         return CapacityEvidence(free_bytes=50_000_000_000, remaining_by_hash={})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        environment = (
+            {} if fallback_threshold is None else
+            {"HOMESERVER_INDEXER_FALLBACK_MIN_SEEDERS": str(fallback_threshold)}
+        )
         options = dict(
             repository=repo, permits=permits, prowlarr_url="http://prowlarr:9696", client=client,
             capacity_provider=capacity, release_policy=ReleasePolicy.from_environment(
-                {"HOMESERVER_INDEXER_FALLBACK_MIN_SEEDERS": str(fallback_threshold)},
+                environment,
                 media_kind=kind,
             ),
         )
@@ -129,6 +142,45 @@ async def test_movie_and_series_choose_uindex_then_seed_fallback_after_real_qual
             MovieAcquirer(radarr_url="http://radarr:7878", radarr_api_key="fixture", **options)
         )
         status = await acquirer.acquire(media_key, reserved.reservation_id)
-    assert status == ("grabbed" if expected else "no_eligible_release")
-    assert posted == ([expected] if expected else [])
-    assert inspected_names_actual == inspected_names
+    return status, posted, inspected_names_actual
+
+
+@pytest.mark.asyncio
+async def test_movie_unaffordable_uindex_does_not_block_affordable_1337x(tmp_path):
+    status, posted, inspected = await _choose_indexer(
+        tmp_path, kind="movie", fallback_threshold=5, offers=[
+            ("too-large-primary", "UIndex", 2160, 30, 60_000_000_000),
+            ("backup", "1337x", 1080, 20, 2_000_000_000),
+        ],
+    )
+    assert status == "grabbed"
+    assert posted == ["backup"]
+    assert inspected == ["too-large-primary", "backup"]
+
+
+@pytest.mark.asyncio
+async def test_movie_only_unaffordable_offer_reports_waiting_space(tmp_path):
+    status, posted, inspected = await _choose_indexer(
+        tmp_path, kind="movie", fallback_threshold=5, offers=[
+            ("too-large-primary", "UIndex", 2160, 30, 60_000_000_000),
+        ],
+    )
+    assert status == "waiting_space"
+    assert posted == []
+    assert inspected == ["too-large-primary"]
+
+
+@pytest.mark.asyncio
+async def test_movie_default_fallback_prefers_well_seeded_affordable_uhd(tmp_path):
+    status, posted, inspected = await _choose_indexer(
+        tmp_path, kind="movie", fallback_threshold=None, offers=[
+            ("uindex-uhd-too-large", "UIndex", 2160, 29, 62_060_000_000),
+            ("uindex-low-seeds", "UIndex", 2160, 6, 41_830_000_000),
+            ("1337x-many-seeds", "1337x", 2160, 84, 35_630_000_000),
+        ],
+    )
+    assert status == "grabbed"
+    assert posted == ["1337x-many-seeds"]
+    assert inspected == [
+        "uindex-uhd-too-large", "uindex-low-seeds", "1337x-many-seeds",
+    ]

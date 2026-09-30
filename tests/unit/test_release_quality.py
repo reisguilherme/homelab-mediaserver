@@ -1,6 +1,22 @@
 from homeserver_control.worker.release_quality import ReleasePolicy, release_rank
 
 
+def test_default_indexer_fallback_requires_meaningful_swarm() -> None:
+    assert ReleasePolicy.from_environment({}).indexer_fallback_min_seeders == 20
+    assert ReleasePolicy.from_environment({}, media_kind="series").indexer_fallback_min_seeders == 5
+
+
+def test_movie_indexer_fallback_can_differ_from_series() -> None:
+    environment = {
+        "HOMESERVER_INDEXER_FALLBACK_MIN_SEEDERS": "5",
+        "HOMESERVER_MOVIE_INDEXER_FALLBACK_MIN_SEEDERS": "20",
+    }
+    assert ReleasePolicy.from_environment(environment).indexer_fallback_min_seeders == 20
+    assert ReleasePolicy.from_environment(
+        environment, media_kind="series"
+    ).indexer_fallback_min_seeders == 5
+
+
 def test_configured_resolution_and_source_order():
     policy = ReleasePolicy.from_environment(
         {"HOMESERVER_MOVIE_RESOLUTIONS": "1080", "HOMESERVER_MEDIA_SOURCES": "webdl,remux"}
@@ -73,3 +89,23 @@ def test_invalid_seed_count_does_not_outweigh_known_zero() -> None:
     known_zero = release_rank(_release(seeders=0))
     for invalid in (True, -1, 1.5, "100", None):
         assert known_zero > release_rank(_release(seeders=invalid))
+
+
+def test_native_radarr_remux_is_ranked_as_remux() -> None:
+    native_remux = _release(source="blurayRaw", modifier="none", seeders=10)
+    native_remux["quality"]["quality"].update(name="Bluray-2160p Remux")
+    assert release_rank(native_remux) == release_rank(
+        _release(source="bluray", modifier="remux", seeders=10)
+    )
+    assert ReleasePolicy(sources=("bluray", "webdl")).rank(native_remux) is None
+
+
+def test_native_radarr_web_source_requires_explicit_webdl_classification() -> None:
+    native_webdl = _release(source="web", modifier="none", seeders=10)
+    native_webdl["quality"]["quality"].update(name="WEBDL-2160p")
+    native_webrip = _release(source="web", modifier="none", seeders=10)
+    native_webrip["quality"]["quality"].update(name="WEBRip-2160p")
+    assert release_rank(native_webdl) == release_rank(
+        _release(source="webdl", modifier="none", seeders=10)
+    )
+    assert release_rank(native_webrip) is None

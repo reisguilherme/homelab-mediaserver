@@ -85,7 +85,7 @@ class ReleasePolicy:
     audio_languages: tuple[str, ...] = ("original",)
     minimum_mib_per_min: tuple[tuple[int, float], ...] = ((720, 10), (1080, 20), (2160, 50))
     indexer_priority: tuple[str, ...] = ("uindex", "1337x")
-    indexer_fallback_min_seeders: int = 5
+    indexer_fallback_min_seeders: int = 20
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str], *, media_kind="movie"):
@@ -126,7 +126,14 @@ class ReleasePolicy:
             tuple(environment.get(
                 "HOMESERVER_RELEASE_INDEXER_PRIORITY", "uindex,1337x"
             ).split(",")),
-            int(environment.get("HOMESERVER_INDEXER_FALLBACK_MIN_SEEDERS", "5")),
+            int(
+                environment.get(
+                    "HOMESERVER_MOVIE_INDEXER_FALLBACK_MIN_SEEDERS",
+                    environment.get("HOMESERVER_INDEXER_FALLBACK_MIN_SEEDERS", "20"),
+                )
+                if media_kind == "movie"
+                else environment.get("HOMESERVER_INDEXER_FALLBACK_MIN_SEEDERS", "5")
+            ),
         )
 
     def rank(self, release: dict[str, object], *, original_language: object = None):
@@ -180,11 +187,14 @@ def release_rank(
         return None
     source = detail.get("source")
     modifier = detail.get("modifier", "none")
-    if source == "bluray" and modifier == "remux":
+    if source == "blurayRaw" or source == "bluray" and modifier == "remux":
         family = "remux"
     elif source == "bluray" and modifier == "none":
         family = "bluray"
-    elif source == "webdl" and modifier == "none":
+    elif modifier == "none" and (
+        source == "webdl"
+        or source == "web" and str(detail.get("name", "")).lower().startswith("webdl")
+    ):
         family = "webdl"
     else:
         return None

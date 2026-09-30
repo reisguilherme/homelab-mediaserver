@@ -78,7 +78,8 @@ fixa de 80 GB por filme nem teto estático de tamanho.
 | `SERIES_RESOLUTIONS` | 1080 | Séries: somente 1080p |
 | `MEDIA_SOURCES` | remux,bluray,webdl | Fontes aceitas; WEBRip/TV ficam excluídas |
 | `RELEASE_INDEXER_PRIORITY` | uindex,1337x | Fontes nativas habilitadas e ordem de seleção |
-| `INDEXER_FALLBACK_MIN_SEEDERS` | 5 | Consultar alternativas quando a fonte principal tem menos seeds anunciados |
+| `INDEXER_FALLBACK_MIN_SEEDERS` | 5 | Série: consultar alternativas quando a fonte principal tem menos seeds anunciados; mínimo também para pacote de temporada e afinidade de releases |
+| `MOVIE_INDEXER_FALLBACK_MIN_SEEDERS` | 20 | Filme: consultar alternativas quando a fonte principal elegível e que cabe no disco tem menos seeds anunciados |
 | `SERIES_PREFER_SEASON_PACK` | true | Preferir torrent de temporada completa elegível com seeds suficientes |
 | `SERIES_RELEASE_AFFINITY` | true | Favorecer o mesmo indexador e família de releases saudáveis na série |
 | `PREFER_DOLBY_VISION`, `PREFER_ATMOS` | true, true | Preferências de vídeo/áudio |
