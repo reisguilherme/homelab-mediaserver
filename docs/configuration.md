@@ -211,6 +211,12 @@ Completed Download Handling permanece desabilitado nos Arr
 resolve legenda e importa antes de publicar no Jellyfin. O apply preserva IDs;
 verify detecta alterações divergentes feitas nas UIs nativas.
 
+No Radarr, `skipFreeSpaceCheckWhenImporting=true` evita que a importação por
+hardlink exija espaço para uma segunda cópia do filme. O gateway já confere o
+tamanho real antes do download; na importação, o worker testa o hardlink com o
+usuário do Radarr e só permite cópia se houver espaço suficiente. Essa opção
+não altera a configuração do Sonarr.
+
 Portas e paths atuais estão em [instalação](installation.md) e
 [README](../README.md#acessar). Para mudar uma convenção estrutural, adapte o
 Compose/código de forma explícita, mantendo as redes internas e o gateway.

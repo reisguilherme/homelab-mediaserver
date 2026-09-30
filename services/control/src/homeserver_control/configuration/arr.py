@@ -166,7 +166,11 @@ async def reconcile_import_guards(service, env, client, mode):
         return []
     resources = (
         ("downloadclient", {"enableCompletedDownloadHandling": False}),
-        ("mediamanagement", {"copyUsingHardlinks": True}),
+        (
+            "mediamanagement",
+            {"copyUsingHardlinks": True}
+            | ({"skipFreeSpaceCheckWhenImporting": True} if service == "radarr" else {}),
+        ),
     )
     pending = []
     for resource, desired in resources:

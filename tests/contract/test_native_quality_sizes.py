@@ -50,6 +50,7 @@ class NativeArr:
             "mediamanagement": {
                 "id": 8,
                 "copyUsingHardlinks": True,
+                "skipFreeSpaceCheckWhenImporting": False,
                 "minimumFreeSpaceWhenImporting": 100,
                 "manual": {"keep": "media"},
             },
@@ -345,10 +346,25 @@ async def test_arr_import_guards_apply_without_overwriting_native_fields_and_are
         "enableCompletedDownloadHandling": False
     }
     assert native.config["mediamanagement"] == original["mediamanagement"] | {
-        "copyUsingHardlinks": True
+        "copyUsingHardlinks": True,
+        **({"skipFreeSpaceCheckWhenImporting": True} if service == "radarr" else {}),
     }
     assert len(native.config_writes) == 2
     assert all("/config/" in path for method, path in native.requests if method == "PUT")
+
+
+@pytest.mark.asyncio
+async def test_radarr_without_native_free_space_skip_is_reported_as_drift():
+    native = NativeArr([native_definition(11, 3, "WEBDL-1080p", "web", 1080, 20, None, 95)])
+    async with httpx.AsyncClient(
+        base_url="http://radarr", transport=httpx.MockTransport(native.request)
+    ) as client:
+        result = await reconcile_arr("radarr", settings(), client, "verify")
+    assert result.status == "drift"
+    assert {change.key: change.after for change in result.changes}[
+        "skipFreeSpaceCheckWhenImporting"
+    ] is True
+    assert not native.config_writes
 
 
 @pytest.mark.asyncio
