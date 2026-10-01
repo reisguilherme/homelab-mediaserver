@@ -91,6 +91,37 @@ def _add_movie_source(jobs: DeletionJobStore) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("detail", ["torrent contains other media", "private permit-secret"])
+async def test_gateway_block_reason_is_persisted_without_upstream_secrets(tmp_path, detail):
+    jobs, data_root, media_root, snapshot, video = _fixture(tmp_path)
+    _add_movie_source(jobs)
+    requests = []
+
+    def responder(request):
+        requests.append(request)
+        if request.url.host == "radarr" and request.method == "GET":
+            return httpx.Response(200, json={
+                "id": 7, "tmdbId": 123,
+                "movieFile": {"id": 9, "path": str(video), "size": 13},
+            })
+        if request.url.host == "gateway":
+            return httpx.Response(409, json={"detail": detail})
+        raise AssertionError(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
+        worker = _coordinator(jobs=jobs, data_root=data_root, media_root=media_root,
+                              snapshot=snapshot, client=client)
+        assert await worker.run_once() == "blocked"
+    error = jobs.get("a" * 32)["error"]
+    assert "HTTP 409" in error
+    assert "permit-secret" not in error
+    if detail == "torrent contains other media":
+        assert detail in error
+    assert video.exists()
+    assert not any(r.method == "DELETE" for r in requests)
+
+
+@pytest.mark.asyncio
 async def test_movie_cascade_removes_captured_source_and_completes(tmp_path: Path) -> None:
     """A missing Arr DELETE or wrong source selection must leave this test red."""
     jobs, data_root, media_root, snapshot, video = _fixture(tmp_path)

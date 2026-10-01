@@ -46,23 +46,28 @@ class TorrentUpstream:
         self.current = None
 
 
-def _setup(tmp_path, *, media_key: str = "movie:tmdb:123", scope_key: str | None = None):
+def _setup(
+    tmp_path, *, media_key: str = "movie:tmdb:123", scope_key: str | None = None,
+    torrent: bytes = TORRENT, selected_files: tuple[str, ...] | None = None,
+):
     database = tmp_path / "control.sqlite"
     repo = ReservationRepository(database)
     repo.initialize()
+    metadata = inspect_torrent(torrent)
     reservation = repo.reserve(
         request_id="seerr:1", source_id="1", media_key=media_key,
-        filesystem_id="fixture", budget_bytes=123, free_bytes=1_000,
-        total_bytes=2_000,
+        filesystem_id="fixture", budget_bytes=metadata.total_bytes,
+        free_bytes=metadata.total_bytes + 1000, total_bytes=metadata.total_bytes + 2000,
     )
-    metadata = inspect_torrent(TORRENT)
     permits = PermitRegistry(database)
     permit = permits.issue(
         infohash=metadata.infohash, destination="/data/torrents",
         category="sonarr" if scope_key else "radarr",
         reservation_id=reservation.reservation_id, scope_key=scope_key,
         metadata_sha256=metadata.metadata_sha256,
-        selected_files=("test.mp4",), budget_bytes=123,
+        selected_files=(
+            selected_files if selected_files is not None else tuple(f.path for f in metadata.files)
+        ), budget_bytes=metadata.total_bytes,
         expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
     permits.authorize(
@@ -71,14 +76,37 @@ def _setup(tmp_path, *, media_key: str = "movie:tmdb:123", scope_key: str | None
         effect=lambda _: {"accepted": True},
     )
     store = TorrentArtifactStore(database)
-    store.put(permit, TORRENT)
+    store.put(permit, torrent)
     upstream = TorrentUpstream(metadata.infohash)
     upstream.current["category"] = permit.category
+    upstream.files = [{"name": f.path, "size": f.length, "priority": 1} for f in metadata.files]
     client = TestClient(create_app(
         permits=permits, upstream=upstream, arr_token="secret", torrent_store=store,
     ))
     body = {"permit_token": permit.token, "media_key": media_key, "scope_key": scope_key}
     return client, permits, upstream, body
+
+
+def _encode(value):
+    if isinstance(value, bytes):
+        return str(len(value)).encode() + b":" + value
+    if isinstance(value, int):
+        return b"i" + str(value).encode() + b"e"
+    if isinstance(value, list):
+        return b"l" + b"".join(_encode(item) for item in value) + b"e"
+    return b"d" + b"".join(_encode(k) + _encode(v) for k, v in sorted(value.items())) + b"e"
+
+
+def _movie_with_auxiliary(name="AUDIO LIST ENG LATINO SPANISH FRENCH.txt", size=18712):
+    total = 123 + size
+    return _encode({b"info": {
+        b"name": b"Movie", b"piece length": 16384,
+        b"pieces": b"a" * (((total + 16383) // 16384) * 20),
+        b"files": [
+            {b"length": 123, b"path": [b"Movie.mkv"]},
+            {b"length": size, b"path": [name.encode()]},
+        ],
+    }})
 
 
 def test_worker_delete_removes_exact_torrent_and_data_and_is_idempotent(tmp_path) -> None:
@@ -377,6 +405,114 @@ def test_historical_season_source_revalidates_every_torrent_before_purge(tmp_pat
         upstream.files[0]["size"] = 124
     elif change == "extra":
         upstream.files.append({"name": "extra.mkv", "size": 10, "priority": 1})
+    response = client.post(
+        "/internal/delete-source", headers={"X-Arr-Token": "secret"}, json=body,
+    )
+    assert response.status_code == 409
+    assert upstream.deleted == []
+
+
+@pytest.mark.parametrize("priority", [0, 1])
+def test_movie_delete_accepts_unselected_audio_list_txt_from_verified_manifest(tmp_path, priority):
+    client, _, upstream, body = _setup(
+        tmp_path, torrent=_movie_with_auxiliary(), selected_files=("Movie/Movie.mkv",),
+    )
+    upstream.files[1]["priority"] = priority
+    response = client.post(
+        "/internal/delete-source", headers={"X-Arr-Token": "secret"}, json=body,
+    )
+    assert response.status_code == 200
+    assert response.json() == {"state": "deleted"}
+    assert upstream.deleted == [(upstream.infohash, True)]
+
+
+@pytest.mark.parametrize("name", ["movie.nfo", "pt-BR.srt", "en.ass", "subs.ssa",
+                                  "captions.vtt", "poster.jpg", "folder.jpeg",
+                                  "cover.png", "thumb.webp"])
+def test_movie_delete_accepts_small_verified_unselected_metadata_and_subtitles(tmp_path, name):
+    client, _, upstream, body = _setup(
+        tmp_path, torrent=_movie_with_auxiliary(name), selected_files=("Movie/Movie.mkv",),
+    )
+    upstream.files[1]["priority"] = 0
+    response = client.post(
+        "/internal/delete-source", headers={"X-Arr-Token": "secret"}, json=body,
+    )
+    assert response.status_code == 200
+    assert upstream.deleted == [(upstream.infohash, True)]
+
+
+@pytest.mark.parametrize("name,size", [
+    ("other.mkv", 100), ("sample.mp4", 100), ("download.exe", 100), ("data.bin", 100),
+    ("poster.jpg", 50_000_001), ("audio.txt", 50_000_001),
+])
+def test_movie_delete_refuses_unselected_extra_media_unknown_files_or_large_auxiliary(
+    tmp_path, name, size,
+):
+    client, _, upstream, body = _setup(
+        tmp_path, torrent=_movie_with_auxiliary(name, size), selected_files=("Movie/Movie.mkv",),
+    )
+    upstream.files[1]["priority"] = 0
+    response = client.post(
+        "/internal/delete-source", headers={"X-Arr-Token": "secret"}, json=body,
+    )
+    assert response.status_code == 409
+    assert upstream.deleted == []
+
+
+@pytest.mark.parametrize("change", [
+    "selected_priority", "aux_negative_priority", "aux_bool_priority", "aux_string_priority",
+    "aux_name", "aux_size", "aux_zero_size", "missing_file", "extra_file", "artifact",
+    "artifact_tamper", "other_owner",
+])
+def test_movie_auxiliary_exception_preserves_selection_and_full_manifest_readback(
+    tmp_path, change,
+):
+    client, _, upstream, body = _setup(
+        tmp_path, torrent=_movie_with_auxiliary(), selected_files=("Movie/Movie.mkv",),
+    )
+    if change == "selected_priority":
+        upstream.files[0]["priority"] = 0
+    elif change == "aux_negative_priority":
+        upstream.files[1]["priority"] = -1
+    elif change == "aux_bool_priority":
+        upstream.files[1]["priority"] = False
+    elif change == "aux_string_priority":
+        upstream.files[1]["priority"] = "0"
+    elif change == "aux_name":
+        upstream.files[1]["name"] = "Movie/foreign.txt"
+    elif change == "aux_size":
+        upstream.files[1]["size"] = 18713
+    elif change == "aux_zero_size":
+        upstream.files[1]["size"] = 0
+    elif change == "missing_file":
+        upstream.files.pop()
+    elif change == "extra_file":
+        upstream.files.append({"name": "foreign.txt", "size": 10, "priority": 0})
+    elif change == "artifact":
+        with sqlite3.connect(tmp_path / "control.sqlite") as connection:
+            connection.execute("DELETE FROM torrent_artifacts")
+    elif change == "artifact_tamper":
+        with sqlite3.connect(tmp_path / "control.sqlite") as connection:
+            connection.execute("UPDATE torrent_artifacts SET content=?", (TORRENT,))
+    else:
+        metadata = inspect_torrent(_movie_with_auxiliary())
+        other = ReservationRepository(tmp_path / "control.sqlite").reserve(
+            request_id="seerr:2", source_id="2", media_key="movie:tmdb:456",
+            filesystem_id="fixture", budget_bytes=metadata.total_bytes,
+            free_bytes=metadata.total_bytes * 5, total_bytes=metadata.total_bytes * 6,
+        )
+        permits = PermitRegistry(tmp_path / "control.sqlite")
+        conflict = permits.issue(
+            infohash=upstream.infohash, destination="/data/torrents", category="radarr",
+            reservation_id=other.reservation_id, metadata_sha256=metadata.metadata_sha256,
+            selected_files=("Movie/Movie.mkv",), budget_bytes=metadata.total_bytes,
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+        permits.authorize(
+            token=conflict.token, infohash=conflict.infohash,
+            destination=conflict.destination, metadata_sha256=conflict.metadata_sha256,
+            effect=lambda _: {"accepted": True},
+        )
     response = client.post(
         "/internal/delete-source", headers={"X-Arr-Token": "secret"}, json=body,
     )

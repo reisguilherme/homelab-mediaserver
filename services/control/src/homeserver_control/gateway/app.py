@@ -9,7 +9,7 @@ import secrets
 import time
 from collections.abc import Callable
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from threading import Lock
 from typing import Any, Protocol
 
@@ -30,6 +30,11 @@ from homeserver_control.worker.source_health import SourceHealthStore
 from .allowlist import GatewayAllowlist
 from .auth import token_matches
 from .permits import Permit, PermitRegistry
+
+_DELETE_AUXILIARY_SUFFIXES = {
+    ".txt", ".nfo", ".srt", ".ass", ".ssa", ".vtt", ".jpg", ".jpeg", ".png", ".webp",
+}
+_MAX_DELETE_AUXILIARY_BYTES = 50_000_000
 
 
 class QbitClient(Protocol):
@@ -228,10 +233,19 @@ def create_app(
                 status_code=409, detail="verified torrent metadata changed"
             ) from error
         expected_files = {(item.path, item.length) for item in inspected.files}
+        manifest_paths = {item.path for item in inspected.files}
+        selected_paths = set(permit.selected_files)
         if (
             len(expected_files) != len(inspected.files)
-            or {item.path for item in inspected.files} != set(permit.selected_files)
-            or inspected.total_bytes != permit.budget_bytes
+            or not selected_paths.issubset(manifest_paths)
+            or inspected.total_bytes > permit.budget_bytes
+            or any(
+                item.path not in selected_paths and (
+                    PurePosixPath(item.path).suffix.lower() not in _DELETE_AUXILIARY_SUFFIXES
+                    or item.length > _MAX_DELETE_AUXILIARY_BYTES
+                )
+                for item in inspected.files
+            )
         ):
             raise HTTPException(status_code=409, detail="torrent contains other media")
         if pack_episode is not None and not set(pack_episode.selected_files).issubset(
@@ -272,7 +286,8 @@ def create_app(
                 or size <= 0
                 or isinstance(priority, bool)
                 or not isinstance(priority, int)
-                or priority <= 0
+                or priority < 0
+                or (priority == 0 and name in selected_paths)
             ):
                 raise HTTPException(status_code=409, detail="torrent files changed")
             actual_files.add((name, size))

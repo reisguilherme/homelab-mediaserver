@@ -27,6 +27,13 @@ _SIDECAR = re.compile(
     r"\.(?:srt|ass|ssa|vtt|nfo|jpg|jpeg|png|webp)$",
     re.IGNORECASE,
 )
+_SAFE_PREFLIGHT_DETAILS = {
+    "worker credential required", "confirmed media source required",
+    "source identity is not deletable", "torrent is shared by another active permit",
+    "verified torrent metadata unavailable", "verified torrent metadata changed",
+    "torrent contains other media", "torrent identity changed", "torrent files changed",
+    "season pack episode files changed", "source permit changed",
+}
 
 
 class DeletionBlocked(ValueError):
@@ -255,7 +262,17 @@ class DeletionCoordinator:
         if response.status_code == 404 and allow_missing:
             return False
         if response.status_code in {400, 401, 403, 409, 422}:
-            raise DeletionBlocked(f"{response.request.url.host} rejected deletion preflight")
+            reason = f"HTTP {response.status_code}"
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
+            detail = body.get("detail") if isinstance(body, dict) else None
+            if isinstance(detail, str) and detail in _SAFE_PREFLIGHT_DETAILS:
+                reason += f": {detail}"
+            raise DeletionBlocked(
+                f"{response.request.url.host} rejected deletion preflight ({reason})"
+            )
         if response.status_code >= 400:
             raise DeletionRetryable(
                 f"{response.request.url.host} returned HTTP {response.status_code}"
