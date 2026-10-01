@@ -20,6 +20,7 @@ from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.deletion_jobs import DeletionJobStore
 
 LOGGER = logging.getLogger(__name__)
+_SOURCE_UNLINK_GRACE_SECONDS = 30
 _MOVIE_KEY = re.compile(r"movie:tmdb:([1-9][0-9]*)$")
 _EPISODE_KEY = re.compile(r"episode:tmdb:([1-9][0-9]*):S([0-9]{2})E([0-9]{2})$")
 _SIDECAR = re.compile(
@@ -103,6 +104,7 @@ class DeletionCoordinator:
         self.mount_check = mount_check or os.path.ismount
         self._jellyfin_notify_at: dict[str, float] = {}
         self._jellyfin_refresh_at: dict[str, float] = {}
+        self._source_unlink_wait_since: dict[str, float] = {}
 
     def _guard_mount(self) -> None:
         try:
@@ -428,9 +430,17 @@ class DeletionCoordinator:
         retained = result["state"] == "retained_shared"
         if retained and job["item_type"] != "Episode":
             raise DeletionBlocked("only an episode may retain a shared season source")
+        self._guard_mount()
         _path, remaining = self._file(job, must_exist=True)
         if not retained and remaining is not None and remaining.st_nlink > 1:
+            # qBit can remove its catalog entry before libtorrent unlinks the
+            # payload. Wait for that one source link while keeping Arr untouched.
+            now = time.monotonic()
+            since = self._source_unlink_wait_since.setdefault(job["item_id"], now)
+            if remaining.st_nlink == 2 and now - since < _SOURCE_UNLINK_GRACE_SECONDS:
+                raise DeletionRetryable("torrent payload unlink is still processing")
             raise DeletionBlocked("media has another hardlink after torrent cleanup")
+        self._source_unlink_wait_since.pop(job["item_id"], None)
 
     async def _delete_arr(self, job: dict[str, Any]) -> None:
         path, current = self._file(job, must_exist=False)
@@ -549,6 +559,119 @@ class DeletionCoordinator:
             headers=self.seerr_headers,
         )
         self._status(response, allow_missing=True)
+
+    async def _seerr_rows(self, resource: str) -> list[dict[str, Any]]:
+        """Read a complete, stable Seerr listing before deciding what to remove."""
+        rows: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        total: int | None = None
+        skip = 0
+        while True:
+            self._guard_mount()
+            params: dict[str, str | int] = {"take": 100, "skip": skip, "filter": "all"}
+            if resource == "request":
+                params["mediaType"] = "movie"
+            response = await self.client.get(
+                f"{self.seerr_url}/api/v1/{resource}",
+                headers=self.seerr_headers,
+                params=params,
+            )
+            result = self._json(response)
+            page = result.get("pageInfo") if isinstance(result, dict) else None
+            batch = result.get("results") if isinstance(result, dict) else None
+            count = page.get("results") if isinstance(page, dict) else None
+            expected_pages = (count + 99) // 100 if type(count) is int and count >= 0 else None
+            if (
+                not isinstance(page, dict)
+                or type(count) is not int or count < 0
+                or type(page.get("pageSize")) is not int
+                or page.get("pageSize") != 100
+                or type(page.get("page")) is not int
+                or page.get("page") != skip // 100 + 1
+                or type(page.get("pages")) is not int
+                or page.get("pages") != expected_pages
+                or not isinstance(batch, list)
+                or len(batch) != min(100, max(count - skip, 0))
+            ):
+                raise DeletionBlocked("Seerr listing is incomplete or malformed")
+            if total is None:
+                total = count
+            elif count != total:
+                raise DeletionBlocked("Seerr listing changed during deletion preflight")
+            for row in batch:
+                row_id = row.get("id") if isinstance(row, dict) else None
+                if type(row_id) is not int or row_id <= 0 or row_id in seen:
+                    raise DeletionBlocked("Seerr listing has ambiguous identities")
+                seen.add(row_id)
+                media = row if resource == "media" else row.get("media")
+                if (
+                    not isinstance(media, dict)
+                    or type(media.get("id")) is not int or media["id"] <= 0
+                    or type(media.get("tmdbId")) is not int or media["tmdbId"] <= 0
+                    or media.get("mediaType") not in {"movie", "tv"}
+                ):
+                    raise DeletionBlocked("Seerr listing has incomplete media identity")
+                rows.append(row)
+            skip += len(batch)
+            if skip == total:
+                return rows
+
+    async def _seerr_movie_cache(self, tmdb_id: int) -> tuple[int | None, list[dict[str, Any]]]:
+        rows = await self._seerr_rows("media")
+        matches = [row for row in rows
+                   if row["tmdbId"] == tmdb_id and row["mediaType"] == "movie"]
+        if len(matches) > 1:
+            raise DeletionBlocked("Seerr has multiple cache entries for captured movie")
+        return (matches[0]["id"] if matches else None), rows
+
+    async def _delete_seerr_media_cache(self, job: dict[str, Any]) -> None:
+        """Forget only a managed movie's metadata after Jellyfin confirms removal."""
+        if job["item_type"] != "Movie":
+            return
+        _reservation_key, source_id, _permit = self._association(job)
+        if source_id is None:
+            return
+        if not source_id.isdecimal():
+            raise DeletionBlocked("Seerr movie request identity is invalid")
+        tmdb_id = self._payload(job)["tmdb_id"]
+        media_id, _ = await self._seerr_movie_cache(tmdb_id)
+        if media_id is None:
+            return
+        requests = await self._seerr_rows("request")
+        if any(
+            request["media"]["id"] == media_id
+            or (request["media"]["tmdbId"] == tmdb_id
+                and request["media"]["mediaType"] == "movie")
+            for request in requests
+        ):
+            raise DeletionBlocked("Seerr movie has another request")
+        fresh_id, fresh_rows = await self._seerr_movie_cache(tmdb_id)
+        if fresh_id != media_id or any(
+            row["id"] == media_id and (
+                row["tmdbId"] != tmdb_id or row["mediaType"] != "movie"
+            ) for row in fresh_rows
+        ):
+            raise DeletionBlocked("Seerr movie cache identity changed before removal")
+        self._guard_mount()
+        _path, remaining = self._file(job, must_exist=False)
+        if remaining is not None:
+            raise DeletionBlocked("media file exists before Seerr cache cleanup")
+        if await self._jellyfin_item_present(job["item_id"]):
+            raise DeletionRetryable("Jellyfin movie reappeared before Seerr cache cleanup")
+        response = await self.client.delete(
+            f"{self.seerr_url}/api/v1/media/{media_id}",
+            headers=self.seerr_headers,
+        )
+        self._status(response, allow_missing=True)
+        remaining_id, remaining_rows = await self._seerr_movie_cache(tmdb_id)
+        if remaining_id is not None and remaining_id != media_id:
+            raise DeletionBlocked("Seerr movie cache identity changed after removal")
+        if any(row["id"] == media_id and (
+            row["tmdbId"] != tmdb_id or row["mediaType"] != "movie"
+        ) for row in remaining_rows):
+            raise DeletionBlocked("Seerr movie cache identity changed after removal")
+        if remaining_id is not None:
+            raise DeletionRetryable("Seerr movie cache still exists after removal")
 
     async def _jellyfin_item_present(self, item_id: str) -> bool:
         response = await self.client.get(
@@ -1042,6 +1165,7 @@ class DeletionCoordinator:
                 await self._delete_jellyfin(job)
                 job = self.jobs.set_stage(job["item_id"], "jellyfin_removed")
             elif stage == "jellyfin_removed":
+                await self._delete_seerr_media_cache(job)
                 self.jobs.set_stage(job["item_id"], "complete")
                 return
             else:

@@ -90,6 +90,400 @@ def _add_movie_source(jobs: DeletionJobStore) -> None:
         )
 
 
+def _seerr_page(rows, skip):
+    return {
+        "pageInfo": {
+            "pages": (len(rows) + 99) // 100, "pageSize": 100,
+            "results": len(rows), "page": skip // 100 + 1,
+        },
+        "results": rows[skip:skip + 100],
+    }
+
+
+class SeerrCacheFixture:
+    def __init__(self, media, requests=(), *, request_present=False):
+        self.media = list(media)
+        self.requests = list(requests)
+        self.request_present = request_present
+        self.calls = []
+        self.media_reads = 0
+        self.media_delete_status = 204
+        self.mutate_on_media_read = None
+        self.malformed_path = None
+
+    def responder(self, request):
+        path = request.url.path
+        self.calls.append((request.method, path))
+        if request.method == "GET" and path == "/api/v1/request/77":
+            if not self.request_present:
+                return httpx.Response(404)
+            return httpx.Response(200, json={
+                "id": 77,
+                "media": {"id": 12, "tmdbId": 123, "mediaType": "movie"},
+            })
+        if request.method == "DELETE" and path == "/api/v1/request/77":
+            self.request_present = False
+            self.requests = [row for row in self.requests if row["id"] != 77]
+            return httpx.Response(204)
+        if request.method == "GET" and path in {"/api/v1/media", "/api/v1/request"}:
+            assert request.url.params["take"] == "100"
+            assert request.url.params["filter"] == "all"
+            skip = int(request.url.params["skip"])
+            if path == "/api/v1/request":
+                assert request.url.params["mediaType"] == "movie"
+                rows = self.requests
+            else:
+                self.media_reads += 1
+                if self.mutate_on_media_read is not None:
+                    self.mutate_on_media_read(self)
+                rows = self.media
+            if self.malformed_path == path:
+                return httpx.Response(200, json={"results": rows})
+            return httpx.Response(200, json=_seerr_page(rows, skip))
+        if request.method == "DELETE" and path.startswith("/api/v1/media/"):
+            assert path == "/api/v1/media/12"
+            if self.media_delete_status == 204:
+                self.media = [row for row in self.media if row["id"] != 12]
+            return httpx.Response(self.media_delete_status)
+        raise AssertionError(request)
+
+
+async def _delete_movie_cache(tmp_path, service):
+    jobs, data_root, media_root, snapshot, video = _fixture(tmp_path)
+    _add_movie_source(jobs)
+    video.unlink()  # The Arr/Jellyfin stages already removed the captured file.
+
+    def responder(request):
+        if request.url.host == "jellyfin":
+            assert request.url.path == "/Items"
+            return httpx.Response(200, json={"Items": []})
+        return service.responder(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
+        coordinator = _coordinator(
+            jobs=jobs, data_root=data_root, media_root=media_root,
+            snapshot=snapshot, client=client,
+        )
+        await coordinator._delete_seerr(jobs.get("a" * 32))
+        await coordinator._delete_seerr_media_cache(jobs.get("a" * 32))
+
+
+@pytest.mark.asyncio
+async def test_missing_seerr_request_still_clears_matching_movie_cache(tmp_path):
+    service = SeerrCacheFixture([
+        {"id": 12, "tmdbId": 123, "mediaType": "movie", "status": 5},
+        {"id": 21, "tmdbId": 123, "mediaType": "tv", "status": 5},
+    ])
+    await _delete_movie_cache(tmp_path, service)
+    assert service.media == [{"id": 21, "tmdbId": 123, "mediaType": "tv", "status": 5}]
+    assert ("DELETE", "/api/v1/media/12") in service.calls
+    assert not any(path.endswith("/file") for _, path in service.calls)
+
+
+@pytest.mark.asyncio
+async def test_existing_seerr_request_is_removed_before_movie_cache(tmp_path):
+    service = SeerrCacheFixture(
+        [{"id": 12, "tmdbId": 123, "mediaType": "movie"}],
+        [{"id": 77, "media": {"id": 12, "tmdbId": 123, "mediaType": "movie"}}],
+        request_present=True,
+    )
+    await _delete_movie_cache(tmp_path, service)
+    assert service.requests == [] and service.media == []
+    assert service.calls.index(("DELETE", "/api/v1/request/77")) < service.calls.index(
+        ("DELETE", "/api/v1/media/12"))
+
+
+@pytest.mark.asyncio
+async def test_seerr_cache_paginates_and_preserves_unrelated_rows(tmp_path):
+    unrelated = [
+        {"id": 1000 + index, "tmdbId": 2000 + index, "mediaType": "movie"}
+        for index in range(100)
+    ]
+    service = SeerrCacheFixture(unrelated + [
+        {"id": 12, "tmdbId": 123, "mediaType": "movie"},
+    ])
+    await _delete_movie_cache(tmp_path, service)
+    assert service.media == unrelated
+    assert service.calls.count(("GET", "/api/v1/media")) == 5
+    assert service.calls.count(("DELETE", "/api/v1/media/12")) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unsafe", [
+    "other_request", "other_request_on_second_page", "duplicate_movie", "malformed_media",
+    "malformed_requests", "identity_changed", "duplicate_id",
+])
+async def test_seerr_cache_refuses_ambiguous_or_incomplete_evidence(tmp_path, unsafe):
+    service = SeerrCacheFixture([{"id": 12, "tmdbId": 123, "mediaType": "movie"}])
+    if unsafe == "other_request":
+        service.requests = [{
+            "id": 88, "media": {"id": 12, "tmdbId": 123, "mediaType": "movie"},
+        }]
+    elif unsafe == "other_request_on_second_page":
+        service.requests = [
+            {"id": index + 1000, "media": {
+                "id": index + 2000, "tmdbId": index + 3000, "mediaType": "movie",
+            }} for index in range(100)
+        ] + [{"id": 88, "media": {"id": 12, "tmdbId": 123, "mediaType": "movie"}}]
+    elif unsafe == "duplicate_movie":
+        service.media.append({"id": 13, "tmdbId": 123, "mediaType": "movie"})
+    elif unsafe == "malformed_media":
+        service.malformed_path = "/api/v1/media"
+    elif unsafe == "malformed_requests":
+        service.malformed_path = "/api/v1/request"
+    elif unsafe == "identity_changed":
+        def change(fixture):
+            if fixture.media_reads == 2:
+                fixture.media[0] = {"id": 12, "tmdbId": 999, "mediaType": "movie"}
+        service.mutate_on_media_read = change
+    else:
+        service.media.append({"id": 12, "tmdbId": 999, "mediaType": "movie"})
+    with pytest.raises(ValueError):
+        await _delete_movie_cache(tmp_path, service)
+    assert not any(method == "DELETE" and path.startswith("/api/v1/media/")
+                   for method, path in service.calls)
+
+
+@pytest.mark.asyncio
+async def test_seerr_cache_delete_failure_is_retryable_and_idempotent(tmp_path):
+    service = SeerrCacheFixture([{"id": 12, "tmdbId": 123, "mediaType": "movie"}])
+    service.media_delete_status = 503
+    with pytest.raises(RuntimeError):
+        await _delete_movie_cache(tmp_path / "first", service)
+    assert len(service.media) == 1
+    service.media_delete_status = 204
+    await _delete_movie_cache(tmp_path / "second", service)
+    await _delete_movie_cache(tmp_path / "third", service)
+    assert service.media == []
+    assert service.calls.count(("DELETE", "/api/v1/media/12")) == 2
+
+
+@pytest.mark.asyncio
+async def test_seerr_cache_delete_404_does_not_complete_while_entry_remains(tmp_path):
+    service = SeerrCacheFixture([{"id": 12, "tmdbId": 123, "mediaType": "movie"}])
+    service.media_delete_status = 404
+    with pytest.raises(RuntimeError, match="cache still exists"):
+        await _delete_movie_cache(tmp_path, service)
+    assert len(service.media) == 1
+
+
+@pytest.mark.asyncio
+async def test_seerr_cache_blocks_recreated_identity_after_delete(tmp_path):
+    service = SeerrCacheFixture([{"id": 12, "tmdbId": 123, "mediaType": "movie"}])
+
+    def recreate(fixture):
+        if fixture.media_reads == 3:
+            fixture.media.append({"id": 13, "tmdbId": 123, "mediaType": "movie"})
+
+    service.mutate_on_media_read = recreate
+    with pytest.raises(ValueError, match="identity changed"):
+        await _delete_movie_cache(tmp_path, service)
+    assert ("DELETE", "/api/v1/media/12") in service.calls
+    assert ("DELETE", "/api/v1/media/13") not in service.calls
+
+
+@pytest.mark.asyncio
+async def test_seerr_cache_waits_for_jellyfin_and_resumes_after_delete_error(tmp_path):
+    jobs, data_root, media_root, snapshot, video = _fixture(tmp_path)
+    _add_movie_source(jobs)
+    video.unlink()
+    jobs.set_stage("a" * 32, "seerr_removed")
+    service = SeerrCacheFixture([{"id": 12, "tmdbId": 123, "mediaType": "movie"}])
+    service.media_delete_status = 503
+    jelly_present = True
+    calls = []
+
+    def responder(request):
+        nonlocal jelly_present
+        calls.append((request.method, request.url.path))
+        if request.url.host == "jellyfin":
+            if request.url.path == "/Items":
+                return httpx.Response(200, json={
+                    "Items": [{"Id": "a" * 32}] if jelly_present else [],
+                })
+            if request.url.path == "/Library/Media/Updated":
+                return httpx.Response(204)
+        if request.url.host == "seerr":
+            return service.responder(request)
+        raise AssertionError(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
+        coordinator = _coordinator(
+            jobs=jobs, data_root=data_root, media_root=media_root,
+            snapshot=snapshot, client=client,
+        )
+        assert await coordinator.run_once() == "retry"
+        assert jobs.get("a" * 32)["stage"] == "seerr_removed"
+        assert not any(path.startswith("/api/v1/media") for _, path in service.calls)
+        jelly_present = False
+        assert await coordinator.run_once() == "retry"
+        assert jobs.get("a" * 32)["stage"] == "jellyfin_removed"
+        service.media_delete_status = 204
+        jelly_present = True
+        assert await coordinator.run_once() == "retry"
+        assert jobs.get("a" * 32)["stage"] == "jellyfin_removed"
+        assert service.calls.count(("DELETE", "/api/v1/media/12")) == 1
+        jelly_present = False
+        assert await coordinator.run_once() == "complete"
+    assert jobs.get("a" * 32)["stage"] == "complete"
+    assert service.media == []
+    assert calls.count(("GET", "/Items")) >= 5
+    assert not any(path.startswith("/api/v3/") or path == "/api/v1/request/77"
+                   for _, path in calls)
+
+
+@pytest.mark.asyncio
+async def test_seerr_cache_retry_does_not_remove_replaced_movie(tmp_path):
+    jobs, data_root, media_root, snapshot, video = _fixture(tmp_path)
+    _add_movie_source(jobs)
+    video.unlink()
+    service = SeerrCacheFixture([{"id": 12, "tmdbId": 123, "mediaType": "movie"}])
+    service.media_delete_status = 503
+
+    def responder(request):
+        if request.url.host == "jellyfin":
+            return httpx.Response(200, json={"Items": []})
+        return service.responder(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(responder)) as client:
+        coordinator = _coordinator(
+            jobs=jobs, data_root=data_root, media_root=media_root,
+            snapshot=snapshot, client=client,
+        )
+        with pytest.raises(RuntimeError):
+            await coordinator._delete_seerr_media_cache(jobs.get("a" * 32))
+        video.write_bytes(b"replacement")
+        service.media_delete_status = 204
+        with pytest.raises(ValueError, match="captured file changed"):
+            await coordinator._delete_seerr_media_cache(jobs.get("a" * 32))
+    assert service.calls.count(("DELETE", "/api/v1/media/12")) == 1
+    assert video.read_bytes() == b"replacement"
+
+
+class DeferredSourceUnlinkFixture:
+    """qBit drops its catalog entry before its filesystem operation finishes."""
+
+    def __init__(self, tmp_path):
+        self.jobs, self.data, self.media, self.snapshot, self.video = _fixture(tmp_path)
+        _add_movie_source(self.jobs)
+        self.source = self.data / "source.mkv"
+        os.link(self.video, self.source)
+        self.gateway_calls = 0
+        self.arr_mutations = []
+
+    def responder(self, request):
+        if request.url.host == "gateway":
+            self.gateway_calls += 1
+            return httpx.Response(200, json={
+                "state": "deleted" if self.gateway_calls == 1 else "missing",
+            })
+        if request.url.host == "radarr":
+            if request.method == "GET":
+                return httpx.Response(200, json={
+                    "id": 7, "tmdbId": 123,
+                    "movieFile": {"id": 9, "path": str(self.video), "size": 13},
+                })
+            self.arr_mutations.append((request.method, request.url.path))
+            if request.url.path == "/api/v3/moviefile/9":
+                assert self.video.stat().st_nlink == 1
+                self.video.unlink()
+            else:
+                assert not self.video.exists()
+            return httpx.Response(204)
+        if request.url.host == "seerr":
+            if request.method == "GET" and request.url.path == "/api/v1/media":
+                return httpx.Response(200, json=_seerr_page([], 0))
+            return httpx.Response(404)
+        if request.url.host == "jellyfin":
+            return httpx.Response(200, json={"Items": []})
+        raise AssertionError(request)
+
+    def coordinator(self, client):
+        return _coordinator(
+            jobs=self.jobs, data_root=self.data, media_root=self.media,
+            snapshot=self.snapshot, client=client,
+        )
+
+
+@pytest.mark.asyncio
+async def test_movie_waits_for_asynchronous_source_unlink_before_arr_delete(tmp_path):
+    fixture = DeferredSourceUnlinkFixture(tmp_path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.responder)) as client:
+        worker = fixture.coordinator(client)
+        assert await worker.run_once() == "retry"
+        assert fixture.jobs.get("a" * 32)["stage"] == "tombstoned"
+        assert fixture.video.stat().st_nlink == 2
+        assert fixture.arr_mutations == []
+        fixture.source.unlink()  # qBit finishes the physical deletion between cycles.
+        assert await worker.run_once() == "complete"
+    assert fixture.jobs.get("a" * 32)["stage"] == "complete"
+    assert fixture.gateway_calls == 2
+    assert not fixture.video.exists()
+    assert fixture.arr_mutations == [
+        ("DELETE", "/api/v3/moviefile/9"), ("DELETE", "/api/v3/movie/7"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_source_unlink_timeout_blocks_a_remaining_foreign_hardlink(tmp_path, monkeypatch):
+    import homeserver_control.worker.deletion_coordinator as coordinator_module
+
+    fixture = DeferredSourceUnlinkFixture(tmp_path)
+    clock = [100.0]
+    monkeypatch.setattr(coordinator_module.time, "monotonic", lambda: clock[0])
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.responder)) as client:
+        worker = fixture.coordinator(client)
+        assert await worker.run_once() == "retry"
+        clock[0] = 129.9
+        assert await worker.run_once() == "retry"
+        clock[0] = 130.0
+        assert await worker.run_once() == "blocked"
+    assert fixture.jobs.get("a" * 32)["error"] == "media has another hardlink after torrent cleanup"
+    assert fixture.arr_mutations == []
+    assert fixture.video.exists() and fixture.source.exists()
+
+
+@pytest.mark.asyncio
+async def test_source_cleanup_with_more_than_two_links_blocks_immediately(tmp_path):
+    fixture = DeferredSourceUnlinkFixture(tmp_path)
+    foreign = fixture.data / "foreign.mkv"
+    os.link(fixture.video, foreign)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.responder)) as client:
+        assert await fixture.coordinator(client).run_once() == "blocked"
+    assert fixture.video.stat().st_nlink == 3
+    assert fixture.arr_mutations == []
+    assert foreign.exists()
+
+
+@pytest.mark.asyncio
+async def test_waiting_source_unlink_revalidates_file_identity_before_retry(tmp_path):
+    fixture = DeferredSourceUnlinkFixture(tmp_path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.responder)) as client:
+        worker = fixture.coordinator(client)
+        assert await worker.run_once() == "retry"
+        fixture.video.unlink()
+        fixture.video.write_bytes(b"a replacement video")
+        assert await worker.run_once() == "blocked"
+    assert fixture.gateway_calls == 1
+    assert fixture.arr_mutations == []
+    assert fixture.video.read_bytes() == b"a replacement video"
+
+
+@pytest.mark.asyncio
+async def test_waiting_source_unlink_revalidates_mount_before_retry(tmp_path):
+    fixture = DeferredSourceUnlinkFixture(tmp_path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.responder)) as client:
+        worker = fixture.coordinator(client)
+        assert await worker.run_once() == "retry"
+        fixture.snapshot.write_text(json.dumps({
+            "filesystem_id": "media-uuid", "measured_at": time.time() - 60,
+        }))
+        assert await worker.run_once() == "retry"
+    assert fixture.gateway_calls == 1
+    assert fixture.arr_mutations == []
+    assert fixture.video.stat().st_nlink == 2
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("detail", ["torrent contains other media", "private permit-secret"])
 async def test_gateway_block_reason_is_persisted_without_upstream_secrets(tmp_path, detail):
@@ -127,6 +521,7 @@ async def test_movie_cascade_removes_captured_source_and_completes(tmp_path: Pat
     jobs, data_root, media_root, snapshot, video = _fixture(tmp_path)
     _add_movie_source(jobs)
     calls: list[tuple[str, str]] = []
+    seerr_media = [{"id": 12, "tmdbId": 123, "mediaType": "movie"}]
 
     def responder(request: httpx.Request) -> httpx.Response:
         calls.append((request.method, request.url.path))
@@ -153,11 +548,18 @@ async def test_movie_cascade_removes_captured_source_and_completes(tmp_path: Pat
             }
             return httpx.Response(200, json={"state": "deleted"})
         if request.url.host == "seerr" and request.method == "GET":
-            return httpx.Response(200, json={
-                "id": 77, "media": {"tmdbId": 123, "mediaType": "movie"},
-            })
+            if request.url.path == "/api/v1/request/77":
+                return httpx.Response(200, json={
+                    "id": 77, "media": {"id": 12, "tmdbId": 123, "mediaType": "movie"},
+                })
+            if request.url.path == "/api/v1/request":
+                return httpx.Response(200, json=_seerr_page([], 0))
+            if request.url.path == "/api/v1/media":
+                return httpx.Response(200, json=_seerr_page(seerr_media, 0))
         if request.url.host == "seerr" and request.method == "DELETE":
-            return httpx.Response(200, json={})
+            if request.url.path == "/api/v1/media/12":
+                seerr_media.clear()
+            return httpx.Response(204)
         if request.url.host == "jellyfin":
             assert not video.exists()
             assert request.headers["X-Emby-Token"] == "jellyfin-key"
@@ -181,6 +583,10 @@ async def test_movie_cascade_removes_captured_source_and_completes(tmp_path: Pat
         ("DELETE", "/api/v3/movie/7"),
         ("GET", "/api/v1/request/77"),
         ("DELETE", "/api/v1/request/77"), ("GET", "/Items"),
+        ("GET", "/api/v1/media"), ("GET", "/api/v1/request"),
+        ("GET", "/api/v1/media"), ("GET", "/Items"),
+        ("DELETE", "/api/v1/media/12"),
+        ("GET", "/api/v1/media"),
     ]
 
 

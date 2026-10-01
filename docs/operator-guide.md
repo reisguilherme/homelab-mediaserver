@@ -113,7 +113,10 @@ outros episódios.
 
 No Seerr, um pedido exclusivo da temporada removida é excluído; um pedido que
 também abrange outras temporadas permanece e recebe sincronização do estado da
-biblioteca. A atualização dos catálogos e do espaço mostrado no painel é
+biblioteca. Para filmes gerenciados, a limpeza também remove o registro de
+disponibilidade do filme, mesmo quando seu pedido já foi excluído. Se existir
+outro pedido do mesmo filme, o job para para revisão antes de remover esse registro.
+A atualização dos catálogos e do espaço mostrado no painel é
 assíncrona. Consulte os logs de `control-worker` e o endpoint autenticado
 `GET /api/v1/deletions/jobs` do controle (porta `8080`, header `X-Admin-Token`)
 para acompanhar `stage` e `error`. Veja [diagnóstico](troubleshooting.md).
