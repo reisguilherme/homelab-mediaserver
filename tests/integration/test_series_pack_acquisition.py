@@ -8,10 +8,64 @@ import pytest
 from homeserver_control.domain.torrent_bytes import inspect_torrent
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
+from homeserver_control.persistence.deletion_jobs import DeletionJobStore
 from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 from homeserver_control.worker.capacity_evidence import CapacityEvidence
 from homeserver_control.worker.release_quality import ReleasePolicy
 from homeserver_control.worker.series_acquisition import SeriesAcquirer
+
+
+@pytest.mark.asyncio
+async def test_season_deleted_during_pack_fetch_does_not_admit_or_grab(tmp_path):
+    fixture = SeriesFixture(tmp_path, episode_count=2)
+    fixture.pack_offers = [fixture.release("whole-season", [1, 2])]
+    jobs = DeletionJobStore(fixture.repo.path)
+
+    def handler(request):
+        if request.url.path == "/1/download":
+            jobs.tombstone("season:tmdb:101:1", "jellyfin-season")
+        return fixture.handler(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        acquirer = fixture.acquirer(
+            client, is_tombstoned=jobs.is_tombstoned, prefer_season_pack=True,
+        )
+        assert await acquirer.acquire("season:tmdb:101:1", fixture.reservation) == (
+            "reservation_inactive"
+        )
+    assert fixture.permits.get_for_reservation(fixture.reservation, scope_key="S01PACK") is None
+    assert fixture.posts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_admitted", [False, True])
+async def test_deleted_episode_declines_new_pack_but_preserves_admitted_shared_pack(
+    tmp_path, already_admitted,
+):
+    fixture = SeriesFixture(tmp_path, episode_count=2)
+    fixture.pack_offers = [fixture.release("whole-season", [1, 2])]
+    fixture.episode_offers[2] = [fixture.release("episode-two", [2])]
+    jobs = DeletionJobStore(fixture.repo.path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handler)) as client:
+        acquirer = fixture.acquirer(
+            client, is_tombstoned=jobs.is_tombstoned, prefer_season_pack=True,
+        )
+        if already_admitted:
+            assert await acquirer.acquire("season:tmdb:101:1", fixture.reservation) == "grabbed"
+        jobs.tombstone("episode:tmdb:101:S01E01", "jellyfin-episode")
+        assert await acquirer.acquire("season:tmdb:101:1", fixture.reservation) == (
+            "waiting_episodes" if already_admitted else "grabbed"
+        )
+    parent = fixture.permits.get_for_reservation(fixture.reservation, scope_key="S01PACK")
+    second = fixture.permits.get_for_reservation(fixture.reservation, scope_key="S01E02")
+    assert second is not None
+    assert fixture.posts == (["whole-season"] if already_admitted else ["episode-two"])
+    if already_admitted:
+        assert parent is not None and second.season_pack_parent_id == parent.permit_id
+    else:
+        assert parent is None
+        assert fixture.permits.get_for_reservation(fixture.reservation, scope_key="S01E01") is None
+        assert all("S01E02" in name for name in second.selected_files)
 
 
 def _encode(value):

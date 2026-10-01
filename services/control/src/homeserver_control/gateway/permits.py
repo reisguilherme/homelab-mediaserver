@@ -671,6 +671,9 @@ class PermitRegistry(ProbePermits):
         deletion is deliberately unavailable without the persistent database.
         Historical permits for another scope may still share a torrent hash;
         fail closed if any other live permit can own the same payload.
+        Superseded/rejected episode sources are removable only after explicit
+        whole-season deletion, so an ordinary episode or movie delete cannot
+        expand its scope into download history.
         """
         if (
             self._db_path is None
@@ -683,7 +686,7 @@ class PermitRegistry(ProbePermits):
             row = connection.execute(
                 "SELECT p.* FROM gateway_permits p "
                 "JOIN reservations r ON r.id = p.reservation_id "
-                "WHERE p.token = ? AND p.state = 'confirmed' "
+                "WHERE p.token = ? AND p.state IN ('confirmed','superseded','probe_rejected') "
                 "AND r.media_key = ? AND p.scope_key IS ?",
                 (token, media_key, scope_key),
             ).fetchone()
@@ -692,6 +695,14 @@ class PermitRegistry(ProbePermits):
             permit = self._permit_from_row(row)
             season = re.fullmatch(r"season:tmdb:[1-9][0-9]*:([1-9][0-9]*)", media_key)
             episode = re.fullmatch(r"S([0-9]{2,})E[0-9]{2,}", scope_key or "")
+            if permit.state != "confirmed" and (
+                permit.category != "sonarr" or season is None or episode is None
+                or int(season[1]) != int(episode[1])
+                or connection.execute(
+                    "SELECT 1 FROM tombstones WHERE media_key=?", (media_key,),
+                ).fetchone() is None
+            ):
+                raise PermissionError("explicit season deletion required for historical source")
             if (
                 permit.destination != "/data/torrents"
                 or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)

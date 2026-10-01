@@ -71,6 +71,64 @@ class DeletionJobStore:
             assert row is not None
             return self._decode(row)
 
+    def enqueue_season(self, item_id: str, payload: dict) -> dict[str, object]:
+        """Persist a captured season and its children together, or admit none."""
+        now = _now()
+        with closing(self._connect()) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM deletion_jobs WHERE item_id = ?", (item_id,)
+            ).fetchone()
+            if existing is not None:
+                if existing["item_type"] != "Season":
+                    raise ValueError("season item already belongs to another deletion")
+                return self._decode(existing)
+            episodes = payload.get("episodes")
+            if not isinstance(episodes, list) or not episodes:
+                raise ValueError("season has no captured episodes")
+            children: list[tuple[str, str]] = []
+            seen = {item_id}
+            for child in episodes:
+                if not isinstance(child, dict) or set(child) != {"item_id", "payload"}:
+                    raise ValueError("season child capture is incomplete")
+                child_id, child_payload = child["item_id"], child["payload"]
+                if (
+                    not isinstance(child_id, str) or not child_id or child_id in seen
+                    or not isinstance(child_payload, dict)
+                    or child_payload.get("parent_item_id") != item_id
+                ):
+                    raise ValueError("season child identity is invalid")
+                seen.add(child_id)
+                encoded = json.dumps(child_payload, sort_keys=True, separators=(",", ":"))
+                existing_child = connection.execute(
+                    "SELECT * FROM deletion_jobs WHERE item_id = ?", (child_id,)
+                ).fetchone()
+                if existing_child is not None and (
+                    existing_child["item_type"] != "Episode"
+                    or existing_child["payload_json"] != encoded
+                    or existing_child["stage"] in _TERMINAL_STAGES
+                ):
+                    raise ValueError("captured episode already has a different deletion")
+                children.append((child_id, encoded))
+            connection.execute(
+                """INSERT INTO deletion_jobs
+                (item_id, item_type, payload_json, stage, created_at, updated_at)
+                VALUES (?, 'Season', ?, 'queued', ?, ?)""",
+                (item_id, json.dumps(payload, sort_keys=True, separators=(",", ":")), now, now),
+            )
+            for child_id, encoded in children:
+                connection.execute(
+                    """INSERT OR IGNORE INTO deletion_jobs
+                    (item_id, item_type, payload_json, stage, created_at, updated_at)
+                    VALUES (?, 'Episode', ?, 'queued', ?, ?)""",
+                    (child_id, encoded, now, now),
+                )
+            row = connection.execute(
+                "SELECT * FROM deletion_jobs WHERE item_id = ?", (item_id,)
+            ).fetchone()
+            assert row is not None
+            return self._decode(row)
+
     def get(self, item_id: str) -> dict[str, object] | None:
         with closing(self._connect()) as connection:
             row = connection.execute(

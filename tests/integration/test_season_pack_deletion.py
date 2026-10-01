@@ -142,7 +142,7 @@ class PackFixture:
             (self.archive / entry["name"]).unlink()
         self.current = None
 
-    def capture(self, number):
+    def capture(self, number, *, parent_item_id=None):
         video = self.videos[number]
         status = video.stat()
         return self.jobs.enqueue(
@@ -163,6 +163,7 @@ class PackFixture:
                 "series_tmdb_id": 123,
                 "season": 2,
                 "episode": number,
+                **({"parent_item_id": parent_item_id} if parent_item_id else {}),
             },
         )
 
@@ -285,6 +286,61 @@ async def test_pack_episode_deletion_cascades_then_last_episode_frees_archive(tm
     assert not list((fixture.archive / "pack").iterdir())
     assert fixture.neighbor.read_bytes() == b"unrelated"
     assert await fixture.coordinator(client).run_once() == "empty"
+
+
+@pytest.mark.asyncio
+async def test_whole_season_reuses_episode_guards_and_removes_shared_pack_only_once(tmp_path):
+    fixture = PackFixture(tmp_path)
+    folder = fixture.media / "tv" / "Series" / "Season 02"
+    folder.mkdir(parents=True)
+    for number, old_video in tuple(fixture.videos.items()):
+        video = folder / old_video.name
+        old_video.rename(video)
+        old_video.with_suffix(".pt-BR.srt").rename(video.with_suffix(".pt-BR.srt"))
+        fixture.videos[number] = video
+    parent_id = "a" * 32
+    children = [fixture.capture(number, parent_item_id=parent_id) for number in (5, 6)]
+    status = folder.stat()
+    fixture.jobs.enqueue(parent_id, "Season", {
+        "media_key": "season:tmdb:123:2", "series_tmdb_id": 123, "series_tvdb_id": 456,
+        "sonarr_series_id": 1, "season": 2, "file_path": str(folder),
+        "directory_identity": {"device": status.st_dev, "inode": status.st_ino},
+        "sonarr_episode_ids": [5, 6], "metadata_files": [],
+        "episodes": [{"item_id": child["item_id"], "payload": child["payload"]}
+                     for child in children],
+    })
+    series = {"id": 1, "tvdbId": 456, "seasons": [
+        {"seasonNumber": 2, "monitored": True}, {"seasonNumber": 3, "monitored": True},
+    ]}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=fixture.app), base_url="http://gateway",
+    ) as gateway:
+        async def handler(request):
+            if request.url.host == "sonarr" and request.url.path == "/api/v3/series/1":
+                if request.method == "PUT":
+                    series.update(json.loads(request.content))
+                return httpx.Response(200, json=series)
+            if request.url.host == "seerr":
+                assert request.method != "DELETE"  # Request includes another season.
+                return httpx.Response(200, json={
+                    "id": 123, "media": {"tmdbId": 123, "mediaType": "tv"},
+                    "seasons": [{"seasonNumber": 2}, {"seasonNumber": 3}],
+                })
+            return await fixture.native_response(request, gateway)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            worker = fixture.coordinator(client)
+            for _ in range(20):
+                await worker.run_once()
+                if fixture.jobs.get(parent_id)["stage"] == "complete":
+                    break
+    assert fixture.jobs.get(parent_id)["stage"] == "complete"
+    assert fixture.gateway_states == ["retained_shared", "deleted", "missing"]
+    assert fixture.deleted == [fixture.parent.infohash]
+    assert not folder.exists()
+    assert not list((fixture.archive / "pack").iterdir())
+    assert fixture.neighbor.read_bytes() == b"unrelated"
+    assert series["seasons"][1]["monitored"] is True
 
 
 @pytest.mark.parametrize("failure", ["other_episode", "category", "path", "files", "artifact"])

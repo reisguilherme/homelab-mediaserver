@@ -1,5 +1,6 @@
 """The worker can remove only a uniquely owned, verified torrent payload."""
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -9,6 +10,7 @@ from homeserver_control.domain.torrent_bytes import inspect_torrent
 from homeserver_control.gateway.app import create_app
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
+from homeserver_control.persistence.deletion_jobs import DeletionJobStore
 from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 
 TORRENT = (
@@ -241,6 +243,140 @@ def test_worker_delete_refuses_without_verified_manifest(tmp_path) -> None:
 
     with sqlite3.connect(tmp_path / "control.sqlite") as connection:
         connection.execute("DELETE FROM torrent_artifacts")
+    response = client.post(
+        "/internal/delete-source", headers={"X-Arr-Token": "secret"}, json=body,
+    )
+    assert response.status_code == 409
+    assert upstream.deleted == []
+
+
+@pytest.mark.parametrize("state", ["superseded", "probe_rejected"])
+def test_explicit_season_deletion_purges_verified_historical_episode_source(tmp_path, state):
+    client, _, upstream, body = _setup(
+        tmp_path, media_key="season:tmdb:123:1", scope_key="S01E02",
+    )
+    with sqlite3.connect(tmp_path / "control.sqlite") as connection:
+        connection.execute("UPDATE gateway_permits SET state=?", (state,))
+    DeletionJobStore(tmp_path / "control.sqlite").tombstone("season:tmdb:123:1", "a" * 32)
+    response = client.post(
+        "/internal/delete-source", headers={"X-Arr-Token": "secret"}, json=body,
+    )
+    assert response.status_code == 200
+    assert response.json() == {"state": "deleted"}
+    assert upstream.deleted == [(upstream.infohash, True)]
+    repeated = client.post(
+        "/internal/delete-source", headers={"X-Arr-Token": "secret"}, json=body,
+    )
+    assert repeated.status_code == 200
+    assert repeated.json() == {"state": "missing"}
+    assert upstream.deleted == [(upstream.infohash, True)]
+
+
+@pytest.mark.parametrize("state", ["superseded", "probe_rejected"])
+@pytest.mark.parametrize("tombstone", [None, "season:tmdb:123:2", "episode:tmdb:123:S01E02"])
+def test_historical_episode_source_requires_exact_whole_season_deletion(
+    tmp_path, state, tombstone,
+):
+    client, _, upstream, body = _setup(
+        tmp_path, media_key="season:tmdb:123:1", scope_key="S01E02",
+    )
+    with sqlite3.connect(tmp_path / "control.sqlite") as connection:
+        connection.execute("UPDATE gateway_permits SET state=?", (state,))
+    if tombstone:
+        DeletionJobStore(tmp_path / "control.sqlite").tombstone(tombstone, "a" * 32)
+    response = client.post(
+        "/internal/delete-source", headers={"X-Arr-Token": "secret"}, json=body,
+    )
+    assert response.status_code == 403
+    assert upstream.reads == []
+    assert upstream.deleted == []
+
+
+@pytest.mark.parametrize("state", ["superseded", "probe_rejected"])
+def test_historical_movie_source_cannot_use_the_season_deletion_permission(tmp_path, state):
+    client, _, upstream, body = _setup(tmp_path)
+    with sqlite3.connect(tmp_path / "control.sqlite") as connection:
+        connection.execute("UPDATE gateway_permits SET state=?", (state,))
+    jobs = DeletionJobStore(tmp_path / "control.sqlite")
+    jobs.tombstone("movie:tmdb:123", "a" * 32)
+    jobs.tombstone("season:tmdb:123:1", "b" * 32)
+    response = client.post(
+        "/internal/delete-source", headers={"X-Arr-Token": "secret"}, json=body,
+    )
+    assert response.status_code == 403
+    assert upstream.reads == []
+    assert upstream.deleted == []
+
+
+@pytest.mark.parametrize("state", ["authorized", "dispatching", "unknown"])
+def test_whole_season_deletion_does_not_allow_uncertain_episode_source(tmp_path, state):
+    client, _, upstream, body = _setup(
+        tmp_path, media_key="season:tmdb:123:1", scope_key="S01E02",
+    )
+    with sqlite3.connect(tmp_path / "control.sqlite") as connection:
+        connection.execute("UPDATE gateway_permits SET state=?", (state,))
+    DeletionJobStore(tmp_path / "control.sqlite").tombstone("season:tmdb:123:1", "a" * 32)
+    response = client.post(
+        "/internal/delete-source", headers={"X-Arr-Token": "secret"}, json=body,
+    )
+    assert response.status_code == 403
+    assert upstream.reads == []
+    assert upstream.deleted == []
+
+
+@pytest.mark.parametrize("state", ["superseded", "probe_rejected"])
+def test_historical_season_source_retains_manifest_and_ownership_guards(tmp_path, state):
+    client, permits, upstream, body = _setup(
+        tmp_path, media_key="season:tmdb:123:1", scope_key="S01E02",
+    )
+    with sqlite3.connect(tmp_path / "control.sqlite") as connection:
+        connection.execute("UPDATE gateway_permits SET state=?", (state,))
+    DeletionJobStore(tmp_path / "control.sqlite").tombstone("season:tmdb:123:1", "a" * 32)
+    other = ReservationRepository(tmp_path / "control.sqlite").reserve(
+        request_id="seerr:2", source_id="2", media_key="movie:tmdb:456",
+        filesystem_id="fixture", budget_bytes=123, free_bytes=1000, total_bytes=2000,
+    )
+    conflict = permits.issue(
+        infohash=upstream.infohash, destination="/data/torrents", category="radarr",
+        reservation_id=other.reservation_id,
+        metadata_sha256=inspect_torrent(TORRENT).metadata_sha256,
+        selected_files=("test.mp4",), budget_bytes=123,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    permits.authorize(
+        token=conflict.token, infohash=conflict.infohash,
+        destination=conflict.destination, metadata_sha256=conflict.metadata_sha256,
+        effect=lambda _: {"accepted": True},
+    )
+    response = client.post(
+        "/internal/delete-source", headers={"X-Arr-Token": "secret"}, json=body,
+    )
+    assert response.status_code == 409
+    assert upstream.reads == []
+    assert upstream.deleted == []
+
+
+@pytest.mark.parametrize("state", ["superseded", "probe_rejected"])
+@pytest.mark.parametrize("change", ["manifest", "category", "path", "file", "size", "extra"])
+def test_historical_season_source_revalidates_every_torrent_before_purge(tmp_path, state, change):
+    client, _, upstream, body = _setup(
+        tmp_path, media_key="season:tmdb:123:1", scope_key="S01E02",
+    )
+    with sqlite3.connect(tmp_path / "control.sqlite") as connection:
+        connection.execute("UPDATE gateway_permits SET state=?", (state,))
+        if change == "manifest":
+            connection.execute("DELETE FROM torrent_artifacts")
+    DeletionJobStore(tmp_path / "control.sqlite").tombstone("season:tmdb:123:1", "a" * 32)
+    if change == "category":
+        upstream.current["category"] = "radarr"
+    elif change == "path":
+        upstream.current["save_path"] = "/data/other"
+    elif change == "file":
+        upstream.files[0]["name"] = "another.mkv"
+    elif change == "size":
+        upstream.files[0]["size"] = 124
+    elif change == "extra":
+        upstream.files.append({"name": "extra.mkv", "size": 10, "priority": 1})
     response = client.post(
         "/internal/delete-source", headers={"X-Arr-Token": "secret"}, json=body,
     )

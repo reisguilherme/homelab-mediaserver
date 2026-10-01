@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from copy import deepcopy
 from pathlib import Path
 
 import httpx
@@ -226,3 +227,202 @@ def test_deletion_job_status_requires_admin_and_omits_capture_paths(tmp_path: Pa
     assert response.status_code == 200
     assert response.json()["items"][0]["stage"] == "queued"
     assert "file_path" not in str(response.json())
+
+
+class SeasonCaptureFixture:
+    def __init__(self, tmp_path: Path) -> None:
+        self.media_root = tmp_path / "media"
+        self.directory = self.media_root / "tv" / "Example" / "Season 02"
+        self.series_directory = self.directory.parent
+        self.directory.mkdir(parents=True)
+        self.item_id = "a" * 32
+        self.series_id = "b" * 32
+        self.children = []
+        self.sonarr_episodes = []
+        self.files = {}
+        for number, item_id in ((1, "c" * 32), (2, "d" * 32)):
+            video = self.directory / f"E{number:02d}.mkv"
+            video.write_bytes(b"episode")
+            self.children.append({
+                "Id": item_id, "Type": "Episode", "Path": str(video),
+                "SeriesId": self.series_id, "SeasonId": self.item_id,
+                "ParentIndexNumber": 2, "IndexNumber": number,
+            })
+            self.sonarr_episodes.append({
+                "id": 10 + number, "seriesId": 10, "seasonNumber": 2,
+                "episodeNumber": number, "episodeFileId": 20 + number,
+            })
+            self.files[20 + number] = {"id": 20 + number, "path": str(video), "size": 7}
+        self.sonarr_episodes.extend([
+            {"id": 13, "seriesId": 10, "seasonNumber": 2,
+             "episodeNumber": 3, "episodeFileId": 0},
+            {"id": 14, "seriesId": 10, "seasonNumber": 3,
+             "episodeNumber": 1, "episodeFileId": 24},
+        ])
+        self.total = 2
+        self.jobs = DeletionJobStore(tmp_path / "control.sqlite")
+        self.jobs.initialize()
+        self.snapshot = _snapshot(tmp_path)
+        self.calls: list[tuple[str, str]] = []
+
+    def response(self, request: httpx.Request) -> httpx.Response:
+        self.calls.append((request.method, request.url.path))
+        if request.url.path == "/Users/Me":
+            return httpx.Response(200, json={"Id": "admin", "Policy": {
+                "IsAdministrator": True, "EnableContentDeletion": True,
+            }})
+        if request.url.path.endswith(f"/Items/{self.item_id}"):
+            return httpx.Response(200, json={
+                "Id": self.item_id, "Type": "Season", "Path": str(self.directory),
+                "SeriesId": self.series_id, "IndexNumber": 2,
+            })
+        if request.url.path.endswith(f"/Items/{self.series_id}"):
+            return httpx.Response(200, json={
+                "Id": self.series_id, "Type": "Series",
+                "Path": str(self.series_directory),
+                "ProviderIds": {"Tvdb": "456", "Tmdb": "123"},
+            })
+        if request.url.path == f"/Shows/{self.series_id}/Episodes":
+            assert dict(request.url.params) == {
+                "userId": "admin", "seasonId": self.item_id,
+                "fields": "Path", "isMissing": "false",
+            }
+            return httpx.Response(200, json={
+                "Items": deepcopy(self.children), "TotalRecordCount": self.total,
+                "StartIndex": 0,
+            })
+        if request.url.path == "/api/v3/series":
+            return httpx.Response(200, json=[{
+                "id": 10, "tvdbId": 456, "path": str(self.series_directory),
+            }])
+        if request.url.path == "/api/v3/episode":
+            assert dict(request.url.params) == {"seriesId": "10"}
+            return httpx.Response(200, json=deepcopy(self.sonarr_episodes))
+        if request.url.path.startswith("/api/v3/episodefile/"):
+            file_id = int(request.url.path.rsplit("/", 1)[1])
+            return httpx.Response(200, json=deepcopy(self.files[file_id]))
+        raise AssertionError(request.url)
+
+    def admission(self, client: httpx.AsyncClient) -> DeletionAdmission:
+        return DeletionAdmission(
+            jobs=self.jobs, media_root=self.media_root, snapshot_path=self.snapshot,
+            filesystem_id="test-media-uuid", jellyfin_url="http://jellyfin:8096",
+            radarr_url="http://radarr:7878", radarr_api_key="radarr-test",
+            sonarr_url="http://sonarr:8989", sonarr_api_key="sonarr-test", client=client,
+        )
+
+
+@pytest.mark.asyncio
+async def test_season_capture_atomically_queues_only_selected_season(tmp_path: Path) -> None:
+    fixture = SeasonCaptureFixture(tmp_path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as client:
+        job = await fixture.admission(client).capture(fixture.item_id, "admin-token")
+        before_repeat = len(fixture.calls)
+        repeated = await fixture.admission(client).capture(fixture.item_id, "admin-token")
+    assert job == repeated
+    assert len(fixture.calls) == before_repeat + 1  # Session rechecked; no second snapshot.
+    assert job["item_type"] == "Season"
+    assert job["payload"]["media_key"] == "season:tmdb:123:2"
+    assert job["payload"]["series_tmdb_id"] == 123
+    assert job["payload"]["series_tvdb_id"] == 456
+    assert job["payload"]["sonarr_series_id"] == 10
+    assert job["payload"]["sonarr_episode_ids"] == [11, 12, 13]
+    assert job["payload"]["file_path"] == str(fixture.directory)
+    assert job["payload"]["directory_identity"] == {
+        "device": fixture.directory.stat().st_dev, "inode": fixture.directory.stat().st_ino,
+    }
+    assert [entry["item_id"] for entry in fixture.jobs.list()] == [
+        "a" * 32, "c" * 32, "d" * 32,
+    ]
+    assert fixture.jobs.get("c" * 32)["payload"]["media_key"] == "episode:tmdb:123:S02E01"
+    assert fixture.jobs.get("c" * 32)["payload"]["parent_item_id"] == fixture.item_id
+    assert all(method == "GET" for method, _ in fixture.calls)
+    assert len(list(fixture.directory.iterdir())) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [
+    "pagination", "duplicate_child", "other_season", "other_series",
+    "other_season_id", "unlisted_file", "shared_file", "outside_folder", "changed_file",
+    "duplicate_path", "malformed_sonarr", "duplicate_sonarr", "multi_episode_file",
+    "malformed_children", "season_symlink", "metadata_symlink", "series_directory",
+])
+async def test_season_capture_refuses_partial_or_changed_scope_without_jobs(
+    tmp_path: Path, failure: str,
+) -> None:
+    fixture = SeasonCaptureFixture(tmp_path)
+    if failure == "pagination":
+        fixture.total = 3
+    elif failure == "duplicate_child":
+        fixture.children[1]["Id"] = fixture.children[0]["Id"]
+    elif failure == "other_season":
+        fixture.children[1]["ParentIndexNumber"] = 3
+    elif failure == "other_series":
+        fixture.children[1]["SeriesId"] = "e" * 32
+    elif failure == "other_season_id":
+        fixture.children[1]["SeasonId"] = "e" * 32
+    elif failure == "unlisted_file":
+        fixture.sonarr_episodes[2]["episodeFileId"] = 23
+    elif failure == "shared_file":
+        fixture.sonarr_episodes[3]["episodeFileId"] = 21
+    elif failure == "outside_folder":
+        outside = fixture.directory.parent / "other.mkv"
+        outside.write_bytes(b"episode")
+        fixture.children[1]["Path"] = str(outside)
+        fixture.files[22]["path"] = str(outside)
+    elif failure == "changed_file":
+        fixture.files[22]["size"] = 100
+    elif failure == "duplicate_path":
+        fixture.children[1]["Path"] = fixture.children[0]["Path"]
+        fixture.files[22]["path"] = fixture.children[0]["Path"]
+    elif failure == "malformed_sonarr":
+        fixture.sonarr_episodes[2] = None
+    elif failure == "duplicate_sonarr":
+        fixture.sonarr_episodes[2]["id"] = 11
+    elif failure == "multi_episode_file":
+        fixture.sonarr_episodes[1]["episodeFileId"] = 21
+    elif failure == "malformed_children":
+        fixture.children[1] = None
+    elif failure == "season_symlink":
+        linked = fixture.directory.parent / "Season link"
+        linked.symlink_to(fixture.directory, target_is_directory=True)
+        fixture.directory = linked
+    elif failure == "metadata_symlink":
+        (fixture.directory / "folder.jpg").symlink_to(fixture.directory / "E01.mkv")
+    else:
+        # A Season cannot authorize deleting the containing Series directory.
+        fixture.directory = fixture.directory.parent
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as client:
+        with pytest.raises(DeletionCaptureError) as error:
+            await fixture.admission(client).capture(fixture.item_id, "admin-token")
+    assert error.value.status_code == 409
+    assert fixture.jobs.list() == []
+    assert all(Path(entry["path"]).exists() for entry in fixture.files.values())
+
+
+@pytest.mark.asyncio
+async def test_season_capture_rejects_colliding_child_without_partial_queue(tmp_path: Path) -> None:
+    fixture = SeasonCaptureFixture(tmp_path)
+    fixture.jobs.enqueue("d" * 32, "Episode", {"media_key": "unrelated"})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as client:
+        with pytest.raises(DeletionCaptureError) as error:
+            await fixture.admission(client).capture(fixture.item_id, "admin-token")
+    assert error.value.status_code == 409
+    assert [entry["item_id"] for entry in fixture.jobs.list()] == ["d" * 32]
+
+
+@pytest.mark.asyncio
+async def test_season_capture_records_only_known_direct_metadata_files(tmp_path: Path) -> None:
+    fixture = SeasonCaptureFixture(tmp_path)
+    poster = fixture.directory / "folder.jpg"
+    poster.write_bytes(b"image")
+    unknown = fixture.directory / "personal.txt"
+    unknown.write_bytes(b"keep")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as client:
+        job = await fixture.admission(client).capture(fixture.item_id, "admin-token")
+    metadata = job["payload"]["metadata_files"]
+    assert len(metadata) == 1
+    assert metadata[0]["file_path"] == str(poster)
+    assert metadata[0]["file_identity"]["size"] == 5
+    assert metadata[0]["file_identity"]["inode"] == poster.stat().st_ino
+    assert poster.exists() and unknown.exists()

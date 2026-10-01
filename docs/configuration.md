@@ -126,10 +126,19 @@ do próximo episódio, mantendo a ordem mesmo quando o pacote baixa em paralelo.
 Pacotes com caminhos que colidem com uma fonte preservada são recusados;
 nesses casos a aquisição continua por episódio.
 Ao excluir um episódio pelo Jellyfin, o fluxo remove sua entrada e arquivo
-da biblioteca e dos serviços. Um pacote compartilhado permanece no qBit
-enquanto serve outros episódios; o espaço físico dessa fonte só é liberado
-depois que todos os episódios vinculados forem explicitamente excluídos.
-Nesse momento o gateway revalida o pacote e remove seu torrent e arquivo.
+da biblioteca e dos serviços. Também é possível excluir uma temporada inteira
+no menu da temporada: o controlador valida os episódios locais, registra a
+operação durável e desmonitora somente a temporada selecionada, cancelando
+suas fontes gerenciadas pendentes. Outras temporadas são preservadas.
+Um pacote compartilhado permanece no qBit enquanto serve outros episódios;
+o espaço físico dessa fonte só é liberado depois que todos os episódios
+vinculados forem explicitamente excluídos. Nesse momento o gateway revalida
+o pacote e remove seu torrent e arquivo. Arquivos compartilhados por vários
+episódios ou identidades ambíguas bloqueiam a operação.
+Pedidos do Seerr que abrangem outras temporadas permanecem; só pedidos
+exclusivos da temporada selecionada são removidos. A atualização dos catálogos
+é assíncrona. Marcar como assistido nunca inicia exclusão. Consulte
+[o procedimento de exclusão](operator-guide.md#remover-mídia-assistida).
 
 Magnets têm seus trackers incorporados aos metadados verificados antes do
 envio ao qBit. O conteúdo identificado pelo infohash permanece igual.

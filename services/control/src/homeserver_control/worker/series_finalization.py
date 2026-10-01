@@ -18,7 +18,7 @@ from .finalization import (
     MovieFinalizer,
     _subtitle_has_content,
 )
-from .series_acquisition import _episode_aired, _episode_tag, _single_episode_name
+from .series_acquisition import _episode_aired, _episode_tag, _season_active, _single_episode_name
 from .subdl import SubDLSource
 from .subtitle_language import (
     SubtitlePolicy,
@@ -110,7 +110,10 @@ class SeriesFinalizer(MovieFinalizer):
                 continue
             media_key = reservation.get("media_key")
             match = _SEASON_KEY.fullmatch(media_key) if isinstance(media_key, str) else None
-            if match is not None and int(match.group(1)) == tmdb_id:
+            if (
+                match is not None and int(match.group(1)) == tmdb_id
+                and not self.is_tombstoned(media_key)
+            ):
                 number = int(match.group(2))
                 if number > 0:
                     seasons[number] = reservation_id
@@ -124,7 +127,10 @@ class SeriesFinalizer(MovieFinalizer):
     ) -> bool:
         season = episode["seasonNumber"]
         number = episode["episodeNumber"]
-        if self.is_tombstoned(f"episode:tmdb:{series_tmdb_id}:{_episode_tag(season, number)}"):
+        if (
+            self.is_tombstoned(f"season:tmdb:{series_tmdb_id}:{season}")
+            or self.is_tombstoned(f"episode:tmdb:{series_tmdb_id}:{_episode_tag(season, number)}")
+        ):
             return True
         if episode.get("hasFile") is not True:
             return False
@@ -293,14 +299,15 @@ class SeriesFinalizer(MovieFinalizer):
         )
 
     async def finalize(self, media_key: str, reservation_id: str) -> str:
-        reservation = self.repository.active_reservation(reservation_id)
-        if reservation is None or reservation["media_key"] != media_key:
+        if not _season_active(self.repository, reservation_id, media_key, self.is_tombstoned):
             return "reservation_inactive"
         match = _SEASON_KEY.fullmatch(media_key)
         if match is None:
             return "unsupported_media"
         tmdb_id, season = int(match.group(1)), int(match.group(2))
         episodes = await self._episodes(tmdb_id)
+        if not _season_active(self.repository, reservation_id, media_key, self.is_tombstoned):
+            return "reservation_inactive"
         reservations_by_season = self._requested_seasons(tmdb_id)
         reservations_by_season.setdefault(season, reservation_id)
         chronological = sorted(
@@ -344,6 +351,8 @@ class SeriesFinalizer(MovieFinalizer):
             ),
             key=lambda item: item["episodeNumber"],
         ):
+            if not _season_active(self.repository, reservation_id, media_key, self.is_tombstoned):
+                return "reservation_inactive"
             number = episode["episodeNumber"]
             if self.is_tombstoned(f"episode:tmdb:{tmdb_id}:{_episode_tag(season, number)}"):
                 continue
@@ -373,6 +382,10 @@ class SeriesFinalizer(MovieFinalizer):
                 if episode.get("hasFile") is not True:
                     return "import_pending"
                 video = await self._imported_video(episode)
+                if not _season_active(
+                    self.repository, reservation_id, media_key, self.is_tombstoned,
+                ):
+                    return "reservation_inactive"
                 if not self._import_matches_source(
                     video, permit, copy_allowed=state == "accepted_copy"
                 ):
@@ -383,6 +396,8 @@ class SeriesFinalizer(MovieFinalizer):
             if episode.get("hasFile") is True:
                 return "already_imported_without_validation"
             validated_download = await self._validate_download(permit, season=season, number=number)
+            if not _season_active(self.repository, reservation_id, media_key, self.is_tombstoned):
+                return "reservation_inactive"
             if validated_download is None:
                 return "downloading"
             content_path, brazilian_ready, english_ready, original_ptbr, title = validated_download
@@ -406,6 +421,10 @@ class SeriesFinalizer(MovieFinalizer):
                     fetch_subtitle,
                     already_present=present.get,
                 )
+                if not _season_active(
+                    self.repository, reservation_id, media_key, self.is_tombstoned,
+                ):
+                    return "reservation_inactive"
                 if result is None:
                     return "waiting_subtitles"
                 if result.content:
@@ -419,6 +438,8 @@ class SeriesFinalizer(MovieFinalizer):
                     )
             if not await self._hardlink_import_enabled():
                 return "import_guard"
+            if not _season_active(self.repository, reservation_id, media_key, self.is_tombstoned):
+                return "reservation_inactive"
             selected = [
                 self._local_path(f"/data/torrents/{relative}") for relative in permit.selected_files
             ]
@@ -428,6 +449,8 @@ class SeriesFinalizer(MovieFinalizer):
             hardlink_ready = self._can_hardlink_video(video)
             if not hardlink_ready and not await self._copy_fallback_fits(selected):
                 return "waiting_space"
+            if not _season_active(self.repository, reservation_id, media_key, self.is_tombstoned):
+                return "reservation_inactive"
             if not self.repository.claim_episode_import(
                 permit.permit_id, copy_allowed=not hardlink_ready
             ):

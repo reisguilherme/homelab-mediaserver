@@ -47,6 +47,19 @@ def _episode_tag(season: int, episode: int) -> str:
     return f"S{season:02d}E{episode:02d}"
 
 
+def _season_active(
+    repository: ReservationRepository,
+    reservation_id: str,
+    media_key: str,
+    is_tombstoned: Callable[[str], bool],
+) -> bool:
+    reservation = repository.active_reservation(reservation_id)
+    return (
+        reservation is not None and reservation["media_key"] == media_key
+        and not is_tombstoned(media_key)
+    )
+
+
 def _single_episode_name(value: str, season: int, episode: int) -> bool:
     tag = _episode_tag(season, episode)
     return bool(re.search(rf"(?<![a-z0-9]){tag}(?![a-z0-9]|[-_. ]?e[0-9])", value, re.I))
@@ -255,6 +268,7 @@ class SeriesAcquirer(MovieAcquirer):
         episodes: list[dict[str, object]],
         season: int,
         reservation_id: str,
+        media_key: str,
         active_episode_ids: set[int],
         imported_episode_ids: set[int],
     ) -> str | None:
@@ -290,6 +304,8 @@ class SeriesAcquirer(MovieAcquirer):
         # Stop later torrents before considering a capacity-checked start.
         ordered = sorted(changes.items(), key=lambda item: item[1][0] != "stop")
         for infohash, (action, token, is_pack) in ordered:
+            if not _season_active(self.repository, reservation_id, media_key, self.is_tombstoned):
+                return "reservation_inactive"
             if known_capacity is not None and known_capacity.remaining_by_hash.get(infohash) == 0:
                 # Leave completed torrents seeding while ordered import catches up.
                 continue
@@ -315,6 +331,8 @@ class SeriesAcquirer(MovieAcquirer):
                             blocked_status = "waiting_space"
                 if blocked_status is not None:
                     action = "stop"
+            if not _season_active(self.repository, reservation_id, media_key, self.is_tombstoned):
+                return "reservation_inactive"
             response = await self.client.post(
                 f"{self.gateway_url}/internal/"
                 f"{'source-state' if is_pack else 'series-queue-state'}",
@@ -334,7 +352,10 @@ class SeriesAcquirer(MovieAcquirer):
                 continue
             media_key = reservation.get("media_key")
             match = _SEASON_KEY.fullmatch(media_key) if isinstance(media_key, str) else None
-            if match is not None and int(match.group(1)) == tmdb_id:
+            if (
+                match is not None and int(match.group(1)) == tmdb_id
+                and not self.is_tombstoned(media_key)
+            ):
                 number = int(match.group(2))
                 if number > 0:
                     seasons[number] = reservation_id
@@ -348,7 +369,10 @@ class SeriesAcquirer(MovieAcquirer):
     ) -> bool:
         season = item["seasonNumber"]
         episode = item["episodeNumber"]
-        if self.is_tombstoned(f"episode:tmdb:{series_tmdb_id}:{_episode_tag(season, episode)}"):
+        if (
+            self.is_tombstoned(f"season:tmdb:{series_tmdb_id}:{season}")
+            or self.is_tombstoned(f"episode:tmdb:{series_tmdb_id}:{_episode_tag(season, episode)}")
+        ):
             return True
         if item.get("hasFile") is not True:
             return False
@@ -657,6 +681,7 @@ class SeriesAcquirer(MovieAcquirer):
     ) -> str | None:
         if not self.prefer_season_pack:
             return None
+        media_key = f"season:tmdb:{series['tmdbId']}:{season}"
         if self.capacity_provider is None:
             return "capacity_unavailable"
         scope = f"S{season:02d}PACK"
@@ -667,6 +692,19 @@ class SeriesAcquirer(MovieAcquirer):
                 return None
             reconciled = await self._reconcile_uncertain_source(parent)
             return reconciled or "waiting_pack_confirmation"
+
+        def has_deleted_episode():
+            return any(
+                self.is_tombstoned(
+                    f"episode:tmdb:{series['tmdbId']}:"
+                    f"{_episode_tag(season, item['episodeNumber'])}"
+                ) for item in episode_rows
+            )
+
+        # A fresh complete pack would download a deliberately deleted episode again.
+        # Existing shared packs above remain available for their surviving siblings.
+        if has_deleted_episode():
+            return None
         if time.monotonic() < self._next_pack_search.get(reservation_id, 0):
             return None
         # Unknown dates or runtimes cannot justify admission of a complete season.
@@ -716,6 +754,10 @@ class SeriesAcquirer(MovieAcquirer):
             ),
             rank=rank,
         ):
+            if not _season_active(self.repository, reservation_id, media_key, self.is_tombstoned):
+                return "reservation_inactive"
+            if has_deleted_episode():
+                return None
             if self._pack_paths_collide(manifest.selected_files):
                 LOGGER.info("Skipping season pack with retained payload path collision")
                 continue
@@ -725,6 +767,12 @@ class SeriesAcquirer(MovieAcquirer):
             }
             try:
                 capacity = await self.capacity_provider() if self.capacity_provider else None
+                if not _season_active(
+                    self.repository, reservation_id, media_key, self.is_tombstoned,
+                ):
+                    return "reservation_inactive"
+                if has_deleted_episode():
+                    return None
                 parent = self.permits.issue(
                     infohash=manifest.infohash, metadata_sha256=manifest.metadata_sha256,
                     selected_files=manifest.selected_files, budget_bytes=manifest.budget_bytes,
@@ -760,8 +808,7 @@ class SeriesAcquirer(MovieAcquirer):
         return None
 
     async def acquire(self, media_key: str, reservation_id: str) -> str:
-        reservation = self.repository.active_reservation(reservation_id)
-        if reservation is None or reservation["media_key"] != media_key:
+        if not _season_active(self.repository, reservation_id, media_key, self.is_tombstoned):
             return "reservation_inactive"
         match = _SEASON_KEY.fullmatch(media_key)
         if match is None:
@@ -804,6 +851,8 @@ class SeriesAcquirer(MovieAcquirer):
         episodes_payload = episodes_response.json()
         if not isinstance(episodes_payload, list):
             raise ValueError("Sonarr episode response is invalid")
+        if not _season_active(self.repository, reservation_id, media_key, self.is_tombstoned):
+            return "reservation_inactive"
         reservations_by_season = self._requested_seasons(tmdb_id)
         reservations_by_season.setdefault(season, reservation_id)
         chronological = sorted(
@@ -852,6 +901,8 @@ class SeriesAcquirer(MovieAcquirer):
             and item["id"] not in imported_episode_ids
         ]
         download_pending = await self._download_pending(pending, reservations_by_season)
+        if not _season_active(self.repository, reservation_id, media_key, self.is_tombstoned):
+            return "reservation_inactive"
         window = self._select_download_window(
             download_pending, reservations_by_season,
         ) if earlier_catalog_complete else []
@@ -860,6 +911,7 @@ class SeriesAcquirer(MovieAcquirer):
             episodes=chronological,
             season=season,
             reservation_id=reservation_id,
+            media_key=media_key,
             active_episode_ids=active_episode_ids,
             imported_episode_ids=imported_episode_ids,
         )
@@ -888,6 +940,8 @@ class SeriesAcquirer(MovieAcquirer):
         no_source = False
         # Downloads may overlap; SeriesFinalizer alone controls ordered library publication.
         for item in selected:
+            if not _season_active(self.repository, reservation_id, media_key, self.is_tombstoned):
+                return "reservation_inactive"
             number = item["episodeNumber"]
             scope = _episode_tag(season, number)
             existing = self.permits.get_for_reservation(reservation_id, scope_key=scope)
@@ -919,6 +973,8 @@ class SeriesAcquirer(MovieAcquirer):
                 if reconciled is not None:
                     return reconciled
                 continue
+            if not _season_active(self.repository, reservation_id, media_key, self.is_tombstoned):
+                return "reservation_inactive"
             if existing is not None and existing.state == "authorized":
                 retried = await self._retry_replacement(existing)
                 if retried is not None:
@@ -960,6 +1016,10 @@ class SeriesAcquirer(MovieAcquirer):
                     release, original_language=series.get("originalLanguage")
                 ),
             ):
+                if not _season_active(
+                    self.repository, reservation_id, media_key, self.is_tombstoned,
+                ):
+                    return "reservation_inactive"
                 found_candidate = True
                 release, (infohash, digest, files, bytes_total), external, torrent = candidate
                 recovered = None
@@ -980,6 +1040,10 @@ class SeriesAcquirer(MovieAcquirer):
 
                     recovered = await recover_subtitle(self.subtitle_policy, fetch)
                     external = recovered.content if recovered else None
+                if not _season_active(
+                    self.repository, reservation_id, media_key, self.is_tombstoned,
+                ):
+                    return "reservation_inactive"
                 if external is not None:
                     assert self.subtitle_store is not None
                     self.subtitle_store.put(
@@ -1022,6 +1086,10 @@ class SeriesAcquirer(MovieAcquirer):
                         capacity = (
                             await self.capacity_provider() if self.capacity_provider else None
                         )
+                        if not _season_active(
+                            self.repository, reservation_id, media_key, self.is_tombstoned,
+                        ):
+                            return "reservation_inactive"
                         chosen_permit = self.permits.issue(
                             infohash=infohash,
                             metadata_sha256=digest,
@@ -1063,6 +1131,10 @@ class SeriesAcquirer(MovieAcquirer):
             if not found_candidate:
                 no_source = True
             if replacement_reason == "replacing" and existing is not None:
+                if not _season_active(
+                    self.repository, reservation_id, media_key, self.is_tombstoned,
+                ):
+                    return "reservation_inactive"
                 resumed = await self._resume_if_safe(existing)
                 if resumed != "resumed":
                     return resumed

@@ -14,6 +14,10 @@ import httpx
 from homeserver_control.persistence.deletion_jobs import DeletionJobStore
 
 _ITEM_ID = re.compile(r"^[0-9a-fA-F]{32}$")
+_SEASON_METADATA = re.compile(
+    r"^(?:season\.nfo|(?:folder|poster|banner|fanart|thumb|landscape)\.(?:jpg|jpeg|png|webp))$",
+    re.IGNORECASE,
+)
 
 
 class DeletionCaptureError(Exception):
@@ -152,8 +156,14 @@ class DeletionAdmission:
             payload = await self._capture_movie(item)
         elif item_type == "Episode":
             payload = await self._capture_episode(item, jellyfin_headers, str(user["Id"]))
+        elif item_type == "Season":
+            payload = await self._capture_season(item, jellyfin_headers, str(user["Id"]))
+            try:
+                return self.jobs.enqueue_season(item_id, payload)
+            except ValueError as error:
+                raise DeletionCaptureError(409, str(error)) from error
         else:
-            raise DeletionCaptureError(422, "delete individual movies or episodes")
+            raise DeletionCaptureError(422, "delete movies, episodes or a season")
         return self.jobs.enqueue(item_id, item_type, payload)
 
     async def _capture_movie(self, item: dict[str, Any]) -> dict[str, Any]:
@@ -268,4 +278,172 @@ class DeletionAdmission:
             "series_tmdb_id": int(tmdb_id),
             "season": season,
             "episode": episode,
+        }
+
+    def _season_directory(self, raw_path: object) -> tuple[Path, dict[str, int]]:
+        if not isinstance(raw_path, str) or not raw_path:
+            raise DeletionCaptureError(409, "season has no local directory")
+        path = Path(raw_path)
+        root = self.media_root / "tv"
+        try:
+            inside = path.resolve(strict=True).is_relative_to(root.resolve(strict=True))
+        except OSError as error:
+            raise DeletionCaptureError(409, "season directory is unavailable") from error
+        if (
+            not path.is_absolute() or path == root or ".." in path.parts
+            or not path.is_relative_to(root) or not inside
+        ):
+            raise DeletionCaptureError(409, "season path is outside the expected library")
+        for component in (path, *path.parents):
+            if component == self.media_root.parent:
+                break
+            if component.is_symlink():
+                raise DeletionCaptureError(409, "season path contains a symlink")
+        status = path.stat()
+        if not stat.S_ISDIR(status.st_mode):
+            raise DeletionCaptureError(409, "season path is not a directory")
+        return path, {"device": status.st_dev, "inode": status.st_ino}
+
+    async def _capture_season(
+        self, item: dict[str, Any], jellyfin_headers: dict[str, str], user_id: str
+    ) -> dict[str, Any]:
+        directory, identity = self._season_directory(item.get("Path"))
+        season = item.get("IndexNumber")
+        series_id = item.get("SeriesId")
+        item_id = item["Id"]
+        if (
+            type(season) is not int or season < 0
+            or not isinstance(series_id, str) or not _ITEM_ID.fullmatch(series_id)
+        ):
+            raise DeletionCaptureError(409, "season coordinates unavailable")
+        series = await self._get_json(
+            f"{self.jellyfin_url}/Users/{user_id}/Items/{series_id}",
+            headers=jellyfin_headers,
+        )
+        if not isinstance(series, dict) or (
+            series.get("Id") != series_id or series.get("Type") != "Series"
+        ):
+            raise DeletionCaptureError(409, "Jellyfin series identity changed")
+        series_directory, _series_identity = self._season_directory(series.get("Path"))
+        if directory == series_directory or not directory.is_relative_to(series_directory):
+            raise DeletionCaptureError(409, "season path is not a separate series subdirectory")
+        provider_ids = series.get("ProviderIds") or {}
+        if not isinstance(provider_ids, dict):
+            raise DeletionCaptureError(409, "series identity unavailable")
+        tvdb_id, tmdb_id = (str(provider_ids.get(name, "")) for name in ("Tvdb", "Tmdb"))
+        if any(not value.isdecimal() or int(value) <= 0 for value in (tvdb_id, tmdb_id)):
+            raise DeletionCaptureError(409, "series identity unavailable")
+        if not self.sonarr_url or not self.sonarr_api_key:
+            raise DeletionCaptureError(503, "Sonarr is not configured")
+        arr_headers = {"X-Api-Key": self.sonarr_api_key}
+        series_list = await self._get_json(
+            f"{self.sonarr_url}/api/v3/series", headers=arr_headers,
+        )
+        matches = [
+            entry for entry in series_list
+            if isinstance(entry, dict) and str(entry.get("tvdbId")) == tvdb_id
+        ] if isinstance(series_list, list) else []
+        if len(matches) != 1 or type(matches[0].get("id")) is not int or matches[0]["id"] <= 0:
+            raise DeletionCaptureError(409, "series does not match one Sonarr entry")
+        if matches[0].get("path") != str(series_directory):
+            raise DeletionCaptureError(409, "Sonarr series directory does not match Jellyfin")
+        sonarr_series_id = matches[0]["id"]
+        episodes = await self._get_json(
+            f"{self.sonarr_url}/api/v3/episode", headers=arr_headers,
+            params={"seriesId": str(sonarr_series_id)},
+        )
+        if not isinstance(episodes, list) or any(
+            not isinstance(entry, dict)
+            or type(entry.get("id")) is not int or entry["id"] <= 0
+            or entry.get("seriesId") != sonarr_series_id
+            or type(entry.get("seasonNumber")) is not int or entry["seasonNumber"] < 0
+            or type(entry.get("episodeNumber")) is not int or entry["episodeNumber"] < 0
+            or type(entry.get("episodeFileId")) is not int or entry["episodeFileId"] < 0
+            for entry in episodes
+        ):
+            raise DeletionCaptureError(409, "Sonarr episode snapshot is incomplete")
+        selected = [entry for entry in episodes if entry["seasonNumber"] == season]
+        if (
+            not selected or len({entry["id"] for entry in episodes}) != len(episodes)
+            or len({entry["episodeNumber"] for entry in selected}) != len(selected)
+        ):
+            raise DeletionCaptureError(409, "Sonarr season identity is ambiguous")
+        result = await self._get_json(
+            f"{self.jellyfin_url}/Shows/{series_id}/Episodes", headers=jellyfin_headers,
+            params={"userId": user_id, "seasonId": item_id, "fields": "Path",
+                    "isMissing": "false"},
+        )
+        children = result.get("Items") if isinstance(result, dict) else None
+        if (
+            not isinstance(children, list) or not children
+            or type(result.get("TotalRecordCount")) is not int
+            or result["TotalRecordCount"] != len(children)
+            or ("StartIndex" in result and result["StartIndex"] != 0)
+        ):
+            raise DeletionCaptureError(409, "Jellyfin season snapshot is incomplete")
+        captured = []
+        seen_ids: set[str] = set()
+        seen_episode_ids: set[int] = set()
+        seen_paths: set[Path] = set()
+        for child in children:
+            if not isinstance(child, dict) or (
+                child.get("Type") != "Episode" or child.get("SeriesId") != series_id
+                or child.get("SeasonId") != item_id or child.get("ParentIndexNumber") != season
+                or type(child.get("IndexNumber")) is not int
+                or not isinstance(child.get("Id"), str) or not _ITEM_ID.fullmatch(child["Id"])
+                or child["Id"] in seen_ids or child["Id"] == item_id
+            ):
+                raise DeletionCaptureError(409, "Jellyfin child is outside the captured season")
+            seen_ids.add(child["Id"])
+            path, file_identity = self._file_identity(child.get("Path"), "tv")
+            if not path.is_relative_to(directory) or path in seen_paths:
+                raise DeletionCaptureError(409, "episode path is outside the captured season")
+            seen_paths.add(path)
+            matched = [
+                entry for entry in selected if entry["episodeNumber"] == child["IndexNumber"]
+            ]
+            if len(matched) != 1 or matched[0]["episodeFileId"] <= 0:
+                raise DeletionCaptureError(409, "episode does not match one Sonarr file")
+            entry = matched[0]
+            if entry["id"] in seen_episode_ids or sum(
+                record["episodeFileId"] == entry["episodeFileId"] for record in episodes
+            ) != 1:
+                raise DeletionCaptureError(409, "episode file is shared with another episode")
+            seen_episode_ids.add(entry["id"])
+            episode_file = await self._get_json(
+                f"{self.sonarr_url}/api/v3/episodefile/{entry['episodeFileId']}",
+                headers=arr_headers,
+            )
+            if not isinstance(episode_file, dict) or (
+                episode_file.get("id") != entry["episodeFileId"]
+                or episode_file.get("path") != str(path)
+                or episode_file.get("size") != file_identity["size"]
+            ):
+                raise DeletionCaptureError(409, "Sonarr file does not match Jellyfin")
+            captured.append({"item_id": child["Id"], "payload": {
+                "media_key": f"episode:tmdb:{tmdb_id}:S{season:02d}E{entry['episodeNumber']:02d}",
+                "file_path": str(path), "file_identity": file_identity,
+                "sonarr_series_id": sonarr_series_id, "sonarr_episode_id": entry["id"],
+                "sonarr_episode_file_id": entry["episodeFileId"],
+                "series_tmdb_id": int(tmdb_id), "season": season,
+                "episode": entry["episodeNumber"], "parent_item_id": item_id,
+            }})
+        if seen_episode_ids != {entry["id"] for entry in selected if entry["episodeFileId"] > 0}:
+            raise DeletionCaptureError(409, "Jellyfin season does not cover every Sonarr file")
+        metadata_files = []
+        for candidate in sorted(directory.iterdir()):
+            if not _SEASON_METADATA.fullmatch(candidate.name):
+                continue
+            path, metadata_identity = self._file_identity(str(candidate), "tv")
+            if metadata_identity["size"] > 50_000_000:
+                raise DeletionCaptureError(409, "season metadata is not a small regular file")
+            metadata_files.append({"file_path": str(path), "file_identity": metadata_identity})
+        captured.sort(key=lambda child: child["payload"]["episode"])
+        return {
+            "media_key": f"season:tmdb:{tmdb_id}:{season}",
+            "series_tmdb_id": int(tmdb_id), "series_tvdb_id": int(tvdb_id),
+            "sonarr_series_id": sonarr_series_id, "season": season,
+            "file_path": str(directory), "directory_identity": identity,
+            "episodes": captured, "sonarr_episode_ids": sorted(entry["id"] for entry in selected),
+            "metadata_files": metadata_files,
         }

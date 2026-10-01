@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ from typing import Any
 
 import httpx
 
+from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.deletion_jobs import DeletionJobStore
 
 LOGGER = logging.getLogger(__name__)
@@ -557,6 +559,10 @@ class DeletionCoordinator:
         path, remaining = self._file(job, must_exist=False)
         if remaining is not None:
             raise DeletionBlocked("media file still exists before Jellyfin cleanup")
+        await self._forget_jellyfin_item(job["item_id"], path)
+
+    async def _forget_jellyfin_item(self, item_id: str, path: Path) -> None:
+        job = {"item_id": item_id}
         if not await self._jellyfin_item_present(job["item_id"]):
             self._jellyfin_notify_at.pop(job["item_id"], None)
             self._jellyfin_refresh_at.pop(job["item_id"], None)
@@ -606,7 +612,394 @@ class DeletionCoordinator:
         self._jellyfin_notify_at.pop(job["item_id"], None)
         self._jellyfin_refresh_at.pop(job["item_id"], None)
 
+    def _season_payload(self, job: dict[str, Any]) -> dict[str, Any]:
+        payload = job.get("payload")
+        if not isinstance(payload, dict):
+            raise DeletionBlocked("season capture is incomplete")
+        tmdb, tvdb, series, season = (
+            payload.get(key) for key in
+            ("series_tmdb_id", "series_tvdb_id", "sonarr_series_id", "season")
+        )
+        if (
+            any(type(value) is not int or value <= 0 for value in (tmdb, tvdb, series))
+            or type(season) is not int or season < 0
+            or payload.get("media_key") != f"season:tmdb:{tmdb}:{season}"
+        ):
+            raise DeletionBlocked("season identity is invalid")
+        folder = payload.get("file_path")
+        directory_identity = payload.get("directory_identity")
+        metadata = payload.get("metadata_files", [])
+        if (
+            not isinstance(folder, str) or not folder
+            or not isinstance(directory_identity, dict)
+            or any(type(directory_identity.get(k)) is not int or directory_identity[k] < 0
+                   for k in ("device", "inode"))
+            or not isinstance(metadata, list)
+        ):
+            raise DeletionBlocked("season directory capture is incomplete")
+        for entry in metadata:
+            if not isinstance(entry, dict) or not isinstance(entry.get("file_path"), str):
+                raise DeletionBlocked("season metadata capture is incomplete")
+            identity = entry.get("file_identity")
+            if not isinstance(identity, dict) or any(
+                type(identity.get(k)) is not int or identity[k] < 0
+                for k in ("device", "inode", "size", "mtime_ns")
+            ):
+                raise DeletionBlocked("season metadata identity is incomplete")
+        ids = payload.get("sonarr_episode_ids")
+        children = payload.get("episodes")
+        if (
+            not isinstance(ids, list) or not ids
+            or any(type(value) is not int or value <= 0 for value in ids)
+            or len(set(ids)) != len(ids)
+            or not isinstance(children, list) or not children
+        ):
+            raise DeletionBlocked("season episode inventory is incomplete")
+        seen = set()
+        for entry in children:
+            if not isinstance(entry, dict) or not isinstance(entry.get("item_id"), str):
+                raise DeletionBlocked("season child identity is invalid")
+            child = dict(
+                item_id=entry["item_id"], item_type="Episode", payload=entry.get("payload"),
+            )
+            selected = self._payload(child)
+            child_path = selected.get("file_path")
+            if (
+                entry["item_id"] in seen or not re.fullmatch(r"[0-9a-fA-F]{32}", entry["item_id"])
+                or selected.get("parent_item_id") != job["item_id"]
+                or selected["series_tmdb_id"] != tmdb or selected["sonarr_series_id"] != series
+                or selected["season"] != season or selected["sonarr_episode_id"] not in ids
+                or not isinstance(child_path, str) or not child_path
+                or not Path(child_path).is_relative_to(Path(folder))
+            ):
+                raise DeletionBlocked("season child escaped captured scope")
+            seen.add(entry["item_id"])
+        return payload
+
+    def _season_folder(self, job: dict[str, Any], *, must_exist: bool) -> Path:
+        payload = self._season_payload(job)
+        raw = payload.get("file_path")
+        if not isinstance(raw, str) or not raw:
+            raise DeletionBlocked("season folder is absent")
+        path = Path(raw)
+        library = self.media_root / "tv"
+        if (
+            not path.is_absolute() or path == library or not path.is_relative_to(library)
+            or not path.resolve(strict=False).is_relative_to(library.resolve(strict=True))
+        ):
+            raise DeletionBlocked("season folder escapes the TV library")
+        for part in (path, *path.parents):
+            if part.is_symlink():
+                raise DeletionBlocked("season folder contains a symlink")
+            if part == self.data_root:
+                break
+        if not path.exists():
+            if must_exist:
+                raise DeletionBlocked("season folder disappeared before cleanup")
+            return path
+        identity = payload.get("directory_identity")
+        actual = path.stat()
+        if (
+            not path.is_dir() or not isinstance(identity, dict)
+            or (actual.st_dev, actual.st_ino) != (identity.get("device"), identity.get("inode"))
+        ):
+            raise DeletionBlocked("season folder changed after capture")
+        return path
+
+    def _season_children(self, job: dict[str, Any]) -> list[dict[str, Any]]:
+        result = []
+        for entry in self._season_payload(job)["episodes"]:
+            child = self.jobs.get(entry["item_id"])
+            if (
+                child is None or child["item_type"] != "Episode"
+                or child["payload"] != entry["payload"]
+            ):
+                raise DeletionBlocked("season child job changed or disappeared")
+            if child["stage"] == "blocked":
+                raise DeletionBlocked("a season episode requires review")
+            result.append(child)
+        return result
+
+    async def _season_preflight(self, job: dict[str, Any]) -> tuple[dict, list[dict]]:
+        payload = self._season_payload(job)
+        response = await self.client.get(
+            f"{self.sonarr_url}/api/v3/series/{payload['sonarr_series_id']}",
+            headers=self.sonarr_headers,
+        )
+        series = self._json(response)
+        if not isinstance(series, dict) or (
+            series.get("id") != payload["sonarr_series_id"]
+            or series.get("tvdbId") != payload["series_tvdb_id"]
+        ):
+            raise DeletionBlocked("Sonarr series changed after season capture")
+        response = await self.client.get(
+            f"{self.sonarr_url}/api/v3/episode", headers=self.sonarr_headers,
+            params={"seriesId": payload["sonarr_series_id"]},
+        )
+        episodes = self._json(response)
+        if not isinstance(episodes, list) or any(not isinstance(e, dict) for e in episodes):
+            raise DeletionRetryable("Sonarr season inventory is invalid")
+        selected = [e for e in episodes if e.get("seasonNumber") == payload["season"]]
+        if {e.get("id") for e in selected} != set(payload["sonarr_episode_ids"]):
+            raise DeletionBlocked("Sonarr season episodes changed after capture")
+        captured = {e["payload"]["sonarr_episode_id"]: e["payload"]["sonarr_episode_file_id"]
+                    for e in payload["episodes"]}
+        for episode in selected:
+            if episode.get("seriesId") != payload["sonarr_series_id"]:
+                raise DeletionBlocked("episode belongs to another series")
+            file_id = episode.get("episodeFileId")
+            if file_id and captured.get(episode["id"]) != file_id:
+                raise DeletionBlocked("new or changed season file is outside the capture")
+        return series, selected
+
+    async def _cancel_season(self, job: dict[str, Any]) -> None:
+        payload = self._season_payload(job)
+        self.jobs.tombstone(payload["media_key"], job["item_id"])
+        with sqlite3.connect(self.jobs.path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT request_id, filesystem_id FROM reservations WHERE media_key=?",
+                (payload["media_key"],),
+            ).fetchall()
+            if any(row[1] != self.filesystem_id for row in rows) or len(rows) > 1:
+                raise DeletionBlocked("season reservation identity is ambiguous")
+            # Keep remaining torrent bytes in the capacity ledger until purge is confirmed.
+            # The tombstone and cancelled request close acquisition/import gates immediately.
+            for request_id, _ in rows:
+                connection.execute(
+                    "UPDATE requests SET state='cancelled' WHERE id=?", (request_id,),
+                )
+        series, episodes = await self._season_preflight(job)
+        seasons = series.get("seasons")
+        if not isinstance(seasons, list) or any(not isinstance(s, dict) for s in seasons) or sum(
+            isinstance(s, dict) and s.get("seasonNumber") == payload["season"] for s in seasons
+        ) != 1:
+            raise DeletionBlocked("Sonarr season identity changed")
+        for season in seasons:
+            if season.get("seasonNumber") == payload["season"]:
+                season["monitored"] = False
+        self._guard_mount()
+        self._status(await self.client.put(
+            f"{self.sonarr_url}/api/v3/series/{payload['sonarr_series_id']}",
+            headers=self.sonarr_headers, json=series,
+        ))
+        self._status(await self.client.put(
+            f"{self.sonarr_url}/api/v3/episode/monitor", headers=self.sonarr_headers,
+            json={"episodeIds": [e["id"] for e in episodes], "monitored": False},
+        ))
+
+    def _season_source_inventory(self, job: dict[str, Any]) -> list[tuple[dict, str, list[str]]]:
+        payload = self._season_payload(job)
+        with sqlite3.connect(self.jobs.path) as connection:
+            connection.row_factory = sqlite3.Row
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='gateway_permits' AND type='table'"
+            ).fetchone()
+            if table is None:
+                return []
+            rows = connection.execute(
+                "SELECT p.*,r.filesystem_id AS reservation_filesystem_id FROM gateway_permits p "
+                "JOIN reservations r ON r.id=p.reservation_id "
+                "WHERE r.media_key=? "
+                "AND p.state IN "
+                "('authorized','dispatching','unknown','confirmed','superseded','probe_rejected')",
+                (payload["media_key"],),
+            ).fetchall()
+            sources = []
+            for row in rows:
+                scope = row["scope_key"]
+                match = re.fullmatch(r"S([0-9]{2,})(?:E[0-9]{2,}|PACK)", scope or "")
+                if match is None or int(match[1]) != payload["season"] or (
+                    row["category"] != "sonarr" or row["destination"] != "/data/torrents"
+                    or row["reservation_filesystem_id"] != self.filesystem_id
+                ):
+                    raise DeletionBlocked("torrent source escaped selected season")
+                if row["state"] in ("unknown", "dispatching"):
+                    raise DeletionBlocked("season torrent admission is uncertain")
+                if scope.endswith("PACK"):
+                    if row["state"] not in {"authorized", "confirmed"}:
+                        raise DeletionBlocked("historical season pack requires review")
+                    bindings = connection.execute(
+                        "SELECT scope_key FROM season_pack_episodes WHERE parent_permit_id=?",
+                        (row["permit_id"],),
+                    ).fetchall()
+                    if not bindings:
+                        raise DeletionBlocked("season pack has no verified episode bindings")
+                    for binding in bindings:
+                        bound = re.fullmatch(r"S([0-9]{2,})E[0-9]{2,}", binding[0])
+                        if bound is None or int(bound[1]) != payload["season"]:
+                            raise DeletionBlocked("season pack serves another season")
+                    scope = bindings[0][0]
+                else:
+                    bindings = [(scope,)]
+                sources.append((dict(row), scope, [b[0] for b in bindings]))
+        return sources
+
+    async def _delete_pending_season_sources(self, job: dict[str, Any]) -> None:
+        payload = self._season_payload(job)
+        _, episodes = await self._season_preflight(job)
+        if any(e.get("episodeFileId") for e in episodes):
+            raise DeletionBlocked("season still has imported files before torrent purge")
+        sources = self._season_source_inventory(job)
+        # Library children are gone before remaining pack bindings are tombstoned.
+        # This preserves shared hardlinks during each child's existing deletion flow.
+        for episode in episodes:
+            self.jobs.tombstone(
+                f"episode:tmdb:{payload['series_tmdb_id']}:S{payload['season']:02d}"
+                f"E{episode['episodeNumber']:02d}", job["item_id"],
+            )
+        for row, scope, bindings in sources:
+            self._guard_mount()
+            if row["state"] == "authorized":
+                if not PermitRegistry(self.jobs.path).cancel_authorized(row["token"]):
+                    raise DeletionRetryable("season admission changed during cancellation")
+                continue
+            for binding in bindings:
+                self.jobs.tombstone(
+                    f"episode:tmdb:{payload['series_tmdb_id']}:{binding}", job["item_id"],
+                )
+            result = self._json(await self.client.post(
+                f"{self.gateway_url}/internal/delete-source", headers=self.gateway_headers,
+                json={"permit_token": row["token"], "media_key": payload["media_key"],
+                      "scope_key": scope},
+            ))
+            if not isinstance(result, dict) or result.get("state") not in {"deleted", "missing"}:
+                raise DeletionBlocked("season source is still shared or unconfirmed")
+        with sqlite3.connect(self.jobs.path) as connection:
+            connection.execute(
+                "UPDATE reservations SET state='cancelled', budget_bytes=0 WHERE media_key=?",
+                (payload["media_key"],),
+            )
+
+    async def _delete_season_seerr(self, job: dict[str, Any]) -> None:
+        payload = self._season_payload(job)
+        with sqlite3.connect(self.jobs.path) as connection:
+            sources = connection.execute(
+                "SELECT q.source_id FROM requests q JOIN reservations r ON r.request_id=q.id "
+                "WHERE r.media_key=?", (payload["media_key"],),
+            ).fetchall()
+        for (source,) in sources:
+            match = re.fullmatch(r"([1-9][0-9]*):([0-9]+)", source)
+            if match is None or int(match[2]) != payload["season"]:
+                raise DeletionBlocked("Seerr season request identity is invalid")
+            response = await self.client.get(
+                f"{self.seerr_url}/api/v1/request/{match[1]}", headers=self.seerr_headers,
+            )
+            request = self._json(response, allow_missing=True)
+            if request is None:
+                continue
+            media = request.get("media") if isinstance(request, dict) else None
+            seasons = request.get("seasons") if isinstance(request, dict) else None
+            if (
+                not isinstance(media, dict) or request.get("id") != int(match[1])
+                or media.get("tmdbId") != payload["series_tmdb_id"]
+                or media.get("mediaType") != "tv" or not isinstance(seasons, list) or not seasons
+                or any(not isinstance(s, dict) or type(s.get("seasonNumber")) is not int
+                       for s in seasons)
+            ):
+                raise DeletionBlocked("Seerr request changed after season selection")
+            if all(s["seasonNumber"] == payload["season"] for s in seasons):
+                self._guard_mount()
+                self._status(await self.client.delete(
+                    f"{self.seerr_url}/api/v1/request/{match[1]}", headers=self.seerr_headers,
+                ), allow_missing=True)
+
+    def _season_metadata(self, job: dict[str, Any], *, must_exist: bool) -> list[Path]:
+        path = self._season_folder(job, must_exist=False)
+        metadata = job["payload"].get("metadata_files", [])
+        result = []
+        for entry in metadata:
+            file = Path(entry["file_path"])
+            if file.parent != path or not re.fullmatch(
+                r"(?:season\.nfo|(?:folder|poster|banner|fanart|thumb|landscape)"
+                r"\.(?:jpg|jpeg|png|webp))", file.name, re.IGNORECASE,
+            ) or file.is_symlink():
+                raise DeletionBlocked("season metadata escaped selected folder")
+            if not file.exists():
+                if must_exist:
+                    raise DeletionBlocked("season metadata disappeared after capture")
+                continue
+            status = file.stat()
+            actual = (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
+            if actual != tuple(entry["file_identity"][k]
+                               for k in ("device", "inode", "size", "mtime_ns")):
+                raise DeletionBlocked("season metadata changed after capture")
+            if not stat.S_ISREG(status.st_mode):
+                raise DeletionBlocked("season metadata is not a regular file")
+            result.append(file)
+        return result
+
+    def _remove_season_folder(self, job: dict[str, Any]) -> Path:
+        path = self._season_folder(job, must_exist=False)
+        if not path.exists():
+            return path
+        for file in self._season_metadata(job, must_exist=False):
+            self._guard_mount()
+            self._season_folder(job, must_exist=True)
+            if file not in self._season_metadata(job, must_exist=False):
+                continue
+            file.unlink()
+        try:
+            self._guard_mount()
+            if not self._season_folder(job, must_exist=False).exists():
+                return path
+            path.rmdir()  # Never recursively delete unknown videos or directory contents.
+        except OSError as error:
+            if error.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                raise DeletionBlocked("season folder contains uncaptured files") from error
+            raise
+        return path
+
+    async def _process_season(self, job: dict[str, Any]) -> None:
+        while True:
+            self._guard_mount()
+            stage = job["stage"]
+            if stage == "queued":
+                self._season_folder(job, must_exist=True)
+                self._season_metadata(job, must_exist=True)
+                self._season_source_inventory(job)
+                await self._season_preflight(job)
+                for child in self._season_children(job):
+                    self._file(child, must_exist=True)
+                    self._association(child)
+                    await self._arr_preflight(child, file_exists=True)
+                job = self.jobs.set_stage(job["item_id"], "validated")
+            elif stage == "validated":
+                await self._cancel_season(job)
+                job = self.jobs.set_stage(job["item_id"], "tombstoned")
+            elif stage == "tombstoned":
+                if any(c["stage"] != "complete" for c in self._season_children(job)):
+                    raise DeletionRetryable("season episode cleanup is still processing")
+                await self._delete_pending_season_sources(job)
+                job = self.jobs.set_stage(job["item_id"], "torrents_removed")
+            elif stage == "torrents_removed":
+                await self._delete_season_seerr(job)
+                job = self.jobs.set_stage(job["item_id"], "seerr_removed")
+            elif stage == "seerr_removed":
+                path = self._remove_season_folder(job)
+                await self._forget_jellyfin_item(job["item_id"], path)
+                job = self.jobs.set_stage(job["item_id"], "jellyfin_removed")
+            elif stage == "jellyfin_removed":
+                self._status(await self.client.post(
+                    f"{self.seerr_url}/api/v1/settings/jellyfin/sync", headers=self.seerr_headers,
+                    json={"start": True, "cancel": False},
+                ))
+                self.jobs.set_stage(job["item_id"], "complete")
+                return
+            else:
+                raise DeletionBlocked("unknown season deletion stage")
+
     async def _process(self, job: dict[str, Any]) -> None:
+        if job["item_type"] == "Season":
+            await self._process_season(job)
+            return
+        parent_id = job.get("payload", {}).get("parent_item_id")
+        if parent_id:
+            parent = self.jobs.get(parent_id)
+            if parent is None or parent["item_type"] != "Season" or parent["stage"] == "blocked":
+                raise DeletionBlocked("season deletion parent is unavailable or blocked")
+            if parent["stage"] in {"queued", "validated"}:
+                raise DeletionRetryable("season batch has not passed preflight")
         while True:
             stage = job["stage"]
             self._guard_mount()

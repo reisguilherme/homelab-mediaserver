@@ -77,6 +77,11 @@ Legendas priorizam pt-BR da mesma release, pt-BR de edição compatível, inglê
 da mesma release e inglês de edição compatível. Áudio original brasileiro
 comprovado pode dispensar legenda. Veja [as regras e unidades](docs/configuration.md).
 
+No Jellyfin Web, o menu `…` permite excluir um episódio ou uma temporada
+inteira com a conta administradora autorizada. O controlador coordena a limpeza
+no Sonarr, qBit e Seerr, preservando outras temporadas. Marcar como assistido
+não remove arquivos. Veja [como excluir e acompanhar](docs/operator-guide.md#remover-mídia-assistida).
+
 ## Desenvolver
 
 Use Linux/WSL2, Python 3.12 e `uv sync --frozen`.

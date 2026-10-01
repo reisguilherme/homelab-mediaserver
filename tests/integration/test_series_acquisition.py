@@ -107,6 +107,57 @@ def test_explicitly_deleted_episode_is_treated_as_complete_for_ordering(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_season_deleted_during_torrent_fetch_does_not_admit_or_grab(tmp_path):
+    repo, permits, reservation_id = _reserve(tmp_path, season=1)
+    jobs = DeletionJobStore(repo.path)
+    torrent = _torrent(season=1)
+    inspected = inspect_torrent(torrent)
+
+    def handler(request):
+        if request.url.path == "/api/v3/config/downloadclient":
+            return httpx.Response(200, json={"enableCompletedDownloadHandling": False})
+        if request.url.path == "/api/v3/series":
+            return httpx.Response(200, json=[{"id": 1, "tmdbId": 97546, "monitored": True}])
+        if request.url.path == "/api/v3/episode":
+            return httpx.Response(200, json=[{
+                "id": 11, "seasonNumber": 1, "episodeNumber": 1,
+                "monitored": True, "hasFile": False,
+                "airDateUtc": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+            }])
+        if request.url.path == "/api/v3/release" and request.method == "GET":
+            return httpx.Response(200, json=[{
+                "guid": "deleted-season-episode", "indexerId": 2,
+                "title": "Ted Lasso S01E01 1080p WEB-DL", "size": inspected.total_bytes,
+                "infoHash": inspected.infohash, "rejected": False, "protocol": "torrent",
+                "episodeIds": [11], "downloadUrl": "http://prowlarr:9696/2/download?id=1",
+                "quality": {"quality": {
+                    "source": "web", "name": "WEBDL-1080p", "resolution": 1080,
+                }},
+            }])
+        if request.url.path == "/2/download":
+            jobs.tombstone("season:tmdb:97546:1", "jellyfin-season")
+            return httpx.Response(200, content=torrent)
+        if request.url.path == "/api/v3/release" and request.method == "POST":
+            return httpx.Response(200, json={"accepted": True})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    async def capacity():
+        return CapacityEvidence(free_bytes=500_000_000_000, remaining_by_hash={})
+
+    async with httpx.AsyncClient(transport=_transport(handler)) as client:
+        acquirer = SeriesAcquirer(
+            repository=repo, permits=permits,
+            sonarr_url="http://sonarr:8989", sonarr_api_key="secret",
+            prowlarr_url="http://prowlarr:9696", client=client,
+            capacity_provider=capacity, is_tombstoned=jobs.is_tombstoned,
+        )
+        assert await acquirer.acquire("season:tmdb:97546:1", reservation_id) == (
+            "reservation_inactive"
+        )
+    assert permits.get_for_reservation(reservation_id, scope_key="S01E01") is None
+
+
+@pytest.mark.asyncio
 async def test_series_requires_hardlink_import_before_grab(tmp_path):
     repo, permits, reservation_id = _reserve(tmp_path)
     def handler(request):

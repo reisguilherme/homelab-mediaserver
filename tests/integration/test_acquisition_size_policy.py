@@ -172,6 +172,7 @@ async def test_series_ordering_does_not_start_or_stop_protected_episode(tmp_path
         )
         assert (
             await acquirer._reconcile_existing_queue(
+                media_key="season:tmdb:3:2",
                 episodes=[{"id": 4, "seasonNumber": 2, "episodeNumber": 4}],
                 season=2,
                 reservation_id=reserved.reservation_id,
