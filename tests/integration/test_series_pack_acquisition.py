@@ -285,8 +285,10 @@ async def test_bad_or_weak_or_nonfitting_pack_falls_back_to_good_episode(tmp_pat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("matching_seeds,expected", [(6, "same-family"), (4, "other-family")])
-async def test_series_affinity_survives_restart_but_does_not_prefer_weak_family(
+@pytest.mark.parametrize("matching_seeds,expected", [
+    (6, "other-family"), (4, "other-family"), (100, "same-family"),
+])
+async def test_series_affinity_survives_restart_but_only_breaks_seed_ties(
     tmp_path, matching_seeds, expected,
 ):
     fixture = SeriesFixture(tmp_path, episode_count=2)
@@ -303,6 +305,77 @@ async def test_series_affinity_survives_restart_but_does_not_prefer_weak_family(
             "season:tmdb:101:1", fixture.reservation,
         ) == "grabbed"
     assert fixture.posts == ["first", expected]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefer_season_pack", [False, True])
+async def test_native_season_discovery_supplies_missing_primary_episodes_once(
+    tmp_path, prefer_season_pack,
+):
+    fixture = SeriesFixture(tmp_path, episode_count=2)
+    fixture.pack_offers = [
+        fixture.release(f"season-only-{number}", [number])
+        | {"seriesId": 1, "fullSeason": False}
+        for number in (1, 2)
+    ]
+    for number in (1, 2):
+        fixture.episode_offers[number] = [fixture.release(f"backup-{number}", [number]) | {
+            "indexer": "1337x", "indexerId": 2,
+        }]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handler)) as client:
+        acquirer = fixture.acquirer(client, prefer_season_pack=prefer_season_pack)
+        for _ in range(2):
+            assert await acquirer.acquire("season:tmdb:101:1", fixture.reservation) == "grabbed"
+        assert await acquirer.acquire("season:tmdb:101:1", fixture.reservation) == (
+            "waiting_episodes"
+        )
+    assert fixture.posts == ["season-only-1", "season-only-2"]
+    assert fixture.searched.count("pack") == 1
+    assert fixture.metadata == ["season-only-1", "season-only-2"]
+
+
+@pytest.mark.asyncio
+async def test_season_discovery_refreshes_after_bounded_ttl_and_preserves_native_veto(tmp_path):
+    fixture = SeriesFixture(tmp_path, episode_count=2)
+    offer = fixture.release("season-only", [1]) | {"seriesId": 1}
+    fixture.pack_offers = [offer]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handler)) as client:
+        acquirer = fixture.acquirer(client)
+        async def candidates():
+            return [item[0]['guid'] async for item in acquirer._eligible_releases(
+                series_id=1, episode_id=1, season=1, episode=1, tmdb_id=101,
+                runtime_minutes=45,
+            )]
+        assert await candidates() == ['season-only']
+        fixture.episode_offers[1] = [offer | {
+            'rejected': True, 'rejections': ['Existing file meets cutoff: WEB-DL-1080p'],
+        }]
+        assert await candidates() == []  # Fresh native veto overrides cached eligibility.
+        fixture.episode_offers[1] = []
+        fixture.pack_offers = []
+        # Expire the cached season without sleeping or changing the global event-loop clock.
+        acquirer._season_release_cache = {
+            key: (0, rows) for key, (_, rows) in acquirer._season_release_cache.items()
+        }
+        assert await candidates() == []
+    assert fixture.searched.count('pack') == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('identity', [
+    {'seriesId': 2}, {'seriesId': True}, {'seriesId': None},
+    {'seriesId': 1, 'episodeIds': [2]}, {'seriesId': 1, 'episodeIds': [True]},
+    {'seriesId': 1, 'episodeIds': [1, 2]},
+])
+async def test_season_discovery_rejects_foreign_or_ambiguous_native_identity(tmp_path, identity):
+    fixture = SeriesFixture(tmp_path, episode_count=1)
+    fixture.pack_offers = [fixture.release('foreign', [1]) | identity]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handler)) as client:
+        assert await fixture.acquirer(client).acquire(
+            'season:tmdb:101:1', fixture.reservation,
+        ) == 'no_eligible_release'
+    assert fixture.posts == []
+    assert fixture.metadata == []
 
 
 @pytest.mark.asyncio

@@ -74,9 +74,16 @@ com upload limitado a 20 Mbit/s. A seleção usa UIndex primeiro e 1337x como
 alternativa para fontes ausentes ou com poucos seeds. Filmes preferem 4K,
 com fallback em 1080p; séries usam 1080p com piso de tamanho por duração.
 Temporadas completas e a mesma família de releases são preferidas quando elegíveis.
+A quantidade de seeds precede a afinidade de família. A busca da temporada também
+alimenta a seleção de episódios, e um pack com disponibilidade verificada pode
+recuperar episódios parados sem peers, preservando fontes concluídas ou em progresso.
 Episódios podem baixar em paralelo, com janela configurável; a importação
 no Jellyfin mantém a sequência de temporada e episódio. Capacidade usa bytes reais
 pendentes, sem reserva fixa por filme nem teto de tamanho.
+
+Se o cache de um magnet falhar, o worker tenta recuperar somente os metadados
+dos peers, com prazo limitado e validação do hash. A mídia continua dependendo
+do gateway e da capacidade real. Consulte o [diagnóstico de fontes](docs/runbooks/download-sources.md).
 
 Legendas priorizam pt-BR da mesma release, pt-BR de edição compatível, inglês
 da mesma release e inglês de edição compatível. Áudio original brasileiro

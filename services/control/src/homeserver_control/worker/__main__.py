@@ -31,6 +31,7 @@ from .cancellation import CancellationReconciler
 from .capacity_evidence import read_capacity_evidence
 from .deletion_coordinator import DeletionCoordinator
 from .finalization import MovieFinalizer
+from .magnet_metadata import resolve_magnet_metadata
 from .movie_priority import MoviePrioritizer
 from .release_quality import ReleasePolicy
 from .runtime import WorkerCycle
@@ -229,6 +230,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
             source_retry_seconds=source_retry_seconds,
             search_timeout_seconds=search_timeout,
         )
+        acquirer.metadata_resolver = resolve_magnet_metadata
         if arr_token:
             finalizer_client = httpx.AsyncClient(timeout=httpx.Timeout(http_timeout))
             finalizer = MovieFinalizer(
@@ -288,6 +290,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 os.environ.get("HOMESERVER_SERIES_RELEASE_AFFINITY", "true") == "true"
             ),
         )
+        series_acquirer.metadata_resolver = resolve_magnet_metadata
         if arr_token:
             series_finalizer_client = httpx.AsyncClient(timeout=httpx.Timeout(http_timeout))
             series_finalizer = SeriesFinalizer(

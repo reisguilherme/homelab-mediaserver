@@ -56,6 +56,20 @@
     .segments .series, .swatch.series { background: #5f9bd8; }
     .segments .torrents, .swatch.torrents { background: #ad95df; }
     .segments .other, .swatch.other { background: #657b8e; }
+    .segments .used, .swatch.used { background: #9aa4af; }
+    .segments .free, .swatch.free { background: #294a56; }
+    .segments .reserved, .swatch.reserved { background: repeating-linear-gradient(135deg, #bd8d59 0 3px, #654e35 3px 6px); }
+    .pool-chart { margin-top: 25px; }
+    .pool-segments { height: 15px; }
+    .pool-segments span { flex: 0 0 auto; }
+    .pool-chart-summary { margin: 9px 0 0; color: #b2c5ce; font-size: 12px; line-height: 1.6; font-variant-numeric: tabular-nums; }
+    .pool-card .legend { gap: 12px 18px; margin-top: 18px; }
+    .pool-card .legend-item { font-size: 12px; }
+    .pool-card .legend-label { gap: 7px; }
+    .pool-card .legend-item strong { font-size: 12px; }
+    .pool-card .legend-label { min-width: 0; }
+    .pool-card .legend-item[id$="-used-legend"], .pool-card .legend-item[id$="-reserved-legend"] { grid-column: 1 / -1; }
+    @media (max-width: 370px) { .pool-card .legend { grid-template-columns: 1fr; } }
     .legend { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 24px; margin-top: 25px; }
     .legend-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; min-width: 0; font-size: 13px; }
     .legend-label { display: flex; align-items: center; gap: 9px; color: #9aadb9; }
@@ -109,11 +123,22 @@
             <div><dt>Restante da fila</dt><dd id="pool-ssd-queue">—</dd></div><div><dt>Disponível para novos downloads</dt><dd id="pool-ssd-admissible">—</dd></div>
           </dl>
           <p class="note">Total <span id="pool-ssd-total">—</span> · Amostra <span id="pool-ssd-age">—</span></p>
-          <div class="legend" aria-label="Uso por categoria do SSD">
-            <div class="legend-item"><span class="legend-label">Filmes</span><strong id="pool-ssd-movies">—</strong></div>
-            <div class="legend-item"><span class="legend-label">Séries</span><strong id="pool-ssd-series">—</strong></div>
-            <div class="legend-item"><span class="legend-label">Torrents</span><strong id="pool-ssd-torrents">—</strong></div>
-            <div class="legend-item"><span class="legend-label">Outros</span><strong id="pool-ssd-other">—</strong></div>
+          <div class="pool-chart">
+            <div class="segments pool-segments" id="pool-ssd-chart" role="img" aria-label="Gráfico do SSD indisponível" hidden>
+              <span class="movies" id="pool-ssd-movies-bar" aria-hidden="true"></span><span class="series" id="pool-ssd-series-bar" aria-hidden="true"></span><span class="torrents" id="pool-ssd-torrents-bar" aria-hidden="true"></span><span class="other" id="pool-ssd-other-bar" aria-hidden="true"></span><span class="used" id="pool-ssd-used-bar" aria-hidden="true"></span><span class="free" id="pool-ssd-free-bar" aria-hidden="true"></span><span class="reserved" id="pool-ssd-reserved-bar" aria-hidden="true"></span>
+            </div>
+            <p class="pool-chart-summary" id="pool-ssd-chart-summary">Gráfico indisponível</p>
+          </div>
+          <div class="legend" id="pool-ssd-breakdown" aria-label="Uso por categoria do SSD" hidden>
+            <div class="legend-item"><span class="legend-label"><i class="swatch movies" aria-hidden="true"></i>Filmes</span><strong id="pool-ssd-movies">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch series" aria-hidden="true"></i>Séries</span><strong id="pool-ssd-series">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch torrents" aria-hidden="true"></i>Torrents</span><strong id="pool-ssd-torrents">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch other" aria-hidden="true"></i>Outros</span><strong id="pool-ssd-other">—</strong></div>
+          </div>
+          <div class="legend" id="pool-ssd-chart-legend" aria-label="Livre e reservado do SSD" hidden>
+            <div class="legend-item" id="pool-ssd-used-legend"><span class="legend-label"><i class="swatch used" aria-hidden="true"></i><span id="pool-ssd-used-label">Usado</span></span><strong id="pool-ssd-unclassified">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch free" aria-hidden="true"></i>Livre</span><strong id="pool-ssd-chart-free">—</strong></div>
+            <div class="legend-item" id="pool-ssd-reserved-legend"><span class="legend-label"><i class="swatch reserved" aria-hidden="true"></i>Reservado / indisponível</span><strong id="pool-ssd-reserved">—</strong></div>
           </div>
         </article>
         <article class="card pool-card" aria-labelledby="pool-hdd-title">
@@ -123,11 +148,22 @@
             <div><dt>Restante da fila</dt><dd id="pool-hdd-queue">—</dd></div><div><dt>Disponível para novos downloads</dt><dd id="pool-hdd-admissible">—</dd></div>
           </dl>
           <p class="note">Total <span id="pool-hdd-total">—</span> · Amostra <span id="pool-hdd-age">—</span></p>
-          <div class="legend" aria-label="Uso por categoria do HD USB">
-            <div class="legend-item"><span class="legend-label">Filmes</span><strong id="pool-hdd-movies">—</strong></div>
-            <div class="legend-item"><span class="legend-label">Séries</span><strong id="pool-hdd-series">—</strong></div>
-            <div class="legend-item"><span class="legend-label">Torrents</span><strong id="pool-hdd-torrents">—</strong></div>
-            <div class="legend-item"><span class="legend-label">Outros</span><strong id="pool-hdd-other">—</strong></div>
+          <div class="pool-chart">
+            <div class="segments pool-segments" id="pool-hdd-chart" role="img" aria-label="Gráfico do HD USB indisponível" hidden>
+              <span class="movies" id="pool-hdd-movies-bar" aria-hidden="true"></span><span class="series" id="pool-hdd-series-bar" aria-hidden="true"></span><span class="torrents" id="pool-hdd-torrents-bar" aria-hidden="true"></span><span class="other" id="pool-hdd-other-bar" aria-hidden="true"></span><span class="used" id="pool-hdd-used-bar" aria-hidden="true"></span><span class="free" id="pool-hdd-free-bar" aria-hidden="true"></span><span class="reserved" id="pool-hdd-reserved-bar" aria-hidden="true"></span>
+            </div>
+            <p class="pool-chart-summary" id="pool-hdd-chart-summary">Gráfico indisponível</p>
+          </div>
+          <div class="legend" id="pool-hdd-breakdown" aria-label="Uso por categoria do HD USB" hidden>
+            <div class="legend-item"><span class="legend-label"><i class="swatch movies" aria-hidden="true"></i>Filmes</span><strong id="pool-hdd-movies">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch series" aria-hidden="true"></i>Séries</span><strong id="pool-hdd-series">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch torrents" aria-hidden="true"></i>Torrents</span><strong id="pool-hdd-torrents">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch other" aria-hidden="true"></i>Outros</span><strong id="pool-hdd-other">—</strong></div>
+          </div>
+          <div class="legend" id="pool-hdd-chart-legend" aria-label="Livre e reservado do HD USB" hidden>
+            <div class="legend-item" id="pool-hdd-used-legend"><span class="legend-label"><i class="swatch used" aria-hidden="true"></i><span id="pool-hdd-used-label">Usado</span></span><strong id="pool-hdd-unclassified">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch free" aria-hidden="true"></i>Livre</span><strong id="pool-hdd-chart-free">—</strong></div>
+            <div class="legend-item" id="pool-hdd-reserved-legend"><span class="legend-label"><i class="swatch reserved" aria-hidden="true"></i>Reservado / indisponível</span><strong id="pool-hdd-reserved">—</strong></div>
           </div>
         </article>
         <p class="note">Hardlinks são contados uma vez por disco. Fila e disponibilidade exigem evidência atual; “—” indica dados indisponíveis.</p>
@@ -179,11 +215,56 @@
     const setLive = (state) => { $('live').dataset.state = state; $('live-text').textContent = { ok: 'Online', stale: 'Dados antigos', calculating: 'Atualizando', unavailable: 'Sem dados' }[state] || 'Sem dados'; };
     const uptime = (seconds) => { if (!isNumber(seconds)) return '—'; const days = Math.floor(seconds / 86400); const hours = Math.floor((seconds % 86400) / 3600); return days ? `${days} d ${hours} h` : `${hours} h`; };
     const sampleDate = (value) => typeof value === 'number' ? new Date(value * 1000) : new Date(value);
+    function poolChart(pool) {
+      const { total_bytes: total, used_bytes: used, free_bytes: free } = pool;
+      if (pool.state !== 'ready' || ![total, used, free].every(isNumber) || total <= 0 || used + free > total) return null;
+      const keys = ['movies', 'series', 'torrents', 'other'];
+      const values = keys.map(key => pool.storage?.[`${key}_bytes`]);
+      const sum = values.reduce((result, value) => result + value, 0);
+      const breakdown = pool.storage?.state === 'ok' && values.every(isNumber) && sum <= used;
+      const segments = Object.fromEntries(keys.map((key, index) => [key, breakdown ? 100 * values[index] / total : 0]));
+      segments.used = 100 * (breakdown ? used - sum : used) / total;
+      segments.free = 100 * free / total;
+      segments.reserved = 100 * (total - used - free) / total;
+      return { breakdown, segments };
+    }
+    function renderPoolChart(pool, prefix, label) {
+      const chart = poolChart(pool);
+      const graph = $(prefix + 'chart');
+      graph.hidden = !chart;
+      $(prefix + 'breakdown').hidden = !chart?.breakdown;
+      $(prefix + 'chart-legend').hidden = !chart;
+      if (!chart) {
+        graph.setAttribute('aria-label', `${label}: gráfico indisponível`);
+        $(prefix + 'chart-summary').textContent = 'Gráfico indisponível · aguardando medição válida';
+        for (const key of ['movies', 'series', 'torrents', 'other', 'used', 'free', 'reserved']) $(prefix + key + '-bar').style.width = '0%';
+        return;
+      }
+      const labels = { movies: 'Filmes', series: 'Séries', torrents: 'Torrents', other: 'Outros', used: chart.breakdown ? 'Sem classificação' : 'Usado', free: 'Livre', reserved: 'Reservado / indisponível' };
+      const accessible = [`${label}: total ${bytes(pool.total_bytes)}`];
+      for (const [key, value] of Object.entries(chart.segments)) {
+        $(prefix + key + '-bar').style.width = `${value}%`;
+        if (value > 0) accessible.push(`${labels[key]} ${percent(value)}`);
+      }
+      graph.setAttribute('aria-label', accessible.join('. '));
+      $(prefix + 'used-legend').hidden = chart.segments.used === 0;
+      $(prefix + 'used-label').textContent = labels.used;
+      $(prefix + 'unclassified').textContent = bytes(chart.segments.used * pool.total_bytes / 100);
+      $(prefix + 'chart-free').textContent = bytes(pool.free_bytes);
+      $(prefix + 'reserved').textContent = bytes(pool.total_bytes - pool.used_bytes - pool.free_bytes);
+      $(prefix + 'reserved-legend').hidden = chart.segments.reserved === 0;
+      let summary = `${percent(100 * pool.used_bytes / pool.total_bytes)} usado · ${percent(chart.segments.free)} livre`;
+      if (chart.segments.reserved > 0) summary += ` · ${percent(chart.segments.reserved)} reservado`;
+      if (!chart.breakdown) summary += ' · detalhamento indisponível';
+      $(prefix + 'chart-summary').textContent = summary;
+    }
     function renderPools(pools) {
       for (const id of ['ssd', 'hdd']) {
         const pool = pools.find(item => item.pool_id === id) || {};
         const ready = pool.state === 'ready';
         const prefix = `pool-${id}-`;
+        const chart = poolChart(pool);
+        renderPoolChart(pool, prefix, id === 'ssd' ? 'SSD' : 'HD USB');
         $(prefix + 'state').textContent = { ready: 'Disponível', stale: 'Medição antiga', unavailable: 'Indisponível' }[pool.state] || 'Indisponível';
         $(prefix + 'state').dataset.state = pool.state || 'unavailable';
         for (const [field, key] of [['total', 'total_bytes'], ['used', 'used_bytes'], ['free', 'free_bytes'], ['queue', 'queue_remaining_bytes'], ['admissible', 'admissible_bytes']]) {
@@ -193,7 +274,7 @@
         const age = Math.floor((Date.now() - measured) / 1000);
         $(prefix + 'age').textContent = Number.isFinite(age) && age >= -5 ? `${Math.max(0, age)} s atrás` : '—';
         for (const key of ['movies', 'series', 'torrents', 'other']) {
-          $(prefix + key).textContent = bytes(ready ? pool.storage?.[`${key}_bytes`] : null);
+          $(prefix + key).textContent = bytes(chart?.breakdown ? pool.storage[`${key}_bytes`] : null);
         }
       }
     }
@@ -238,7 +319,7 @@
         const response = await fetch('/api/v1/status', { cache: 'no-store' });
         if (!response.ok) throw new Error('status unavailable');
         render(await response.json());
-      } catch (_) { setLive('unavailable'); }
+      } catch (_) { setLive('unavailable'); if (!$('pool-storage').hidden) renderPools([]); }
     }
     refresh();
     setInterval(refresh, 5000);

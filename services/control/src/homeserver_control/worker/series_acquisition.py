@@ -41,6 +41,8 @@ _WEB_DL = re.compile(r"(?<![a-z0-9])web[ ._-]*dl(?![a-z0-9])", re.I)
 _WEB = re.compile(r"(?<![a-z0-9])web(?![a-z0-9])", re.I)
 _REMUX = re.compile(r"(?<![a-z0-9])remux(?![a-z0-9])", re.I)
 _PROVIDER = re.compile(r"(?<![a-z0-9])(amzn|nf|atvp|dsnp|hmax|hulu|pmtp|peacock)(?![a-z0-9])", re.I)
+_SEASON_RELEASE_TTL_SECONDS = 300
+_SEASON_RELEASE_CACHE_SIZE = 8
 
 
 def _episode_tag(season: int, episode: int) -> str:
@@ -205,6 +207,7 @@ class SeriesAcquirer(MovieAcquirer):
         self.prefer_season_pack = prefer_season_pack
         self.release_affinity = release_affinity
         self._next_pack_search: dict[str, float] = {}
+        self._season_release_cache: dict[tuple[int, int], tuple[float, list[dict]]] = {}
         if release_affinity:
             with sqlite3.connect(repository.path) as connection:
                 connection.execute(
@@ -262,8 +265,8 @@ class SeriesAcquirer(MovieAcquirer):
             and seeds >= minimum
         )
         # Indexer priority is enforced by the shared selector outside this rank.
-        # Preserve resolution and legitimate audio before the healthy-family bonus.
-        return (*rank[:2], same_family, *rank[2:])
+        # Resolution, legitimate audio and seeds precede the family tie-breaker.
+        return (*rank[:3], same_family, *rank[3:])
 
     async def _reconcile_existing_queue(
         self,
@@ -511,6 +514,38 @@ class SeriesAcquirer(MovieAcquirer):
             inspected.total_bytes,
         )
 
+    async def _season_releases(self, series_id: int, season: int) -> list[dict]:
+        """Share native discovery across episodes and packs, never torrent bodies."""
+        now = time.monotonic()
+        self._season_release_cache = {
+            key: value for key, value in self._season_release_cache.items()
+            if now - value[0] < _SEASON_RELEASE_TTL_SECONDS
+        }
+        key = (series_id, season)
+        if key in self._season_release_cache:
+            return self._season_release_cache[key][1]
+        response = await self.client.get(
+            f"{self.sonarr_url}/api/v3/release",
+            params={"seriesId": series_id, "seasonNumber": season},
+            headers=self.headers, timeout=self.search_timeout_seconds,
+        )
+        response.raise_for_status()
+        releases = response.json()
+        if not isinstance(releases, list):
+            raise ValueError("Sonarr season release response is invalid")
+        rows = [item for item in releases if isinstance(item, dict)]
+        if len(self._season_release_cache) >= _SEASON_RELEASE_CACHE_SIZE:
+            self._season_release_cache.pop(next(iter(self._season_release_cache)))
+        self._season_release_cache[key] = (time.monotonic(), rows)
+        return rows
+
+    @staticmethod
+    def _native_release_key(release):
+        indexer_id, guid = release.get('indexerId'), release.get('guid')
+        if type(indexer_id) is int and indexer_id > 0 and isinstance(guid, str) and guid:
+            return indexer_id, guid
+        return None
+
     async def _eligible_releases(
         self,
         *,
@@ -536,6 +571,22 @@ class SeriesAcquirer(MovieAcquirer):
         releases = response.json()
         if not isinstance(releases, list):
             raise ValueError("Sonarr release response is invalid")
+        if self.release_policy is not None:
+            # Fresh per-episode decisions supersede cached season decisions, including
+            # rejection after a file/queue changed. Supplemental rows require native
+            # series/episode identity in addition to the existing title/manifest checks.
+            seen = {self._native_release_key(row) for row in releases if isinstance(row, dict)}
+            for row in await self._season_releases(series_id, season):
+                identity = self._native_release_key(row)
+                episode_ids = row.get('episodeIds')
+                if (identity is None or identity in seen
+                        or type(row.get('seriesId')) is not int or row['seriesId'] != series_id
+                        or not isinstance(episode_ids, list) or len(episode_ids) != 1
+                        or type(episode_ids[0]) is not int or episode_ids[0] != episode_id
+                        or release_indexer(row) != self.release_policy.indexer_priority[0]):
+                    continue
+                releases.append(row)
+                seen.add(identity)
 
         def rank(item):
             if reservation_id is not None:
@@ -592,6 +643,8 @@ class SeriesAcquirer(MovieAcquirer):
                 continue
             torrent = await self._metadata(release["downloadUrl"])
             if torrent is None:
+                LOGGER.info('Episode metadata unavailable: indexer=%s season=%s episode=%s',
+                            release_indexer(release), season, episode)
                 continue
             manifest = self._eligible_episode_manifest(
                 torrent,
@@ -714,6 +767,43 @@ class SeriesAcquirer(MovieAcquirer):
                     return True
         return False
 
+    async def _bind_recovery_pack(self, parent, bindings, sources, deleted):
+        """Stop only dead individual sources, then atomically transfer their slots."""
+        stopped = []
+        try:
+            for source in sources:
+                health, _ = await self._read_source_health(source)
+                if (
+                    health.amount_left <= 0 or health.progress >= 1
+                    or health.num_seeds > 0 or health.dlspeed > 0
+                    or self.health_store.is_protected(source.infohash)
+                    or self.permits.get_probe(source.permit_id) is not None
+                ):
+                    raise PermissionError("source_recovered_or_protected")
+            for source in sources:
+                await self._source_state(source, "stop")
+                stopped.append(source)
+            capacity = await self.capacity_provider()
+            if deleted() or not self.permits.probe_reservation_active(parent):
+                raise PermissionError("reservation_inactive")
+            self.permits.bind_season_pack(
+                parent.token, episode_files=bindings,
+                replacement_tokens=tuple(source.token for source in sources), capacity=capacity,
+            )
+        except Exception:
+            self.permits.cancel_authorized(parent.token)
+            if not deleted() and self.permits.probe_reservation_active(parent):
+                for source in stopped:
+                    current = self.permits.get(source.token)
+                    if current is not None and current.state == "confirmed":
+                        try:
+                            await self._resume_if_safe(current)
+                        except Exception:
+                            LOGGER.warning(
+                                "Cannot resume retained source after aborted pack handover"
+                            )
+            raise
+
     async def _acquire_season_pack(
         self,
         *,
@@ -728,22 +818,47 @@ class SeriesAcquirer(MovieAcquirer):
         media_key = f"season:tmdb:{series['tmdbId']}:{season}"
         if self.capacity_provider is None:
             return "capacity_unavailable"
-        scope = f"S{season:02d}PACK"
-        self.permits.retire_expired_authorized(reservation_id, scope_key=scope)
-        parent = self.permits.get_for_reservation(reservation_id, scope_key=scope)
-        if parent is not None:
-            if parent.state == "confirmed":
-                return None
-            reconciled = await self._reconcile_uncertain_source(parent)
-            return reconciled or "waiting_pack_confirmation"
 
         def has_deleted_episode():
-            return any(
+            return self.is_tombstoned(media_key) or any(
                 self.is_tombstoned(
                     f"episode:tmdb:{series['tmdbId']}:{_episode_tag(season, item['episodeNumber'])}"
                 )
                 for item in episode_rows
             )
+
+        scope = f"S{season:02d}PACK"
+        self.permits.retire_expired_authorized(reservation_id, scope_key=scope)
+        parent = self.permits.get_for_reservation(reservation_id, scope_key=scope)
+        if parent is not None and parent.state == "authorized":
+            bound = any(
+                (child := self.permits.get_for_reservation(
+                    reservation_id, scope_key=_episode_tag(season, item['episodeNumber']),
+                )) is not None and child.season_pack_parent_id == parent.permit_id
+                for item in episode_rows
+            )
+            if not bound:
+                # A crash between metadata persistence and the atomic binding
+                # transaction leaves an unused authorization, never a download.
+                self.permits.cancel_authorized(parent.token)
+                parent = None
+        if parent is not None:
+            if parent.state == "confirmed":
+                return None
+            if parent.state == "authorized" and not has_deleted_episode():
+                torrent = self.torrent_store.get(parent) if self.torrent_store else None
+                if torrent is not None:
+                    capacity = await self.capacity_provider()
+                    if has_deleted_episode() or not self.permits.probe_reservation_active(parent):
+                        return "reservation_inactive"
+                    if self.permits.pending_bytes(capacity, pool_id=parent.pool_id) > (
+                        capacity.pool(parent.pool_id).free_bytes
+                    ):
+                        return "waiting_space"
+                    await self._add_verified_torrent(parent, torrent)
+                    return "grabbed"
+            reconciled = await self._reconcile_uncertain_source(parent)
+            return reconciled or "waiting_pack_confirmation"
 
         # A fresh complete pack would download a deliberately deleted episode again.
         # Existing shared packs above remain available for their surviving siblings.
@@ -771,19 +886,26 @@ class SeriesAcquirer(MovieAcquirer):
             )
             is None
         }
-        if not missing_scopes:
+        stalled = {}
+        if self.health_store is not None:
+            for item in aired:
+                episode_scope = _episode_tag(season, item['episodeNumber'])
+                source = self.permits.get_for_reservation(reservation_id, scope_key=episode_scope)
+                if (
+                    item['id'] in imported_episode_ids or source is None
+                    or source.state != 'confirmed' or source.season_pack_parent_id is not None
+                    or self.health_store.is_protected(source.infohash)
+                    or self.permits.get_probe(source.permit_id) is not None
+                ):
+                    continue
+                reason, health = await self._source_status(source)
+                if (reason == 'stalled' and health is not None and health.amount_left > 0
+                        and health.progress < 1 and health.dlspeed == 0 and health.num_seeds == 0):
+                    stalled[episode_scope] = source
+        if not missing_scopes and not stalled:
             return None
         self._next_pack_search[reservation_id] = time.monotonic() + self.retry_seconds
-        response = await self.client.get(
-            f"{self.sonarr_url}/api/v3/release",
-            params={"seriesId": series["id"], "seasonNumber": season},
-            headers=self.headers,
-            timeout=self.search_timeout_seconds,
-        )
-        response.raise_for_status()
-        releases = response.json()
-        if not isinstance(releases, list):
-            raise ValueError("Sonarr season release response is invalid")
+        releases = await self._season_releases(series["id"], season)
 
         def rank(release):
             return self._candidate_rank(
@@ -813,11 +935,26 @@ class SeriesAcquirer(MovieAcquirer):
             if self._pack_paths_collide(manifest.selected_files):
                 LOGGER.info("Skipping season pack with retained payload path collision")
                 continue
+            quality = canonical_quality(release)
+            replacements = {
+                key: source for key, source in stalled.items()
+                if quality is not None and source.quality_rank is not None
+                and quality[:2] >= source.quality_rank[:2]
+            }
+            if replacements:
+                measured = (
+                    await self.availability_probe(torrent, manifest.infohash)
+                    if self.availability_probe is not None else None
+                )
+                if measured is None or measured <= 0:
+                    replacements = {}
             bindings = {
                 episode_scope: files
                 for episode_scope, files in manifest.episode_files.items()
-                if episode_scope in missing_scopes
+                if episode_scope in missing_scopes or episode_scope in replacements
             }
+            if not bindings:
+                continue
             try:
                 capacity = await self.capacity_provider() if self.capacity_provider else None
                 if not _season_active(
@@ -848,16 +985,34 @@ class SeriesAcquirer(MovieAcquirer):
                 return str(error)
             except sqlite3.IntegrityError:
                 return "already_permitted"
+            # Durable recovery data must exist before any original source is
+            # stopped or superseded, so a worker restart can finish dispatch.
             try:
-                self.permits.bind_season_pack(parent.token, episode_files=bindings)
+                if quality is not None:
+                    self.permits.set_quality(parent.token, quality)
+                if self.torrent_store is not None:
+                    self.torrent_store.put(parent, torrent)
+                elif replacements:
+                    raise ValueError("pack recovery requires durable metadata")
+            except Exception:
+                self.permits.cancel_authorized(parent.token)
+                raise
+            try:
+                if replacements:
+                    await self._bind_recovery_pack(
+                        parent, bindings, list(replacements.values()), has_deleted_episode,
+                    )
+                else:
+                    self.permits.bind_season_pack(parent.token, episode_files=bindings)
             except (PermissionError, ValueError):
                 self.permits.cancel_authorized(parent.token)
                 return "pack_binding_conflict"
-            quality = canonical_quality(release)
-            if quality is not None:
-                self.permits.set_quality(parent.token, quality)
-            if self.torrent_store is not None:
-                self.torrent_store.put(parent, torrent)
+            if replacements:
+                await self._add_verified_torrent(parent, torrent)
+                LOGGER.info(
+                    "Season pack admitted to recover %s stalled episodes", len(replacements),
+                )
+                return "grabbed"
             response = await self.client.post(
                 f"{self.sonarr_url}/api/v3/release",
                 headers=self.headers,
@@ -1011,6 +1166,7 @@ class SeriesAcquirer(MovieAcquirer):
             return pack_result
         waiting_space = False
         no_source = False
+        pending_probe = None
         # Downloads may overlap; SeriesFinalizer alone controls ordered library publication.
         for item in selected:
             if not _season_active(self.repository, reservation_id, media_key, self.is_tombstoned):
@@ -1037,7 +1193,8 @@ class SeriesAcquirer(MovieAcquirer):
             if existing is not None and existing.state == "confirmed":
                 probe_state = await self._monitor_probe(existing)
                 if probe_state is not None:
-                    return probe_state
+                    pending_probe = probe_state
+                    continue
                 replacement_reason, old_health = await self._source_status(existing)
                 if replacement_reason is None:
                     continue
@@ -1225,4 +1382,6 @@ class SeriesAcquirer(MovieAcquirer):
                     return resumed
         if waiting_space:
             return "waiting_space"
+        if pending_probe is not None:
+            return pending_probe
         return "no_eligible_release" if no_source else "waiting_episodes"

@@ -78,6 +78,56 @@ def test_disabled_slow_replacement_rejects_trial_of_progressing_source(tmp_path)
     assert store.probe_decision("old", "trial", old, new, now=1000) == "reject"
 
 
+@pytest.mark.parametrize("state", ["downloading", "stalledDL", "metaDL", "forcedMetaDL"])
+def test_probe_without_payload_expires_after_active_startup_grace(tmp_path, state):
+    path = tmp_path / "control.sqlite"
+    old, new = _health(), _health(state=state)
+    store = SourceHealthStore(path, slow_replacement_enabled=False, stalled_seconds=300)
+    assert store.probe_decision("old", "trial", old, new, now=1000) == "observing"
+    assert store.probe_decision("old", "trial", old, new, now=1299) == "observing"
+    restarted = SourceHealthStore(path, slow_replacement_enabled=False, stalled_seconds=300)
+    assert restarted.probe_decision("old", "trial", old, new, now=1300) == "reject"
+
+
+@pytest.mark.parametrize("state", ["queuedDL", "pausedDL", "stoppedDL"])
+def test_probe_queue_or_pause_does_not_consume_active_startup_grace(tmp_path, state):
+    store = SourceHealthStore(tmp_path / "control.sqlite", stalled_seconds=300)
+    old, active, waiting = _health(), _health(), _health(state=state)
+    assert store.probe_decision("old", "trial", old, active, now=1000) == "observing"
+    assert store.probe_decision("old", "trial", old, waiting, now=1299) == "observing"
+    assert store.probe_decision("old", "trial", old, waiting, now=2000) == "observing"
+    assert store.probe_decision("old", "trial", old, active, now=2100) == "observing"
+    assert store.probe_decision("old", "trial", old, active, now=2399) == "observing"
+    assert store.probe_decision("old", "trial", old, active, now=2400) == "reject"
+
+
+def test_probe_startup_grace_allows_progress_but_retains_recovered_original(tmp_path):
+    store = SourceHealthStore(tmp_path / "control.sqlite", slow_replacement_enabled=False)
+    old = _health()
+    assert store.probe_decision("old", "trial", old, _health(), now=1000) == "observing"
+    moving = _health(downloaded=1000, left=99_999_999_000, speed=100, state="downloading")
+    assert store.probe_decision("old", "trial", old, moving, now=1010) == "observing"
+    assert store.probe_decision("old", "trial", _health(seeds=1), moving, now=1011) == "reject"
+
+
+def test_probe_startup_uses_configured_stall_limit_and_reject_is_durable(tmp_path):
+    path = tmp_path / "control.sqlite"
+    store = SourceHealthStore(path, stalled_seconds=45)
+    assert store.probe_decision("old", "trial", _health(), _health(), now=1000) == "observing"
+    assert store.probe_decision("old", "trial", _health(), _health(), now=1044) == "observing"
+    assert store.probe_decision("old", "trial", _health(), _health(), now=1045) == "reject"
+    assert SourceHealthStore(path).probe_decision(
+        "old", "trial", _health(), _health(), now=1400,
+    ) == "reject"
+
+
+def test_probe_payload_progress_during_startup_can_promote_after_measured_window(tmp_path):
+    store = SourceHealthStore(tmp_path / "control.sqlite", slow_replacement_enabled=False)
+    assert store.probe_decision("old", "trial", _health(), _health(), now=1000) == "observing"
+    moving = _health(downloaded=1000, left=99_999_999_000, speed=100, state="downloading")
+    assert store.probe_decision("old", "trial", _health(), moving, now=1100) == "promote"
+
+
 def test_fast_progress_and_completed_torrent_never_trigger_failover(tmp_path):
     store = SourceHealthStore(tmp_path / "control.sqlite")
     assert store.observe("permit-1", _health(seeds=3, state="downloading"), now=1000) is None

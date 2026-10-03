@@ -160,19 +160,28 @@ class SourceHealthStore:
             row = connection.execute(
                 "SELECT * FROM source_probes WHERE candidate_id = ?", (candidate_id,)
             ).fetchone()
+            fetching_metadata = new.state in {"metaDL", "forcedMetaDL"}
+            starting = fetching_metadata or (
+                new.amount_left > 0 and new.dlspeed == 0 and new.downloaded == 0
+            )
             if (
                 new.state not in _ACTIVE_DOWNLOAD_STATES
                 and new.amount_left > 0
-                or new.state in {"metaDL", "forcedMetaDL", "queuedDL"}
-                or new.dlspeed == 0
-                and new.downloaded == 0
+                and not fetching_metadata
             ):
+                # Waiting for a queue slot or an operator resume is not swarm failure.
                 connection.execute(
                     "DELETE FROM source_probes WHERE candidate_id=?", (candidate_id,)
                 )
                 return "observing"
+            if row is not None:
+                if row["parent_id"] != parent_id or now < row["started_at"]:
+                    raise ValueError("probe identity or clock changed")
+                if row["decision"] not in {"starting", "observing"}:
+                    return row["decision"]
             if (
                 row is not None
+                and row["decision"] != "starting"
                 and row["last_observed_at"] is not None
                 and (now - row["last_observed_at"] > self.probe_seconds * 2)
             ):
@@ -191,20 +200,29 @@ class SourceHealthStore:
                         now,
                         old.amount_left,
                         new.amount_left,
-                        "observing",
+                        "starting" if starting else "observing",
                         now,
                     ),
                 )
                 return "observing"
-            if row["parent_id"] != parent_id or now < row["started_at"]:
-                raise ValueError("probe identity or clock changed")
-            if row["decision"] != "observing":
-                return row["decision"]
             elapsed = now - row["started_at"]
             connection.execute(
                 "UPDATE source_probes SET last_observed_at=? WHERE candidate_id=?",
                 (now, candidate_id),
             )
+            if row["decision"] == "starting":
+                if starting:
+                    decision = "reject" if elapsed >= self.stalled_seconds else "starting"
+                    connection.execute(
+                        "UPDATE source_probes SET decision=? WHERE candidate_id=?",
+                        (decision, candidate_id),
+                    )
+                    return "reject" if decision == "reject" else "observing"
+                # The same window includes startup cost once payload starts moving.
+                connection.execute(
+                    "UPDATE source_probes SET decision='observing' WHERE candidate_id=?",
+                    (candidate_id,),
+                )
             if elapsed < self.probe_seconds:
                 return "observing"
             old_rate = max(0, (row["old_left"] - old.amount_left) / elapsed)

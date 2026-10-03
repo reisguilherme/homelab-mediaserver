@@ -20,6 +20,14 @@ disponibilidade para novos downloads, categorias e idade da amostra. A ausência
 troca de identidade, montagem somente leitura ou evidência vencida deixa somente
 o card afetado indisponível; CPU, memória e rede continuam atualizando.
 
+A barra de cada disco representa seu total físico, com filmes, séries, torrents,
+outros, espaço livre utilizável e blocos reservados ou indisponíveis ao serviço.
+O segmento reservado é a diferença entre total, usado físico e livre utilizável;
+não é espaço disponível para downloads. A legenda identifica as cores e o texto
+informa as proporções. Sem categorias atuais, a barra mostra usado, livre e
+reservado com aviso de detalhamento indisponível. Sem capacidade válida ou com
+dados antigos, o gráfico é ocultado; um disco indisponível não parece vazio.
+
 As categorias são medidas nas raízes físicas, nunca na visão mergerfs. Hardlinks
 são deduplicados dentro de cada disco. Usado físico exclui blocos reservados ainda
 livres; livre utilizável considera somente blocos disponíveis ao serviço.

@@ -136,6 +136,9 @@ class MovieAcquirer(LiveSourceProbes):
         self.gateway_url = gateway_url.rstrip("/") if gateway_url else None
         self.arr_token = arr_token
         self.availability_probe = availability_probe
+        # Production injects the bounded, metadata-only peer resolver. Isolated
+        # clients and tests do not start network sessions as a hidden side effect.
+        self.metadata_resolver: Callable[[str], Awaitable[bytes | None]] | None = None
         self.live_source_probes = live_source_probes
         self.release_policy = release_policy
         self._source_titles: dict[str, str] = {}
@@ -192,14 +195,31 @@ class MovieAcquirer(LiveSourceProbes):
         priorities = self.release_policy.indexer_priority
         primary_releases = [item for item in ordered if release_indexer(item) == priorities[0]]
         fallback_releases = [item for item in ordered if release_indexer(item) in priorities[1:]]
-        async with aclosing(eligible(primary_releases)) as primary:
+        minimum = self.release_policy.indexer_fallback_min_seeders
+        healthy, weak = [], []
+        for item in primary_releases:
+            seeds = release_seeders(item)
+            (healthy if seeds is not None and seeds >= minimum else weak).append(item)
+        # Look ahead with one metadata body, not a materialized candidate list.
+        # Finding a healthy primary keeps this source preferred, while the merge
+        # still honors resolution/audio ahead of seed health inside that source.
+        async with aclosing(eligible(healthy)) as primary:
             first = await anext(primary, None)
-            seeds = release_seeders(first[0]) if first is not None else None
-            if seeds is not None and seeds >= self.release_policy.indexer_fallback_min_seeders:
-                yield first
-                async for candidate in primary:
-                    yield candidate
+            if first is not None:
+                async with aclosing(eligible(weak)) as remaining:
+                    second = await anext(remaining, None)
+                    while first is not None or second is not None:
+                        if second is None or (
+                            first is not None and rank(first[0]) >= rank(second[0])
+                        ):
+                            yield first
+                            first = await anext(primary, None)
+                        else:
+                            yield second
+                            second = await anext(remaining, None)
                 return
+        async with aclosing(eligible(weak)) as primary:
+            first = await anext(primary, None)
             async with aclosing(eligible(fallback_releases)) as fallback:
                 second = await anext(fallback, None)
                 while first is not None or second is not None:
@@ -453,14 +473,26 @@ class MovieAcquirer(LiveSourceProbes):
                         return None
                     cache_url = f"{_TORRENT_CACHE}/{infohash.upper()}.torrent"
                     cached = await self._metadata(cache_url, allow_magnet=False)
-                    if cached is None:
+                    if cached is not None:
+                        try:
+                            if inspect_torrent(cached).infohash == infohash:
+                                return merge_magnet_trackers(cached, response.headers["location"])
+                        except TorrentBytesError:
+                            pass
+                    LOGGER.info("HTTP torrent metadata unavailable or invalid for %s", infohash)
+                    if self.metadata_resolver is None:
                         return None
-                    try:
-                        if inspect_torrent(cached).infohash != infohash:
-                            return None
-                        return merge_magnet_trackers(cached, response.headers["location"])
-                    except TorrentBytesError:
-                        return None
+                    recovered = await self.metadata_resolver(response.headers["location"])
+                    if recovered is not None:
+                        try:
+                            if inspect_torrent(recovered).infohash == infohash:
+                                return merge_magnet_trackers(
+                                    recovered, response.headers["location"],
+                                )
+                        except TorrentBytesError:
+                            pass
+                    LOGGER.info("Peer metadata unavailable for %s; no payload admitted", infohash)
+                    return None
                 if response.status_code != 200:
                     return None
                 content_length = response.headers.get("content-length")

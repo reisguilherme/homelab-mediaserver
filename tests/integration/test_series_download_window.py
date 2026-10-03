@@ -348,7 +348,7 @@ async def test_complete_pack_parent_releases_slots_but_partial_parent_keeps_seas
     earlier_reservation, requested_reservation = _reserve(repo, 2), _reserve(repo, 3)
     permits, remaining = PermitRegistry(repo.path), {}
 
-    def admit(torrent, scope):
+    def admit(torrent, scope, *, pack_episodes=()):
         metadata = inspect_torrent(torrent)
         permit = permits.issue(
             infohash=metadata.infohash, metadata_sha256=metadata.metadata_sha256,
@@ -358,6 +358,12 @@ async def test_complete_pack_parent_releases_slots_but_partial_parent_keeps_seas
             capacity=CapacityEvidence(free_bytes=100_000_000_000, remaining_by_hash=remaining),
             expires_at=datetime.now(UTC) + timedelta(minutes=30),
         )
+        if pack_episodes:
+            permits.bind_season_pack(permit.token, episode_files={
+                f"S02E{number:02d}": tuple(
+                    path for path in permit.selected_files if f"S02E{number:02d}" in path
+                ) for number in pack_episodes
+            })
         permits.authorize(
             token=permit.token, infohash=permit.infohash, destination=permit.destination,
             metadata_sha256=permit.metadata_sha256, effect=lambda _: {"accepted": True},
@@ -374,12 +380,7 @@ async def test_complete_pack_parent_releases_slots_but_partial_parent_keeps_seas
         ],
         b"name": b"pack", b"piece length": 16_777_216, b"pieces": b"a" * (20 * 358),
     }})
-    parent = admit(torrent, "S02PACK")
-    permits.bind_season_pack(parent.token, episode_files={
-        f"S02E{number:02d}": tuple(
-            path for path in parent.selected_files if f"S02E{number:02d}" in path
-        ) for number in (2, 3)
-    })
+    parent = admit(torrent, "S02PACK", pack_episodes=(2, 3))
     remaining[parent.infohash] = pack_remaining
     if parent_state != "confirmed":
         with sqlite3.connect(repo.path) as connection:

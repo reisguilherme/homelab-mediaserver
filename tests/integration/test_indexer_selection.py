@@ -184,3 +184,33 @@ async def test_movie_default_fallback_prefers_well_seeded_affordable_uhd(tmp_pat
     assert inspected == [
         "uindex-uhd-too-large", "uindex-low-seeds", "1337x-many-seeds",
     ]
+
+
+@pytest.mark.asyncio
+async def test_healthy_primary_is_inspected_before_fallback_despite_earlier_weak_primary(tmp_path):
+    from contextlib import aclosing
+
+    repo = ReservationRepository(tmp_path / 'control.sqlite')
+    repo.initialize()
+    inspected = []
+    rows = [
+        {'guid': 'weak-high-quality', 'indexer': 'UIndex', 'seeders': 2, 'rank': 30},
+        {'guid': 'backup', 'indexer': '1337x', 'seeders': 100, 'rank': 40},
+        {'guid': 'healthy-primary', 'indexer': 'UIndex', 'seeders': 10, 'rank': 10},
+    ]
+    async def eligible(group):
+        for release in group:
+            inspected.append(release['guid'])
+            yield release, (), None, b'torrent'
+
+    async with httpx.AsyncClient() as client:
+        acquirer = MovieAcquirer(repository=repo, permits=PermitRegistry(repo.path),
+            radarr_url='http://radarr', radarr_api_key='fixture',
+            prowlarr_url='http://prowlarr', client=client,
+            release_policy=ReleasePolicy(indexer_fallback_min_seeders=5))
+        async with aclosing(acquirer._preferred_indexer_candidates(
+            rows, eligible=eligible, rank=lambda row: row['rank'],
+        )) as candidates:
+            first = await anext(candidates)
+            assert first[0]['guid'] == 'weak-high-quality'
+    assert inspected == ['healthy-primary', 'weak-high-quality']
