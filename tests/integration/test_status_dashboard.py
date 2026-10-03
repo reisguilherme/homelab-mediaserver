@@ -24,7 +24,12 @@ def _write_snapshots(root: Path, *, generated_at: datetime) -> tuple[Path, Path]
                     "uptime_seconds": 3600,
                 },
                 "network": {"interface": "enxusb", "rx_bps": 2_000_000, "tx_bps": 250_000},
-                "storage": {"total_bytes": 100_000, "used_bytes": 40_000},
+                "storage": {
+                    "filesystem_id": "test-volume",
+                    "measured_at": generated_at.timestamp(),
+                    "total_bytes": 100_000,
+                    "used_bytes": 40_000,
+                },
             }
         ),
         encoding="utf-8",
@@ -196,3 +201,117 @@ def test_storage_breakdown_hides_inconsistent_totals_until_capacity_catches_up(
     assert status["capacity"]["used_bytes"] == 1
     assert status["storage"]["state"] == "unavailable"
     assert status["storage"]["movies_bytes"] is None
+
+
+def test_status_never_merges_same_sized_different_filesystems(tmp_path):
+    from homeserver_telemetry.status import StatusProvider
+
+    host, capacity = _write_snapshots(tmp_path, generated_at=datetime.now(UTC))
+    payload = json.loads(host.read_text())
+    payload["storage"]["filesystem_id"] = "wrong-volume"
+    host.write_text(json.dumps(payload))
+    status = StatusProvider(host_path=host, capacity_path=capacity, media_root=tmp_path)()
+    assert status["capacity"]["used_bytes"] is None
+
+
+def test_status_independent_pool_cards_and_unknown_queue(tmp_path):
+    from homeserver_telemetry.status import StatusProvider
+
+    now = time.time()
+    pools = [
+        dict(
+            pool_id=pool_id,
+            label=label,
+            filesystem_id=f"uuid-{pool_id}",
+            state="ready",
+            reason=None,
+            measured_at=now,
+            total_bytes=100_000,
+            used_bytes=30_000,
+            free_bytes=60_000,
+        )
+        for pool_id, label in [("ssd", "SSD"), ("hdd", "HD USB")]
+    ]
+    host, capacity = _write_snapshots(tmp_path, generated_at=datetime.now(UTC))
+    capacity.write_text(json.dumps({"pools": pools}))
+    payload = json.loads(host.read_text())
+    payload["pools"] = [
+        {
+            **pool,
+            "storage": dict(
+                state="ok",
+                measured_at=now,
+                movies_bytes=4096,
+                series_bytes=0,
+                torrents_bytes=0,
+                other_bytes=25_904,
+            ),
+        }
+        for pool in pools
+    ]
+    host.write_text(json.dumps(payload))
+    provider = StatusProvider(host_path=host, capacity_path=capacity, media_root=tmp_path)
+    status = provider()
+    assert status["host"]["cpu_percent"] == 37.5
+    assert len(status["pools"]) == 2
+    assert status["capacity"]["free_bytes"] == 60_000
+    assert status["pools"][1]["used_bytes"] == 30_000
+    assert status["pools"][1]["storage"]["movies_bytes"] == 4096
+    assert status["pools"][1]["queue_remaining_bytes"] is None
+    assert status["pools"][1]["admissible_bytes"] is None
+    pools[1]["measured_at"] = now - 120
+    capacity.write_text(json.dumps({"pools": pools}))
+    status = provider()
+    assert status["pools"][0]["free_bytes"] == 60_000
+    assert status["pools"][1]["state"] == "stale"
+    assert status["pools"][1]["free_bytes"] is None
+    assert status["pools"][1]["storage"]["movies_bytes"] is None
+
+
+def test_status_pool_queue_requires_fresh_matching_identity(tmp_path):
+    from homeserver_telemetry.status import StatusProvider
+
+    now = time.time()
+    host, capacity = _write_snapshots(tmp_path, generated_at=datetime.now(UTC))
+    capacity.write_text(
+        json.dumps(
+            {
+                "pools": [
+                    dict(
+                        pool_id="ssd",
+                        label="SSD",
+                        filesystem_id="uuid-ssd",
+                        state="ready",
+                        reason=None,
+                        measured_at=now,
+                        total_bytes=100_000,
+                        used_bytes=30_000,
+                        free_bytes=60_000,
+                    )
+                ]
+            }
+        )
+    )
+    queue_path = tmp_path / "storage-queue.json"
+    queue = {
+        "measured_at": now,
+        "pools": [
+            dict(
+                pool_id="ssd",
+                filesystem_id="uuid-ssd",
+                pending_bytes=20_000,
+                available_bytes=40_000,
+            )
+        ],
+    }
+    queue_path.write_text(json.dumps(queue))
+    provider = StatusProvider(host_path=host, capacity_path=capacity, media_root=tmp_path)
+    assert provider()["pools"][0]["queue_remaining_bytes"] == 20_000
+    assert provider()["pools"][0]["admissible_bytes"] == 40_000
+    queue["pools"][0]["filesystem_id"] = "wrong-uuid"
+    queue_path.write_text(json.dumps(queue))
+    assert provider()["pools"][0]["admissible_bytes"] is None
+    queue["pools"][0]["filesystem_id"] = "uuid-ssd"
+    queue["measured_at"] = now - 90
+    queue_path.write_text(json.dumps(queue))
+    assert provider()["pools"][0]["queue_remaining_bytes"] is None

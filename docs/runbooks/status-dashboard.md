@@ -14,6 +14,19 @@ hardlinks duas vezes. Filmes têm prioridade, depois séries e torrents;
 Outros inclui o restante do filesystem e seus metadados. A primeira coleta
 pode mostrar Calculando pastas.
 
+Com o cadastro de expansão instalado, o painel mostra dois cards, SSD e HD USB.
+Cada um apresenta total, usado físico, livre utilizável, restante da fila,
+disponibilidade para novos downloads, categorias e idade da amostra. A ausência,
+troca de identidade, montagem somente leitura ou evidência vencida deixa somente
+o card afetado indisponível; CPU, memória e rede continuam atualizando.
+
+As categorias são medidas nas raízes físicas, nunca na visão mergerfs. Hardlinks
+são deduplicados dentro de cada disco. Usado físico exclui blocos reservados ainda
+livres; livre utilizável considera somente blocos disponíveis ao serviço.
+Fila e disponibilidade aparecem como “—” quando o controlador não publicou prova
+atual correspondente ao UUID do disco. Não interpretar esse símbolo como fila
+vazia. O contrato está em [status v2](../contracts/status-v2.md).
+
 ```bash
 docker compose ps host-metrics telemetry
 docker compose logs --tail=100 host-metrics telemetry

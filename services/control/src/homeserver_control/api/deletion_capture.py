@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import stat
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 
+from homeserver_common.storage import StorageRegistry, StorageUnavailable
 from homeserver_control.persistence.deletion_jobs import DeletionJobStore
+from homeserver_control.storage_paths import captured_identity, physical_paths, source_logical_path
 
 _ITEM_ID = re.compile(r"^[0-9a-fA-F]{32}$")
 _SEASON_METADATA = re.compile(
@@ -41,8 +45,10 @@ class DeletionAdmission:
         sonarr_api_key: str,
         client: httpx.AsyncClient | None = None,
         http_timeout_seconds: float = 15,
+        storage_registry: StorageRegistry | None = None,
     ) -> None:
         self.jobs = jobs
+        self.storage_registry = storage_registry
         self.media_root = Path(media_root)
         self.snapshot_path = Path(snapshot_path)
         self.filesystem_id = filesystem_id
@@ -79,6 +85,9 @@ class DeletionAdmission:
             return await request(client)
 
     def _check_mount(self) -> None:
+        if self.storage_registry is not None:
+            # Each captured file proves its own physical pool below.
+            return
         try:
             snapshot = json.loads(self.snapshot_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:
@@ -92,7 +101,7 @@ class DeletionAdmission:
         ):
             raise DeletionCaptureError(503, "media mount evidence is stale or mismatched")
 
-    def _file_identity(self, raw_path: object, library: str) -> tuple[Path, dict[str, int]]:
+    def _file_identity(self, raw_path: object, library: str) -> tuple[Path, dict]:
         if not isinstance(raw_path, str) or not raw_path:
             raise DeletionCaptureError(409, "item has no local media file")
         path = Path(raw_path)
@@ -121,6 +130,12 @@ class DeletionAdmission:
             raise DeletionCaptureError(409, "media file is unavailable") from error
         if not stat.S_ISREG(file_stat.st_mode):
             raise DeletionCaptureError(409, "media file is not regular")
+        if self.storage_registry is not None:
+            try:
+                logical = Path('/data/media') / path.relative_to(self.media_root)
+                return path, captured_identity(self.storage_registry, logical, union_path=path)
+            except (StorageUnavailable, OSError) as error:
+                raise DeletionCaptureError(503, 'physical media identity unavailable') from error
         return path, {
             "device": file_stat.st_dev,
             "inode": file_stat.st_ino,
@@ -128,6 +143,68 @@ class DeletionAdmission:
             "mtime_ns": file_stat.st_mtime_ns,
             "nlink": file_stat.st_nlink,
         }
+
+    def _sidecars(self, video: Path, library: str) -> list[dict]:
+        if self.storage_registry is None:
+            return []
+        result = []
+        pattern = re.compile(
+            r'^(?:\.(?:pt[-_]BR|en|eng)(?:\.(?:forced|hi|sdh|cc))?)?'
+            r'\.(?:srt|ass|ssa|vtt|nfo|jpg|jpeg|png|webp)$', re.IGNORECASE,
+        )
+        for file in video.parent.iterdir():
+            if file.name.startswith(video.stem) and pattern.fullmatch(file.name[len(video.stem):]):
+                path, identity = self._file_identity(str(file), library)
+                if identity['size'] > 50_000_000:
+                    raise DeletionCaptureError(409, 'media sidecar is too large')
+                result.append({'file_path': str(path), 'file_identity': identity,
+                               'source_files': self._source_sidecars(video, identity)})
+        return result
+
+    def _source_sidecars(self, video: Path, identity: dict) -> list[dict]:
+        """Capture only subtitle hardlinks belonging to the same admitted video."""
+        with sqlite3.connect(self.jobs.path) as connection:
+            connection.row_factory = sqlite3.Row
+            columns = {row[1] for row in connection.execute('PRAGMA table_info(gateway_permits)')}
+            if not {'pool_id', 'filesystem_id'}.issubset(columns):
+                return []
+            rows = connection.execute(
+                'SELECT destination,selected_files_json FROM gateway_permits '
+                'WHERE pool_id=? AND filesystem_id=? AND state IN '
+                "('confirmed','superseded')", (identity['pool_id'], identity['filesystem_id']),
+            ).fetchall()
+        video_identity = captured_identity(
+            self.storage_registry, Path('/data/media') / video.relative_to(self.media_root),
+            union_path=video,
+        )
+        found = {}
+        for row in rows:
+            permit = SimpleNamespace(destination=row['destination'])
+            selected = json.loads(row['selected_files_json'])
+            for name in selected:
+                if Path(name).suffix.lower() not in {'.mkv', '.mp4', '.avi', '.mov', '.m4v'}:
+                    continue
+                raw = source_logical_path(permit, name)
+                physical = self.storage_registry.resolve(identity['pool_id'], raw)
+                if not physical.is_file() or (physical.stat().st_dev, physical.stat().st_ino) != (
+                    video_identity['device'], video_identity['inode'],
+                ):
+                    continue
+                candidates = {source_logical_path(permit, item) for item in selected
+                              if Path(item).suffix.lower() in {'.srt', '.ass', '.ssa', '.vtt'}}
+                candidates.update(str(Path(raw).with_suffix(f'.{label}.srt'))
+                                  for label in ('pt-BR', 'en'))
+                for candidate in candidates:
+                    source = self.storage_registry.resolve(identity['pool_id'], candidate)
+                    if not source.is_file():
+                        continue
+                    status = source.stat()
+                    if (status.st_dev, status.st_ino) != (identity['device'], identity['inode']):
+                        continue
+                    local = self.media_root.parent / Path(candidate).relative_to('/data')
+                    captured = captured_identity(self.storage_registry, candidate, union_path=local)
+                    found[str(local)] = {'file_path': str(local), 'file_identity': captured}
+        return list(found.values())
 
     async def capture(self, item_id: str, user_token: str) -> dict[str, object]:
         if not _ITEM_ID.fullmatch(item_id) or not user_token:
@@ -197,6 +274,7 @@ class DeletionAdmission:
             "media_key": f"movie:tmdb:{tmdb_id}",
             "file_path": str(path),
             "file_identity": identity,
+            "sidecar_files": self._sidecars(path, 'movies'),
             "radarr_id": movie["id"],
             "radarr_file_id": movie_file.get("id"),
             "tmdb_id": int(tmdb_id),
@@ -272,6 +350,7 @@ class DeletionAdmission:
             "media_key": f"episode:tmdb:{tmdb_id}:S{season:02d}E{episode:02d}",
             "file_path": str(path),
             "file_identity": identity,
+            "sidecar_files": self._sidecars(path, 'tv'),
             "sonarr_series_id": sonarr_series_id,
             "sonarr_episode_id": sonarr_episode["id"],
             "sonarr_episode_file_id": episode_file_id,
@@ -280,7 +359,7 @@ class DeletionAdmission:
             "episode": episode,
         }
 
-    def _season_directory(self, raw_path: object) -> tuple[Path, dict[str, int]]:
+    def _season_directory(self, raw_path: object) -> tuple[Path, dict]:
         if not isinstance(raw_path, str) or not raw_path:
             raise DeletionCaptureError(409, "season has no local directory")
         path = Path(raw_path)
@@ -302,6 +381,26 @@ class DeletionAdmission:
         status = path.stat()
         if not stat.S_ISDIR(status.st_mode):
             raise DeletionCaptureError(409, "season path is not a directory")
+        if self.storage_registry is not None:
+            try:
+                branches = physical_paths(
+                    self.storage_registry, Path('/data/media') / path.relative_to(self.media_root),
+                    union_path=path,
+                )
+                identities = []
+                for pool_id, physical in branches:
+                    info = physical.stat()
+                    if not stat.S_ISDIR(info.st_mode):
+                        raise StorageUnavailable('physical season path is not a directory')
+                    identities.append({
+                        'pool_id': pool_id,
+                        'filesystem_id': self.storage_registry.pools[pool_id].filesystem_id,
+                        'device': info.st_dev, 'inode': info.st_ino,
+                    })
+                return path, {'device': status.st_dev, 'inode': status.st_ino,
+                              'physical_directories': identities}
+            except (StorageUnavailable, OSError) as error:
+                raise DeletionCaptureError(503, 'physical season identity unavailable') from error
         return path, {"device": status.st_dev, "inode": status.st_ino}
 
     async def _capture_season(
@@ -423,6 +522,7 @@ class DeletionAdmission:
             captured.append({"item_id": child["Id"], "payload": {
                 "media_key": f"episode:tmdb:{tmdb_id}:S{season:02d}E{entry['episodeNumber']:02d}",
                 "file_path": str(path), "file_identity": file_identity,
+                "sidecar_files": self._sidecars(path, 'tv'),
                 "sonarr_series_id": sonarr_series_id, "sonarr_episode_id": entry["id"],
                 "sonarr_episode_file_id": entry["episodeFileId"],
                 "series_tmdb_id": int(tmdb_id), "season": season,

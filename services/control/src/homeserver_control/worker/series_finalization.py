@@ -33,6 +33,8 @@ _SEASON_KEY = re.compile(r"season:tmdb:([1-9][0-9]*):([0-9]+)")
 
 
 class SeriesFinalizer(MovieFinalizer):
+    library = 'tv'
+
     def __init__(
         self,
         *,
@@ -91,6 +93,7 @@ class SeriesFinalizer(MovieFinalizer):
         )
         if match is None:
             return []
+        self._series_directory = match.get('path')
         response = await self.client.get(
             f"{self.sonarr_url}/api/v3/episode",
             params={"seriesId": match["id"]},
@@ -216,7 +219,7 @@ class SeriesFinalizer(MovieFinalizer):
         content_path = torrent.get("content_path")
         if not isinstance(content_path, str):
             raise ValidationError("torrent content path is missing")
-        content = self._local_path(content_path)
+        content = self._content_path(permit, content_path)
         response = await self.client.get(
             f"{self.gateway_url}/api/v2/torrents/files",
             params={"hash": permit.infohash},
@@ -243,7 +246,7 @@ class SeriesFinalizer(MovieFinalizer):
         selected = []
         self._validate_selected_episode_subtitles(permit, season=season, number=number)
         for relative in permit.selected_files:
-            path = self._local_path(f"/data/torrents/{relative}")
+            path = self._source_path(permit, relative)
             if relative not in sizes or path.stat().st_size != sizes[relative]:
                 raise ValidationError("torrent file does not match qBittorrent metadata")
             if path != content and content not in path.parents:
@@ -287,7 +290,7 @@ class SeriesFinalizer(MovieFinalizer):
         return (
             # Scanning the complete pack folder lets Sonarr import later files
             # before this controller validates their subtitles and episode order.
-            "/data/torrents/" + next(
+            permit.destination.rstrip('/') + '/' + next(
                 relative for relative in permit.selected_files
                 if PurePosixPath(relative).suffix.lower() in _VIDEO
             )
@@ -389,7 +392,8 @@ class SeriesFinalizer(MovieFinalizer):
                 if not self._import_matches_source(
                     video, permit, copy_allowed=state == "accepted_copy"
                 ):
-                    return "import_uncertain"
+                    return ('import_not_hardlinked' if self.storage_registry is not None
+                            else 'import_uncertain')
                 self._ensure_subtitle(video, permit)
                 self.repository.complete_episode_import(permit.permit_id)
                 return "complete"
@@ -441,14 +445,25 @@ class SeriesFinalizer(MovieFinalizer):
             if not _season_active(self.repository, reservation_id, media_key, self.is_tombstoned):
                 return "reservation_inactive"
             selected = [
-                self._local_path(f"/data/torrents/{relative}") for relative in permit.selected_files
+                self._source_path(permit, relative) for relative in permit.selected_files
             ]
             video = next((path for path in selected if path.suffix.lower() in _VIDEO), None)
             if video is None:
                 raise ValidationError("permit does not identify one episode video")
-            hardlink_ready = self._can_hardlink_video(video)
+            directory = None
+            if self.storage_registry is not None:
+                directory = self._import_directory(permit, self._series_directory)
+                # Sonarr may create the season folder; probe existing season folders
+                # too, where branch affinity and per-directory permissions differ.
+                for candidate in directory.iterdir():
+                    if candidate.is_dir() and re.fullmatch(
+                        rf'Season\s+0*{season}', candidate.name, re.IGNORECASE,
+                    ):
+                        directory = candidate
+                        break
+            hardlink_ready = self._can_hardlink_video(video, permit=permit, directory=directory)
             if not hardlink_ready and not await self._copy_fallback_fits(selected):
-                return "waiting_space"
+                return 'import_guard' if self.storage_registry is not None else 'waiting_space'
             if not _season_active(self.repository, reservation_id, media_key, self.is_tombstoned):
                 return "reservation_inactive"
             if not self.repository.claim_episode_import(

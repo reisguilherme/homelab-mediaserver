@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 
 import httpx
 
+from homeserver_common.storage import StorageUnavailable
 from homeserver_control.domain.subtitle_content import valid_srt
 from homeserver_control.gateway.permits import Permit, PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
@@ -17,6 +18,7 @@ from homeserver_control.persistence.subtitle_artifacts import (
     MOVIE_FINALIZER_SOURCE,
     SubtitleArtifactStore,
 )
+from homeserver_control.storage_paths import physical_path, source_logical_path
 
 from .capacity_evidence import CapacityEvidence
 from .imports import import_hardlink, probe_hardlink_as
@@ -99,6 +101,8 @@ def _write_external_subtitle(
 
 
 class MovieFinalizer:
+    library = 'movies'
+
     def __init__(
         self,
         *,
@@ -121,6 +125,7 @@ class MovieFinalizer:
             raise ValueError("gateway and Radarr credentials are required")
         self.repository = repository
         self.permits = permits
+        self.storage_registry = getattr(permits, 'storage_registry', None)
         self.subtitle_store = SubtitleArtifactStore(repository.path)
         self.torrent_root = Path(torrent_root)
         self.media_root = Path(media_root)
@@ -149,6 +154,8 @@ class MovieFinalizer:
         )
 
     async def _copy_fallback_fits(self, selected: list[Path]) -> bool:
+        if self.storage_registry is not None:
+            return False
         if self.capacity_provider is None:
             raise ValueError("fresh capacity evidence is required for import")
         evidence = await self.capacity_provider()
@@ -156,25 +163,106 @@ class MovieFinalizer:
         copy_bytes = sum(path.stat().st_size for path in selected)
         return copy_bytes <= max(0, evidence.free_bytes - pending)
 
-    def _can_hardlink_video(self, video: Path) -> bool:
+    def _can_hardlink_video(
+        self, video: Path, *, permit: Permit | None = None, directory: Path | None = None,
+    ) -> bool:
         if self.import_uid is None or self.import_gid is None:
             return False
-        return probe_hardlink_as(video, self.media_root, uid=self.import_uid, gid=self.import_gid)
+        verify = None
+        if self.storage_registry is not None:
+            assert permit is not None
+            source = self._physical(video, permit).stat()
+
+            def verify(target):
+                return os.path.samestat(source, self._physical(target, permit).stat())
+
+        return probe_hardlink_as(
+            video, directory or self.media_root, uid=self.import_uid, gid=self.import_gid,
+            verify=verify,
+        )
+
+    def _import_directory(self, permit: Permit, raw: object) -> Path:
+        prefix = Path('/data/media') / self.library
+        if (not isinstance(raw, str) or '..' in raw.split('/')
+                or not Path(raw).is_relative_to(prefix)):
+            raise ValidationError('Arr import directory is outside the library')
+        local = self.media_root / Path(raw).relative_to(prefix)
+        try:
+            physical = self.storage_registry.resolve(permit.pool_id, raw, writable=True)
+            missing = []
+            parent = physical
+            while not parent.exists():
+                missing.append(parent)
+                parent = parent.parent
+            if self.import_uid is None or self.import_gid is None:
+                raise ValidationError('Arr ownership is required for physical import')
+            for directory in reversed(missing):
+                directory.mkdir(mode=0o755)
+                if (directory.stat().st_uid, directory.stat().st_gid) != (
+                    self.import_uid, self.import_gid,
+                ):
+                    os.chown(directory, self.import_uid, self.import_gid)
+            if not local.is_dir() or local.is_symlink():
+                raise ValidationError('Arr import directory is unavailable in the union')
+            return local
+        except StorageUnavailable as exc:
+            raise ValidationError(str(exc)) from exc
 
     def _import_matches_source(self, video: Path, permit: Permit, *, copy_allowed: bool) -> bool:
         sources = [
-            self._local_path(f"/data/torrents/{relative}")
+            self._source_path(permit, relative)
             for relative in permit.selected_files
             if PurePosixPath(relative).suffix.lower() in _VIDEO
         ]
         if len(sources) != 1:
             raise ValidationError("permit does not identify one video file")
+        if self.storage_registry is not None:
+            source_stat = self._physical(sources[0], permit).stat()
+            video_stat = self._physical(video, permit).stat()
+            return (source_stat.st_dev, source_stat.st_ino, source_stat.st_size) == (
+                video_stat.st_dev, video_stat.st_ino, video_stat.st_size)
         source_stat = sources[0].stat()
         video_stat = video.stat()
         return source_stat.st_size == video_stat.st_size and (
             (source_stat.st_dev == video_stat.st_dev and source_stat.st_ino == video_stat.st_ino)
             or (copy_allowed and _same_content(sources[0], video))
         )
+
+    def _physical(self, path: Path, permit: Permit) -> Path:
+        """Keep I/O on the union while checking identity on the physical branch."""
+        if self.storage_registry is None:
+            return path
+        if path.is_relative_to(self.torrent_root):
+            logical = Path('/data/torrents') / path.relative_to(self.torrent_root)
+        else:
+            logical = Path('/data/media') / self.library / path.relative_to(self.media_root)
+        try:
+            if not self.permits.placement_valid(permit, writable=True):
+                raise StorageUnavailable('admitted pool is unavailable')
+            pool_id, physical = physical_path(
+                self.storage_registry, logical, union_path=path, writable=True,
+            )
+            if pool_id != permit.pool_id:
+                raise StorageUnavailable('file is not on the admitted physical pool')
+            return physical
+        except StorageUnavailable as exc:
+            raise ValidationError(str(exc)) from exc
+
+    def _source_path(self, permit: Permit, relative: str) -> Path:
+        try:
+            path = self._local_path(source_logical_path(permit, relative))
+        except StorageUnavailable as exc:
+            raise ValidationError(str(exc)) from exc
+        self._physical(path, permit)
+        return path
+
+    def _content_path(self, permit: Permit, raw: str) -> Path:
+        destination = permit.destination.rstrip('/')
+        if raw != destination and not raw.startswith(destination + '/'):
+            raise ValidationError('torrent content escaped admitted destination')
+        path = self._local_path(raw)
+        self._physical(path, permit)
+        return path
 
     def _local_path(self, raw: str) -> Path:
         prefix = "/data/torrents"
@@ -243,7 +331,7 @@ class MovieFinalizer:
         for preferred in self.subtitle_policy.languages:
             language, label, matches = handlers[preferred]
             subtitles = [
-                self._local_path(f"/data/torrents/{name}")
+                self._source_path(permit, name)
                 for name in permit.selected_files
                 if PurePosixPath(name).suffix.lower() in _SUBTITLE
                 and matches(name)
@@ -253,7 +341,7 @@ class MovieFinalizer:
             if subtitles and source is None:
                 raise ValidationError("selected subtitle vanished after import")
             if source is not None:
-                self._install_subtitle_file(video, source, label)
+                self._install_subtitle_file(video, source, label, permit=permit)
                 return
             content = self.subtitle_store.get(
                 permit.reservation_id,
@@ -263,7 +351,18 @@ class MovieFinalizer:
                 source=MOVIE_FINALIZER_SOURCE if scope_key is None else "subdl",
             )
             if content is not None:
-                _write_external_subtitle(video, content, self.media_root, language=language)
+                if self.storage_registry is None:
+                    _write_external_subtitle(video, content, self.media_root, language=language)
+                else:
+                    source_video = next(self._source_path(permit, name)
+                                        for name in permit.selected_files
+                                        if PurePosixPath(name).suffix.lower() in _VIDEO)
+                    physical = self._physical(source_video, permit)
+                    _write_external_subtitle(physical, content, physical.parent, language=language)
+                    source = source_video.with_name(f'{source_video.stem}.{label}.srt')
+                    if self.import_uid is not None and self.import_gid is not None:
+                        os.chown(self._physical(source, permit), self.import_uid, self.import_gid)
+                    self._install_subtitle_file(video, source, label, permit=permit)
                 return
         validated = validate_media(video, maximum_bytes=permit.budget_bytes)
         if not (
@@ -276,8 +375,21 @@ class MovieFinalizer:
         ):
             raise ValidationError("subtitle vanished after import")
 
-    def _install_subtitle_file(self, video: Path, source: Path, label: str) -> None:
+    def _install_subtitle_file(
+        self, video: Path, source: Path, label: str, *, permit: Permit | None = None,
+    ) -> None:
         target = video.with_name(f"{video.stem}.{label}{source.suffix.lower()}")
+        if self.storage_registry is not None:
+            assert permit is not None
+            self._physical(video, permit)
+            original = self._physical(source, permit)
+            if not target.exists():
+                # Both paths must traverse the same union mount, avoiding EXDEV.
+                os.link(source, target)
+            installed = self._physical(target, permit)
+            if not os.path.samestat(original.stat(), installed.stat()):
+                raise ValidationError('subtitle is not a physical hardlink to its source')
+            return
         if target.exists():
             if (
                 target.is_symlink()
@@ -306,7 +418,7 @@ class MovieFinalizer:
             return "complete"
         if import_state is not None:
             if import_state not in {"accepted", "accepted_copy"}:
-                return "import_uncertain"
+                return 'import_uncertain'
             movie = await self._radarr_movie(media_key)
             if movie is None or not movie.get("hasFile"):
                 return "import_pending"
@@ -315,7 +427,8 @@ class MovieFinalizer:
                 permit,
                 copy_allowed=import_state == "accepted_copy",
             ):
-                return "import_uncertain"
+                return ('import_not_hardlinked' if self.storage_registry is not None
+                        else 'import_uncertain')
             self._ensure_subtitle(movie, permit)
             self.repository.complete_movie_import(reservation_id)
             return "complete"
@@ -344,7 +457,7 @@ class MovieFinalizer:
         content_path = torrent.get("content_path")
         if not isinstance(content_path, str):
             raise ValidationError("torrent content path is missing")
-        content = self._local_path(content_path)
+        content = self._content_path(permit, content_path)
         if not permit.selected_files:
             raise ValidationError("permit has no selected files")
         files_response = await self.client.get(
@@ -365,7 +478,7 @@ class MovieFinalizer:
         }
         selected: list[Path] = []
         for relative in permit.selected_files:
-            path = self._local_path(f"/data/torrents/{relative}")
+            path = self._source_path(permit, relative)
             if relative not in sizes or path.stat().st_size != sizes[relative]:
                 raise ValidationError("torrent file does not match qBittorrent metadata")
             if path != content and content not in path.parents:
@@ -458,9 +571,13 @@ class MovieFinalizer:
                 )
         if not await self._hardlink_import_enabled():
             return "import_guard"
-        hardlink_ready = self._can_hardlink_video(videos[0])
+        directory = None
+        if self.storage_registry is not None:
+            movie = await self._radarr_movie(media_key)
+            directory = self._import_directory(permit, movie.get('path') if movie else None)
+        hardlink_ready = self._can_hardlink_video(videos[0], permit=permit, directory=directory)
         if not hardlink_ready and not await self._copy_fallback_fits(selected):
-            return "waiting_space"
+            return 'import_guard' if self.storage_registry is not None else 'waiting_space'
         if not self.repository.claim_movie_import(reservation_id, copy_allowed=not hardlink_ready):
             return "import_pending"
         response = await self.client.post(

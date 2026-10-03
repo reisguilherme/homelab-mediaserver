@@ -17,6 +17,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
 
+from homeserver_common.storage import load_storage_registry
 from homeserver_control.adapters.http import ContractError, EffectUncertain
 from homeserver_control.adapters.qbittorrent import QBittorrentAdapter
 from homeserver_control.domain.magnet import magnet_infohash
@@ -32,7 +33,16 @@ from .auth import token_matches
 from .permits import Permit, PermitRegistry
 
 _DELETE_AUXILIARY_SUFFIXES = {
-    ".txt", ".nfo", ".srt", ".ass", ".ssa", ".vtt", ".jpg", ".jpeg", ".png", ".webp",
+    ".txt",
+    ".nfo",
+    ".srt",
+    ".ass",
+    ".ssa",
+    ".vtt",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
 }
 _MAX_DELETE_AUXILIARY_BYTES = 50_000_000
 
@@ -146,7 +156,7 @@ def create_app(
             or permit.state != "confirmed"
             or permit.category not in {"sonarr", "radarr"}
             or permit.reservation_id is None
-            or permit.destination != "/data/torrents"
+            or not permits.placement_valid(permit)
             or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
             or (permit.category == "sonarr" and not isinstance(permit.scope_key, str))
             or (permit.category == "radarr" and permit.scope_key is not None)
@@ -177,6 +187,25 @@ def create_app(
         ):
             raise HTTPException(status_code=409, detail="torrent identity changed")
         return current
+
+    def require_pool_capacity(permit: Permit) -> None:
+        if permits.storage_registry is None:
+            return
+        if not permits.placement_valid(permit):
+            raise HTTPException(status_code=503, detail="storage placement unavailable")
+        if capacity_provider is None:
+            raise HTTPException(status_code=503, detail="fresh filesystem evidence required")
+        try:
+            capacity = capacity_provider()
+            if (
+                permits.pending_bytes(
+                    capacity, include_infohash=permit.infohash, pool_id=permit.pool_id
+                )
+                > capacity.pool(permit.pool_id).free_bytes
+            ):
+                raise ValueError("waiting_space")
+        except (RuntimeError, ValueError, OSError):
+            raise HTTPException(status_code=503, detail="filesystem evidence unavailable") from None
 
     @app.post("/internal/delete-source")
     async def delete_source(
@@ -240,7 +269,8 @@ def create_app(
             or not selected_paths.issubset(manifest_paths)
             or inspected.total_bytes > permit.budget_bytes
             or any(
-                item.path not in selected_paths and (
+                item.path not in selected_paths
+                and (
                     PurePosixPath(item.path).suffix.lower() not in _DELETE_AUXILIARY_SUFFIXES
                     or item.length > _MAX_DELETE_AUXILIARY_BYTES
                 )
@@ -439,7 +469,10 @@ def create_app(
             raise HTTPException(status_code=503, detail="fresh filesystem evidence required")
         try:
             capacity = capacity_provider()
-            if permits.pending_bytes(capacity) > capacity.free_bytes:
+            if (
+                permits.pending_bytes(capacity, pool_id=candidate.pool_id)
+                > capacity.pool(candidate.pool_id).free_bytes
+            ):
                 raise ValueError("waiting_space")
         except (ValueError, OSError):
             raise HTTPException(status_code=503, detail="filesystem evidence unavailable") from None
@@ -505,6 +538,7 @@ def create_app(
         require_source_mutable(permit.infohash)
         if action == "start":
             require_admission()
+            require_pool_capacity(permit)
             if permits._db_path is not None and not permits.probe_reservation_active(permit):
                 raise HTTPException(status_code=409, detail="acquisition cancelled or tombstoned")
         current = source_info(permit)
@@ -563,7 +597,7 @@ def create_app(
             or permit.state not in {"authorized", "dispatching", "unknown", "confirmed"}
             or permit.reservation_id is None
             or permit.category not in {"sonarr", "radarr"}
-            or permit.destination != "/data/torrents"
+            or not permits.placement_valid(permit)
             or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
             or (
                 permit.state == "authorized"
@@ -635,12 +669,13 @@ def create_app(
             or not isinstance(permit.scope_key, str)
             or not re.fullmatch(r"S[0-9]{2,}E[0-9]{2,}", permit.scope_key)
             or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
-            or permit.destination != "/data/torrents"
+            or not permits.placement_valid(permit)
         ):
             raise HTTPException(status_code=403, detail="confirmed episode permit required")
         require_source_mutable(permit.infohash)
         if action == "start":
             require_admission()
+            require_pool_capacity(permit)
         entries = upstream.read("/api/v2/torrents/info", {"hashes": permit.infohash})
         if not isinstance(entries, list):
             raise HTTPException(status_code=502, detail="invalid torrent list")
@@ -692,6 +727,7 @@ def create_app(
         if permit is None or permit.state != "confirmed":
             raise HTTPException(status_code=403, detail="confirmed permit required")
         require_permit_mutable(permit)
+        require_pool_capacity(permit)
         metadata = torrent_store.get(permit)
         if metadata is None:
             raise HTTPException(status_code=409, detail="verified metadata unavailable")
@@ -700,14 +736,25 @@ def create_app(
             entries = upstream.read("/api/v2/torrents/info", {"hashes": permit.infohash})
             if not isinstance(entries, list):
                 raise HTTPException(status_code=502, detail="invalid torrent list")
-            return next(
-                (
-                    entry
-                    for entry in entries
-                    if isinstance(entry, dict) and entry.get("hash", "").lower() == permit.infohash
-                ),
-                None,
-            )
+            matches = [
+                entry
+                for entry in entries
+                if isinstance(entry, dict)
+                and isinstance(entry.get("hash"), str)
+                and entry["hash"].lower() == permit.infohash
+            ]
+            if not matches:
+                return None
+            if len(matches) != 1:
+                raise HTTPException(status_code=409, detail="ambiguous torrent identity")
+            current = matches[0]
+            if (
+                current.get("category") != permit.category
+                or not isinstance(current.get("save_path"), str)
+                or current["save_path"].rstrip("/") != permit.destination
+            ):
+                raise HTTPException(status_code=409, detail="torrent identity changed")
+            return current
 
         current = torrent_info()
         if (
@@ -718,6 +765,9 @@ def create_app(
             or current.get("progress") != 0
         ):
             raise HTTPException(status_code=409, detail="torrent is not metadata-stalled")
+        # Reads can race a disconnect or cancellation; validate again at mutation.
+        require_permit_mutable(permit)
+        require_pool_capacity(permit)
         try:
             upstream.add_torrent(
                 {
@@ -749,18 +799,7 @@ def create_app(
             raise HTTPException(status_code=502, detail="invalid torrent list")
         if any(not isinstance(entry, dict) for entry in result):
             raise HTTPException(status_code=502, detail="invalid torrent entry")
-        return [
-            {
-                "hash": entry.get("hash"),
-                "total_size": entry.get("total_size"),
-                "amount_left": entry.get("amount_left"),
-                "state": entry.get("state"),
-                "admitted": permits.is_admitted(entry["hash"])
-                if isinstance(entry.get("hash"), str)
-                else False,
-            }
-            for entry in result
-        ]
+        return [permits.queue_entry(entry) for entry in result]
 
     @app.post("/internal/prioritize-movies")
     async def prioritize_movies(
@@ -785,7 +824,7 @@ def create_app(
                     or permit.category != "radarr"
                     or permit.reservation_id is None
                     or permit.scope_key is not None
-                    or permit.destination != "/data/torrents"
+                    or not permits.placement_valid(permit)
                     or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
                 ):
                     continue
@@ -808,7 +847,7 @@ def create_app(
                     or permit.state != "confirmed"
                     or permit.category != "sonarr"
                     or permit.reservation_id is None
-                    or permit.destination != "/data/torrents"
+                    or not permits.placement_valid(permit)
                     or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
                 ):
                     continue
@@ -843,9 +882,14 @@ def create_app(
             progress = item.get("progress")
             left = item.get("amount_left")
             priority = item.get("priority")
+            permit = movie_permits.get(infohash) or next(
+                (permit for permit in first_episodes.values() if permit.infohash == infohash),
+                None,
+            )
             return (
                 item.get("category") == category
-                and item.get("save_path") == "/data/torrents"
+                and permit is not None
+                and item.get("save_path") == permit.destination
                 and item.get("state") in {"downloading", "stalledDL", "queuedDL"}
                 and item.get("force_start") is False
                 and isinstance(progress, (int, float))
@@ -1120,6 +1164,7 @@ def create_app(
                 except PermissionError as error:
                     raise HTTPException(status_code=403, detail=str(error)) from error
                 permit_token = matched.token
+                destination = matched.destination
                 metadata_sha256 = matched.metadata_sha256
                 verified = torrent_store.get(matched) if torrent_store is not None else None
                 if verified is None and torrent_store is not None and matched.state == "authorized":
@@ -1182,6 +1227,7 @@ def create_app(
                     if internal and permit_token != matched.token:
                         raise HTTPException(status_code=403, detail="admission permit mismatch")
                     permit_token = matched.token
+                    destination = matched.destination
                 payload = {
                     "infohash": infohash,
                     "savepath": destination,
@@ -1202,19 +1248,43 @@ def create_app(
         permit = permits.get(permit_token)
         if permit is not None:
             require_permit_mutable(permit)
+            if permits.storage_registry is not None:
+                destination = permit.destination
+                if not permits.placement_valid(permit):
+                    raise HTTPException(status_code=503, detail="storage placement unavailable")
         if total_bytes is not None:
             if permit is None or permit.budget_bytes is None or total_bytes > permit.budget_bytes:
                 raise HTTPException(status_code=403, detail="torrent exceeds reserved budget")
 
         def dispatch(_permit: Permit) -> dict[str, Any]:
             require_permit_mutable(_permit)
+            if permits.storage_registry is not None and not permits.placement_valid(_permit):
+                raise PermissionError("storage placement unavailable")
             if _permit.probe_parent_id is not None:
                 if capacity_provider is None:
                     raise PermissionError("fresh_filesystem_evidence_required")
                 capacity = capacity_provider()
-                if permits.pending_bytes(capacity) > capacity.free_bytes:
+                if (
+                    permits.pending_bytes(capacity, pool_id=_permit.pool_id)
+                    > capacity.pool(_permit.pool_id).free_bytes
+                ):
                     raise PermissionError("waiting_space")
-            return upstream.add_torrent({**payload, "infohash": infohash, "savepath": destination})
+            return upstream.add_torrent(
+                {
+                    **payload,
+                    "infohash": infohash,
+                    "savepath": _permit.destination,
+                    **(
+                        {
+                            "autoTMM": False,
+                            "useDownloadPath": False,
+                            "downloadPath": _permit.destination,
+                        }
+                        if permits.storage_registry is not None
+                        else {}
+                    ),
+                }
+            )
 
         try:
             result = permits.authorize(
@@ -1254,7 +1324,8 @@ def _configured_upstream() -> QbitClient:
 
 
 _database_path = os.environ.get("HOMESERVER_DB_PATH")
-_production_permits = PermitRegistry(_database_path)
+_storage_registry = load_storage_registry()
+_production_permits = PermitRegistry(_database_path, storage_registry=_storage_registry)
 _production_upstream = _configured_upstream()
 _production_source_health = SourceHealthStore(_database_path) if _database_path else None
 
@@ -1263,11 +1334,9 @@ def _configured_capacity():
     entries = _production_upstream.read("/api/v2/torrents/info")
     if not isinstance(entries, list):
         raise ValueError("invalid queue evidence")
-    payload = [
-        {**entry, "admitted": _production_permits.is_admitted(entry.get("hash", ""))}
-        for entry in entries
-        if isinstance(entry, dict)
-    ]
+    if any(not isinstance(entry, dict) for entry in entries):
+        raise ValueError("invalid queue evidence")
+    payload = [_production_permits.queue_entry(entry) for entry in entries]
     return capacity_from_queue(
         snapshot_path=Path(
             os.environ.get("HOMESERVER_CAPACITY_SNAPSHOT", "/run/homeserver/capacity.json")
@@ -1276,6 +1345,7 @@ def _configured_capacity():
         payload=payload,
         expected_filesystem_id=os.environ.get("HOMESERVER_MEDIA_UUID") or None,
         max_age_seconds=float(os.environ.get("HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS", "30")),
+        storage_registry=_production_permits.storage_registry,
     )
 
 

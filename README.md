@@ -38,6 +38,11 @@ as APIs e aplica as preferências; preserve as credenciais reais ao reutilizar
 dados de outra instalação. Consulte [configuração](docs/configuration.md) e
 [operação](docs/operator-guide.md) para alterações posteriores.
 
+A [expansão SSD + HD USB](docs/storage.md) usa um override opcional,
+`compose.storage.yaml`, após verificar os UUIDs, a união mergerfs e uma fixture
+de hardlink como UID 1000. O gateway escolhe um disco que comporte o torrent
+inteiro, com preferência pelo SSD; o painel mostra cada pool separadamente.
+
 ## Acessar
 
 Use `http://IP_DO_SERVIDOR:PORTA` na rede doméstica ou o IP Tailscale do servidor.

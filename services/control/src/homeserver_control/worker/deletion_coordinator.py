@@ -16,8 +16,10 @@ from typing import Any
 
 import httpx
 
+from homeserver_common.storage import StorageRegistry, StorageUnavailable
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.deletion_jobs import DeletionJobStore
+from homeserver_control.storage_paths import physical_path, physical_paths
 
 LOGGER = logging.getLogger(__name__)
 _SOURCE_UNLINK_GRACE_SECONDS = 30
@@ -68,6 +70,7 @@ class DeletionCoordinator:
         jellyfin_api_key: str,
         client: httpx.AsyncClient | None = None,
         mount_check: Callable[[Path], bool] | None = None,
+        storage_registry: StorageRegistry | None = None,
     ) -> None:
         if not all(
             (
@@ -86,6 +89,8 @@ class DeletionCoordinator:
         ):
             raise ValueError("deletion coordinator requires credentials and filesystem identity")
         self.jobs = jobs
+        self.storage_registry = storage_registry
+        self._active_job: dict | None = None
         self.media_root = Path(media_root)
         self.data_root = Path(data_root)
         self.snapshot_path = Path(snapshot_path)
@@ -107,6 +112,18 @@ class DeletionCoordinator:
         self._source_unlink_wait_since: dict[str, float] = {}
 
     def _guard_mount(self) -> None:
+        if self.storage_registry is not None:
+            if self._active_job is None:
+                raise DeletionBlocked('deletion has no captured physical identity')
+            payload = self._active_job['payload']
+            identities = ([payload.get('file_identity', {})]
+                          if self._active_job['item_type'] != 'Season' else
+                          payload.get('directory_identity', {}).get('physical_directories', []))
+            if not identities:
+                raise DeletionBlocked('deletion has no captured physical identity')
+            for identity in identities:
+                self._guard_identity(identity)
+            return
         try:
             snapshot = json.loads(self.snapshot_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:
@@ -120,6 +137,49 @@ class DeletionCoordinator:
             or not self.mount_check(self.data_root)
         ):
             raise DeletionRetryable("media mount evidence is stale or mismatched")
+
+    def _guard_identity(self, identity: dict) -> str:
+        pool_id, filesystem_id = identity.get('pool_id'), identity.get('filesystem_id')
+        if pool_id not in self.storage_registry.pools or not filesystem_id:
+            raise DeletionBlocked('captured physical identity requires migration proof')
+        if self.storage_registry.pools[pool_id].filesystem_id != filesystem_id:
+            raise DeletionBlocked('captured physical filesystem identity changed')
+        try:
+            self.storage_registry.inspect(pool_id, writable=True)
+        except StorageUnavailable as error:
+            raise DeletionRetryable('captured physical pool is unavailable') from error
+        return pool_id
+
+    def _captured_path(self, path: Path, identity: dict) -> Path:
+        if self.storage_registry is None:
+            return path
+        pool_id = self._guard_identity(identity)
+        logical = Path('/data') / path.relative_to(self.data_root)
+        try:
+            physical = self.storage_registry.resolve(pool_id, logical, writable=True)
+            if path.exists():
+                actual_pool, actual = physical_path(
+                    self.storage_registry, logical, union_path=path, writable=True,
+                )
+                if actual_pool != pool_id or actual != physical:
+                    raise DeletionBlocked('captured media moved to another physical pool')
+            elif physical.exists():
+                raise DeletionRetryable('physical file is hidden from the media view')
+            return physical
+        except StorageUnavailable as error:
+            raise DeletionRetryable('physical media path cannot be verified') from error
+
+    def _reservation_identity_valid(self, filesystem_id: str) -> bool:
+        if self.storage_registry is None:
+            return filesystem_id == self.filesystem_id
+        # A season reservation predates (and does not choose) each episode pool.
+        # Accept its legacy SSD device only after verifying the registered SSD.
+        try:
+            sample = self.storage_registry.inspect('ssd')
+            device = self.storage_registry.pools['ssd'].root.stat().st_dev
+        except (StorageUnavailable, OSError) as error:
+            raise DeletionRetryable('reservation physical SSD identity unavailable') from error
+        return filesystem_id in {sample.filesystem_id, f'device:{device}'}
 
     @staticmethod
     def _payload(job: dict[str, Any]) -> dict[str, Any]:
@@ -182,8 +242,9 @@ class DeletionCoordinator:
                 raise DeletionBlocked("captured media path contains a symlink")
             if component == self.data_root:
                 break
+        physical = self._captured_path(path, payload['file_identity'])
         try:
-            current = path.stat()
+            current = physical.stat()
         except FileNotFoundError:
             if must_exist:
                 raise DeletionBlocked("captured file disappeared before source cleanup") from None
@@ -219,7 +280,7 @@ class DeletionCoordinator:
                 raise DeletionBlocked("more than one reservation matches captured item")
             if not rows:
                 return None, None, None
-            if rows[0]["filesystem_id"] != self.filesystem_id:
+            if not self._reservation_identity_valid(rows[0]['filesystem_id']):
                 raise DeletionBlocked("reservation belongs to another media filesystem")
             permit_table = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE name='gateway_permits' AND type='table'"
@@ -257,6 +318,17 @@ class DeletionCoordinator:
             raise DeletionBlocked("multiple active torrent permits match captured item")
         if permits and permits[0]["state"] != "confirmed":
             raise DeletionBlocked("torrent permit is not confirmed")
+        if permits and self.storage_registry is not None:
+            registry = PermitRegistry(self.jobs.path, storage_registry=self.storage_registry)
+            permit = registry.get(permits[0]['token'])
+            if permit is None or not registry.placement_valid(permit):
+                raise DeletionRetryable('source physical pool is unavailable')
+            identity = payload['file_identity']
+            if permit.pool_id != identity.get('pool_id') or (
+                permit.filesystem_id is not None
+                and permit.filesystem_id != identity.get('filesystem_id')
+            ):
+                raise DeletionBlocked('torrent and library physical identities differ')
         return reservation_key, rows[0]["source_id"], permits[0]["token"] if permits else None
 
     @staticmethod
@@ -488,10 +560,46 @@ class DeletionCoordinator:
         _path, remaining = self._file(job, must_exist=False)
         if remaining is not None:
             raise DeletionBlocked("Arr did not remove the captured media file")
-        self._cleanup_sidecars(path)
+        self._cleanup_sidecars(path, job=job)
 
-    def _cleanup_sidecars(self, video: Path) -> None:
+    def _cleanup_sidecars(self, video: Path, *, job: dict | None = None) -> None:
         """Remove only files sharing the selected video's complete stem."""
+        if self.storage_registry is not None:
+            if job is None:
+                raise DeletionBlocked('sidecar capture missing')
+            for entry in job['payload'].get('sidecar_files', []):
+                sidecar = Path(entry['file_path'])
+                if sidecar.parent != video.parent or not sidecar.name.startswith(video.stem) or (
+                    not _SIDECAR.fullmatch(sidecar.name[len(video.stem):])
+                ):
+                    raise DeletionBlocked('sidecar escaped captured file scope')
+                for source in entry.get('source_files', []):
+                    source_path = Path(source['file_path'])
+                    if not source_path.is_relative_to(self.data_root / 'torrents') or (
+                        source_path.suffix.lower() not in {'.srt', '.ass', '.ssa', '.vtt'}
+                    ) or any(source['file_identity'].get(key) != entry['file_identity'].get(key)
+                             for key in ('pool_id', 'filesystem_id', 'device', 'inode')):
+                        raise DeletionBlocked('captured source sidecar escaped media identity')
+                    physical_source = self._captured_path(source_path, source['file_identity'])
+                    if physical_source.exists():
+                        status = physical_source.stat()
+                        actual = (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
+                        if actual != tuple(
+                            source['file_identity'][key]
+                            for key in ('device', 'inode', 'size', 'mtime_ns')
+                        ):
+                            raise DeletionBlocked('captured source subtitle changed')
+                        source_path.unlink()
+                physical = self._captured_path(sidecar, entry['file_identity'])
+                if not physical.exists():
+                    continue
+                status = physical.stat()
+                if (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns) != tuple(
+                    entry['file_identity'][key] for key in ('device', 'inode', 'size', 'mtime_ns')
+                ):
+                    raise DeletionBlocked('captured sidecar changed')
+                sidecar.unlink()
+            return
         parent = video.parent
         if not parent.exists():
             return
@@ -833,6 +941,36 @@ class DeletionCoordinator:
                 raise DeletionBlocked("season folder contains a symlink")
             if part == self.data_root:
                 break
+        if self.storage_registry is not None:
+            identities = payload.get('directory_identity', {}).get('physical_directories')
+            if not isinstance(identities, list) or not identities:
+                raise DeletionBlocked('season physical identity requires migration proof')
+            expected = set()
+            logical = Path('/data/media') / path.relative_to(self.media_root)
+            for identity in identities:
+                pool_id = self._guard_identity(identity)
+                if pool_id in expected:
+                    raise DeletionBlocked('duplicate season physical directory')
+                expected.add(pool_id)
+                physical = self.storage_registry.resolve(pool_id, logical, writable=True)
+                if not physical.exists():
+                    if must_exist:
+                        raise DeletionBlocked('physical season directory disappeared')
+                    continue
+                status = physical.stat()
+                if not stat.S_ISDIR(status.st_mode) or (status.st_dev, status.st_ino) != (
+                    identity['device'], identity['inode'],
+                ):
+                    raise DeletionBlocked('physical season directory changed')
+            if path.exists():
+                try:
+                    found = physical_paths(self.storage_registry, logical, union_path=path,
+                                           writable=True)
+                except StorageUnavailable as error:
+                    raise DeletionRetryable('physical season paths unavailable') from error
+                if any(name not in expected for name, _ in found):
+                    raise DeletionBlocked('season directory appeared on another physical pool')
+            return path
         if not path.exists():
             if must_exist:
                 raise DeletionBlocked("season folder disappeared before cleanup")
@@ -901,7 +1039,7 @@ class DeletionCoordinator:
                 "SELECT request_id, filesystem_id FROM reservations WHERE media_key=?",
                 (payload["media_key"],),
             ).fetchall()
-            if any(row[1] != self.filesystem_id for row in rows) or len(rows) > 1:
+            if any(not self._reservation_identity_valid(row[1]) for row in rows) or len(rows) > 1:
                 raise DeletionBlocked("season reservation identity is ambiguous")
             # Keep remaining torrent bytes in the capacity ledger until purge is confirmed.
             # The tombstone and cancelled request close acquisition/import gates immediately.
@@ -950,10 +1088,19 @@ class DeletionCoordinator:
                 scope = row["scope_key"]
                 match = re.fullmatch(r"S([0-9]{2,})(?:E[0-9]{2,}|PACK)", scope or "")
                 if match is None or int(match[1]) != payload["season"] or (
-                    row["category"] != "sonarr" or row["destination"] != "/data/torrents"
-                    or row["reservation_filesystem_id"] != self.filesystem_id
+                    row["category"] != "sonarr" or (
+                        self.storage_registry is None and (
+                            row["destination"] != "/data/torrents"
+                        )
+                    )
+                    or not self._reservation_identity_valid(row['reservation_filesystem_id'])
                 ):
                     raise DeletionBlocked("torrent source escaped selected season")
+                if self.storage_registry is not None:
+                    permits = PermitRegistry(self.jobs.path, storage_registry=self.storage_registry)
+                    permit = permits.get(row['token'])
+                    if permit is None or not permits.placement_valid(permit):
+                        raise DeletionRetryable('season source physical pool is unavailable')
                 if row["state"] in ("unknown", "dispatching"):
                     raise DeletionBlocked("season torrent admission is uncertain")
                 if scope.endswith("PACK"):
@@ -991,7 +1138,9 @@ class DeletionCoordinator:
         for row, scope, bindings in sources:
             self._guard_mount()
             if row["state"] == "authorized":
-                if not PermitRegistry(self.jobs.path).cancel_authorized(row["token"]):
+                if not PermitRegistry(
+                    self.jobs.path, storage_registry=self.storage_registry,
+                ).cancel_authorized(row["token"]):
                     raise DeletionRetryable("season admission changed during cancellation")
                 continue
             for binding in bindings:
@@ -1055,11 +1204,12 @@ class DeletionCoordinator:
                 r"\.(?:jpg|jpeg|png|webp))", file.name, re.IGNORECASE,
             ) or file.is_symlink():
                 raise DeletionBlocked("season metadata escaped selected folder")
-            if not file.exists():
+            physical = self._captured_path(file, entry['file_identity'])
+            if not physical.exists():
                 if must_exist:
                     raise DeletionBlocked("season metadata disappeared after capture")
                 continue
-            status = file.stat()
+            status = physical.stat()
             actual = (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
             if actual != tuple(entry["file_identity"][k]
                                for k in ("device", "inode", "size", "mtime_ns")):
@@ -1130,6 +1280,7 @@ class DeletionCoordinator:
                 raise DeletionBlocked("unknown season deletion stage")
 
     async def _process(self, job: dict[str, Any]) -> None:
+        self._active_job = job
         if job["item_type"] == "Season":
             await self._process_season(job)
             return

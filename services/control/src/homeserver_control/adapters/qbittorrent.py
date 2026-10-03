@@ -84,6 +84,9 @@ class QBittorrentAdapter:
                 "savepath": destination,
                 "category": category,
                 "stopped": "false",
+                "autoTMM": "false",
+                "useDownloadPath": "false",
+                "downloadPath": destination,
             },
             files=files,
         )
@@ -102,7 +105,8 @@ class QBittorrentAdapter:
             if remaining <= 0:
                 break
             matches = [
-                item for item in self.find_by_infohash(infohash, timeout=remaining)
+                item
+                for item in self.find_by_infohash(infohash, timeout=remaining)
                 if isinstance(item.get("hash"), str)
                 and item["hash"].lower() == infohash.lower()
                 and item.get("category") == category
@@ -160,7 +164,8 @@ class QBittorrentAdapter:
         self._ensure_login()
         action = "start" if running else "stop"
         response = self._request(
-            "POST", f"/api/v2/torrents/{action}",
+            "POST",
+            f"/api/v2/torrents/{action}",
             data={"hashes": infohash.lower()},
         )
         if response.text.strip().lower() not in {"", "ok", "ok."}:
@@ -171,7 +176,9 @@ class QBittorrentAdapter:
             raise ValueError("invalid infohash")
         self._ensure_login()
         response = self._request(
-            "POST", "/api/v2/torrents/topPrio", data={"hashes": infohash.lower()},
+            "POST",
+            "/api/v2/torrents/topPrio",
+            data={"hashes": infohash.lower()},
         )
         if response.text.strip().lower() not in {"", "ok", "ok."}:
             raise ContractError("qBittorrent queue response is incompatible")
@@ -184,7 +191,8 @@ class QBittorrentAdapter:
             raise ValueError("delete_files must be true")
         self._ensure_login()
         response = self._request(
-            "POST", "/api/v2/torrents/delete",
+            "POST",
+            "/api/v2/torrents/delete",
             data={"hashes": infohash.lower(), "deleteFiles": "true"},
         )
         if response.text.strip().lower() not in {"", "ok", "ok."}:

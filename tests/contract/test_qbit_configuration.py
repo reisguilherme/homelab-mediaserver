@@ -11,6 +11,12 @@ from homeserver_control.configuration.qbittorrent import (
 )
 
 
+def test_qbit_disables_moves_to_global_incomplete_path():
+    preferences = effective_qbit_preferences({})
+    assert preferences.get("temp_path_enabled") is False
+    assert preferences.get("auto_tmm_enabled") is False
+
+
 @pytest.mark.asyncio
 async def test_qbit_authenticated_idempotent_apply_preserves_manual_preferences():
     state = {"manual": "preserved", "upnp": True, "web_ui_upnp": True}

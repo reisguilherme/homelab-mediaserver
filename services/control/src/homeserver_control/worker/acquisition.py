@@ -59,10 +59,7 @@ def _queue_only_rejection(release: dict[str, object]) -> bool:
         release.get("rejected") is True
         and isinstance(reasons, list)
         and bool(reasons)
-        and all(
-            isinstance(item, str) and item.casefold().startswith(prefixes)
-            for item in reasons
-        )
+        and all(isinstance(item, str) and item.casefold().startswith(prefixes) for item in reasons)
     )
 
 
@@ -206,9 +203,7 @@ class MovieAcquirer(LiveSourceProbes):
             async with aclosing(eligible(fallback_releases)) as fallback:
                 second = await anext(fallback, None)
                 while first is not None or second is not None:
-                    if second is None or (
-                        first is not None and rank(first[0]) >= rank(second[0])
-                    ):
+                    if second is None or (first is not None and rank(first[0]) >= rank(second[0])):
                         yield first
                         first = await anext(primary, None)
                     else:
@@ -246,8 +241,10 @@ class MovieAcquirer(LiveSourceProbes):
             LOGGER.warning("Cannot restart source %s without fresh capacity", permit.infohash)
             return "capacity_unavailable"
         if (
-            self.permits.pending_bytes(capacity, include_infohash=permit.infohash)
-            > capacity.free_bytes
+            self.permits.pending_bytes(
+                capacity, include_infohash=permit.infohash, pool_id=permit.pool_id
+            )
+            > capacity.pool(permit.pool_id).free_bytes
         ):
             LOGGER.warning(
                 "Keeping source %s stopped because space is insufficient", permit.infohash
@@ -758,12 +755,14 @@ class MovieAcquirer(LiveSourceProbes):
         async def eligible_for_indexer(group):
             nonlocal waiting_space
             async for candidate in self._eligible_movie_releases(
-                group, replacement_reason=replacement_reason,
-                excluded_infohashes=excluded, runtime_minutes=movie.get("runtime"),
+                group,
+                replacement_reason=replacement_reason,
+                excluded_infohashes=excluded,
+                runtime_minutes=movie.get("runtime"),
             ):
                 if existing is None and self.capacity_provider is not None:
                     capacity = await self.capacity_provider()
-                    available = max(0, capacity.free_bytes - self.permits.pending_bytes(capacity))
+                    available = self.permits.available_bytes(capacity)
                     if candidate[1][3] > available:
                         waiting_space = True
                         continue
@@ -806,7 +805,7 @@ class MovieAcquirer(LiveSourceProbes):
                     existing.infohash != infohash
                     or existing.metadata_sha256 != metadata_sha256
                     or existing.category != "radarr"
-                    or existing.destination != "/data/torrents"
+                    or not self.permits.placement_valid(existing)
                     or existing.budget_bytes is None
                     or existing.budget_bytes < exact_bytes
                     or existing.selected_files != selected_files

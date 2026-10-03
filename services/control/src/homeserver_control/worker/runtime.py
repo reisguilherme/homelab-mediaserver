@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -84,6 +84,7 @@ class WorkerCycle:
         source_reconciler: UncertainSourceReconciliation | None = None,
         movie_prioritizer: MoviePriority | None = None,
         deletion_coordinator: CoordinatedDeletion | None = None,
+        capacity_refresh: Callable[[], Awaitable[object]] | None = None,
         page_size: int = 20,
     ) -> None:
         if not 1 <= page_size <= 100:
@@ -98,6 +99,7 @@ class WorkerCycle:
         self.source_reconciler = source_reconciler
         self.movie_prioritizer = movie_prioritizer
         self.deletion_coordinator = deletion_coordinator
+        self.capacity_refresh = capacity_refresh
         self.page_size = page_size
 
     @classmethod
@@ -122,6 +124,11 @@ class WorkerCycle:
         )
 
     async def run_once(self) -> CycleReport:
+        if self.capacity_refresh is not None:
+            try:
+                await self.capacity_refresh()
+            except Exception as error:
+                _log_failure('storage queue snapshot unavailable', error)
         if self.deletion_coordinator is not None:
             try:
                 await self.deletion_coordinator.run_once()

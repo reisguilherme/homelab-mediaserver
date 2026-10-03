@@ -32,6 +32,16 @@
     h2 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -.02em; }
     .meta { color: #748b99; letter-spacing: .08em; }
     .storage { display: grid; grid-template-columns: 235px 1fr; gap: 32px; align-items: center; padding: 28px; }
+    [hidden] { display: none !important; }
+    .pool-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .pool-card h3 { margin: 0; font-size: 21px; }
+    .pool-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 24px; }
+    .pool-state { color: #93a8b3; font-size: 12px; }
+    .pool-state[data-state="unavailable"], .pool-state[data-state="stale"] { color: #e3ae5d; }
+    .pool-figures { display: grid; grid-template-columns: 1fr 1fr; gap: 20px 12px; margin: 0; }
+    .pool-figures dt { color: #93a8b3; font-size: 12px; }
+    .pool-figures dd { margin: 5px 0 0; font-size: 23px; font-variant-numeric: tabular-nums; }
+    @media (max-width: 620px) { .pool-grid { grid-template-columns: 1fr; } }
     .ring { --occupied: 0%; width: 190px; height: 190px; margin: auto; border-radius: 50%; display: grid; place-items: center; background: conic-gradient(#68d5bb var(--occupied), #2a3845 0); box-shadow: inset 0 0 1px #a8fbef44, 0 0 45px #62d5bb11; }
     .ring-inner { width: 148px; height: 148px; display: flex; flex-direction: column; justify-content: center; align-items: center; border-radius: 50%; background: #111c26; }
     .ring-inner strong { font-size: 30px; letter-spacing: -.05em; font-variant-numeric: tabular-nums; }
@@ -91,7 +101,38 @@
 
     <section aria-labelledby="storage-title">
       <div class="section-heading"><h2 id="storage-title">Armazenamento</h2><span class="meta" id="storage-state">Aguardando medição</span></div>
-      <div class="card storage">
+      <div id="pool-storage" class="pool-grid" hidden>
+        <article class="card pool-card" aria-labelledby="pool-ssd-title">
+          <div class="pool-heading"><h3 id="pool-ssd-title">SSD</h3><span class="pool-state" id="pool-ssd-state">Aguardando medição</span></div>
+          <dl class="pool-figures">
+            <div><dt>Usado físico</dt><dd id="pool-ssd-used">—</dd></div><div><dt>Livre utilizável</dt><dd id="pool-ssd-free">—</dd></div>
+            <div><dt>Restante da fila</dt><dd id="pool-ssd-queue">—</dd></div><div><dt>Disponível para novos downloads</dt><dd id="pool-ssd-admissible">—</dd></div>
+          </dl>
+          <p class="note">Total <span id="pool-ssd-total">—</span> · Amostra <span id="pool-ssd-age">—</span></p>
+          <div class="legend" aria-label="Uso por categoria do SSD">
+            <div class="legend-item"><span class="legend-label">Filmes</span><strong id="pool-ssd-movies">—</strong></div>
+            <div class="legend-item"><span class="legend-label">Séries</span><strong id="pool-ssd-series">—</strong></div>
+            <div class="legend-item"><span class="legend-label">Torrents</span><strong id="pool-ssd-torrents">—</strong></div>
+            <div class="legend-item"><span class="legend-label">Outros</span><strong id="pool-ssd-other">—</strong></div>
+          </div>
+        </article>
+        <article class="card pool-card" aria-labelledby="pool-hdd-title">
+          <div class="pool-heading"><h3 id="pool-hdd-title">HD USB</h3><span class="pool-state" id="pool-hdd-state">Aguardando medição</span></div>
+          <dl class="pool-figures">
+            <div><dt>Usado físico</dt><dd id="pool-hdd-used">—</dd></div><div><dt>Livre utilizável</dt><dd id="pool-hdd-free">—</dd></div>
+            <div><dt>Restante da fila</dt><dd id="pool-hdd-queue">—</dd></div><div><dt>Disponível para novos downloads</dt><dd id="pool-hdd-admissible">—</dd></div>
+          </dl>
+          <p class="note">Total <span id="pool-hdd-total">—</span> · Amostra <span id="pool-hdd-age">—</span></p>
+          <div class="legend" aria-label="Uso por categoria do HD USB">
+            <div class="legend-item"><span class="legend-label">Filmes</span><strong id="pool-hdd-movies">—</strong></div>
+            <div class="legend-item"><span class="legend-label">Séries</span><strong id="pool-hdd-series">—</strong></div>
+            <div class="legend-item"><span class="legend-label">Torrents</span><strong id="pool-hdd-torrents">—</strong></div>
+            <div class="legend-item"><span class="legend-label">Outros</span><strong id="pool-hdd-other">—</strong></div>
+          </div>
+        </article>
+        <p class="note">Hardlinks são contados uma vez por disco. Fila e disponibilidade exigem evidência atual; “—” indica dados indisponíveis.</p>
+      </div>
+      <div class="card storage" id="legacy-storage">
         <div class="ring" id="ring" role="img" aria-label="Uso do armazenamento indisponível"><div class="ring-inner"><strong id="used-percent">—</strong><span>ocupado</span></div></div>
         <div class="storage-details">
           <div class="capacity-line"><strong id="free">—</strong><span>livres de <span id="total">—</span><br><span id="used">—</span> usados</span></div>
@@ -137,9 +178,28 @@
     const setMeter = (id, value) => { const meter = $(id); meter.firstElementChild.style.width = isNumber(value) ? `${clamp(value)}%` : '0%'; if (isNumber(value)) meter.setAttribute('aria-valuenow', String(value)); else meter.removeAttribute('aria-valuenow'); };
     const setLive = (state) => { $('live').dataset.state = state; $('live-text').textContent = { ok: 'Online', stale: 'Dados antigos', calculating: 'Atualizando', unavailable: 'Sem dados' }[state] || 'Sem dados'; };
     const uptime = (seconds) => { if (!isNumber(seconds)) return '—'; const days = Math.floor(seconds / 86400); const hours = Math.floor((seconds % 86400) / 3600); return days ? `${days} d ${hours} h` : `${hours} h`; };
+    const sampleDate = (value) => typeof value === 'number' ? new Date(value * 1000) : new Date(value);
+    function renderPools(pools) {
+      for (const id of ['ssd', 'hdd']) {
+        const pool = pools.find(item => item.pool_id === id) || {};
+        const ready = pool.state === 'ready';
+        const prefix = `pool-${id}-`;
+        $(prefix + 'state').textContent = { ready: 'Disponível', stale: 'Medição antiga', unavailable: 'Indisponível' }[pool.state] || 'Indisponível';
+        $(prefix + 'state').dataset.state = pool.state || 'unavailable';
+        for (const [field, key] of [['total', 'total_bytes'], ['used', 'used_bytes'], ['free', 'free_bytes'], ['queue', 'queue_remaining_bytes'], ['admissible', 'admissible_bytes']]) {
+          $(prefix + field).textContent = bytes(ready ? pool[key] : null);
+        }
+        const measured = pool.measured_at == null ? NaN : sampleDate(pool.measured_at).getTime();
+        const age = Math.floor((Date.now() - measured) / 1000);
+        $(prefix + 'age').textContent = Number.isFinite(age) && age >= -5 ? `${Math.max(0, age)} s atrás` : '—';
+        for (const key of ['movies', 'series', 'torrents', 'other']) {
+          $(prefix + key).textContent = bytes(ready ? pool.storage?.[`${key}_bytes`] : null);
+        }
+      }
+    }
     function render(data) {
       const host = data.host || {}, net = data.network || {}, cap = data.capacity || {}, storage = data.storage || {};
-      setLive(host.state === 'ok' && cap.state === 'ok' ? 'ok' : host.state === 'stale' || cap.state === 'stale' ? 'stale' : 'unavailable');
+      setLive(host.state || 'unavailable');
       $('cpu').textContent = percent(host.cpu_percent);
       $('ram').textContent = percent(host.ram_percent);
       setMeter('cpu-meter', host.cpu_percent);
@@ -151,6 +211,14 @@
       $('uptime').textContent = uptime(host.uptime_seconds);
       $('temperature').textContent = isNumber(host.cpu_celsius) ? `${number.format(host.cpu_celsius)} °C` : '—';
       $('updated').textContent = host.measured_at ? new Date(host.measured_at).toLocaleTimeString('pt-BR') : '—';
+      const hasPools = Array.isArray(data.pools) && data.pools.length > 0;
+      $('legacy-storage').hidden = hasPools;
+      $('pool-storage').hidden = !hasPools;
+      if (hasPools) {
+        renderPools(data.pools);
+        $('storage-state').textContent = 'Capacidade por disco';
+        return;
+      }
       $('free').textContent = bytes(cap.free_bytes);
       $('total').textContent = bytes(cap.total_bytes);
       $('used').textContent = bytes(cap.used_bytes);

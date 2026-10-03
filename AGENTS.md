@@ -23,7 +23,11 @@ Windows não substitui testes de filesystem, GPU, rede e reprodução no servido
 
 ## Limites operacionais
 
-Não formatar/particionar discos, ativar mergerfs/RTX, substituir `fstab`,
+Não formatar/particionar discos nem alterar montagens sem autorização explícita
+para os dispositivos e o escopo da operação. A expansão mergerfs opt-in está
+documentada em `docs/storage.md`; o instalador só verifica mounts, prepara pastas
+do projeto e testa fixtures, sem formatar, montar ou editar `fstab`.
+Não ativar RTX, substituir `fstab`,
 reescrever o serviço Lenovo, abrir portas no roteador, publicar a API nativa
 qBit, liberar downloads sem gateway/capacidade real ou apagar mídia automaticamente.
 

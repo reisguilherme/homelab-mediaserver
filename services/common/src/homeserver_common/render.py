@@ -45,6 +45,41 @@ def bind(source: Path | str, target: str, *, read_only: bool = False) -> dict:
     }
 
 
+def render_storage_override() -> dict:
+    """Opt-in, fixed technical paths; never derive disk identities from .env."""
+    services = {}
+    for name in ('sonarr', 'radarr', 'qbittorrent', 'control-worker', 'control-api',
+                 'download-gateway', 'telemetry', 'host-metrics', 'operator'):
+        readonly = name in ('control-api', 'download-gateway', 'telemetry', 'host-metrics')
+        services[name] = {'volumes': [bind('/srv/media-view', '/data', read_only=readonly)]}
+    for name, readonly in (('jellyfin', True), ('bazarr', False)):
+        services[name] = {'volumes': [
+            bind('/srv/media-view/media', '/data/media', read_only=readonly)]}
+    services['init'] = {'volumes': [bind('/srv/media-view', '/srv/data', read_only=True)]}
+    for name in ('control-worker', 'control-api', 'download-gateway', 'telemetry',
+                 'host-metrics', 'init', 'operator'):
+        readonly = name != 'control-worker'
+        services[name]['volumes'] += [
+            bind('/srv/data', '/storage/ssd', read_only=readonly),
+            bind('/srv/external', '/storage/hdd', read_only=readonly),
+            bind('/proc/1/mountinfo', '/run/host-mountinfo', read_only=True),
+            bind('/dev/disk/by-uuid', '/run/host-uuids', read_only=True),
+            bind('/srv/appdata/control/storage.json', '/run/homeserver/storage.json',
+                 read_only=True),
+        ]
+    services['control-worker'].update(
+        user='0:0', cap_drop=['ALL'], cap_add=['CHOWN', 'DAC_OVERRIDE', 'SETUID', 'SETGID'],
+        entrypoint=['python', '-m', 'homeserver_common.storage_startup',
+                    'python', '-m', 'homeserver_common.runtime'])
+    for name in ('sonarr', 'radarr', 'qbittorrent', 'jellyfin', 'bazarr'):
+        target = '/data/media' if name in ('jellyfin', 'bazarr') else '/data'
+        original = '/jellyfin/jellyfin' if name == 'jellyfin' else '/init'
+        services[name]['volumes'].append(
+            bind('./scripts/storage-entrypoint.sh', '/run/storage-entrypoint.sh', read_only=True))
+        services[name]['entrypoint'] = ['/bin/sh', '/run/storage-entrypoint.sh', target, original]
+    return {'services': services}
+
+
 def render_stack(
     settings: Settings, *, images: dict[str, str] | None = None, env_file: Path | None = None
 ) -> dict[str, object]:

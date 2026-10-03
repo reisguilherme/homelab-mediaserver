@@ -46,3 +46,4 @@ build/
 !tests/fixtures/**/*.torrent
 !tests/fixtures/**/*.zip
 !tests/fixtures/**/*.tar
+/compose.override.yaml

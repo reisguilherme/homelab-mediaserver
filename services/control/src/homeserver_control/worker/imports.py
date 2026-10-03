@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -17,7 +18,10 @@ class ImportResult:
     bytes_imported: int
 
 
-def probe_hardlink_as(source: Path, destination_dir: Path, *, uid: int, gid: int) -> bool:
+def probe_hardlink_as(
+    source: Path, destination_dir: Path, *, uid: int, gid: int,
+    verify: Callable[[Path], bool] | None = None,
+) -> bool:
     """Test a real hardlink with the Arr process identity, leaving no library file."""
     if not hasattr(os, "fork") or uid < 0 or gid < 0:
         return False
@@ -48,7 +52,9 @@ def probe_hardlink_as(source: Path, destination_dir: Path, *, uid: int, gid: int
                 and linked_stat.st_ino == source_stat.st_ino
                 and linked_stat.st_size == source_stat.st_size
             )
-        except OSError:
+            if success and verify is not None:
+                success = verify(target)
+        except (OSError, RuntimeError, ValueError):
             pass
         finally:
             if linked:

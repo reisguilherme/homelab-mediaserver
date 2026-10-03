@@ -51,6 +51,9 @@ def qbit_preferences(settings) -> dict[str, object]:
         # Router mappings are prohibited, including WebUI mappings.
         "upnp": False,
         "web_ui_upnp": False,
+        # A permit owns its physical destination for partial and complete files.
+        "temp_path_enabled": False,
+        "auto_tmm_enabled": False,
         "queueing_enabled": env.get("HOMESERVER_QBIT_QUEUEING_ENABLED", "true") == "true",
         "max_active_downloads": integer("DOWNLOAD_MAX_ACTIVE", 10),
         "max_active_uploads": active_seeds,

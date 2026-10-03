@@ -59,6 +59,12 @@ subdiretórios necessários; em dados preexistentes, confirme permissões antes
 de iniciar. Downloads e biblioteca precisam compartilhar filesystem para que
 hardlinks não criem uma segunda cópia física.
 
+Para usar SSD e HD USB em ext4, siga [o guia de armazenamento](storage.md)
+antes de iniciar a stack. Esse modo usa `/srv/media-view` e
+`docker compose -f compose.yaml -f compose.storage.yaml`; o cadastro privado só
+é publicado após verificar as montagens e testar as capacidades em ambos os
+discos. Criar pastas ou somar espaço livre não comprova que um destino seja seguro.
+
 ## Criar o .env
 
 ```bash

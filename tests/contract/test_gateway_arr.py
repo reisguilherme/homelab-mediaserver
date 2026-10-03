@@ -613,7 +613,8 @@ def test_internal_repair_resends_metadata_only_for_stalled_admitted_torrent(tmp_
         def read(self, path, params=None):
             if path == "/api/v2/torrents/info":
                 return [{"hash": inspected.infohash, "total_size": self.total_size,
-                         "downloaded": 0, "progress": 0}]
+                         "downloaded": 0, "progress": 0, "category": permit.category,
+                         "save_path": permit.destination}]
             return super().read(path, params)
 
         def add_torrent(self, payload):
@@ -661,7 +662,8 @@ def test_internal_repair_accepts_metadata_applied_despite_duplicate_response(tmp
         def read(self, path, params=None):
             if path == "/api/v2/torrents/info":
                 return [{"hash": inspected.infohash, "total_size": self.total_size,
-                         "downloaded": 0, "progress": 0}]
+                         "downloaded": 0, "progress": 0, "category": permit.category,
+                         "save_path": permit.destination}]
             return super().read(path, params)
 
         def add_torrent(self, payload):

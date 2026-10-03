@@ -44,6 +44,14 @@ def _state(timestamp: float | None, *, now: float, fresh_seconds: float) -> str:
     return "ok" if now - timestamp <= fresh_seconds else "stale"
 
 
+def _empty_storage() -> dict[str, Any]:
+    return {
+        "state": "unavailable",
+        "measured_at": None,
+        **dict.fromkeys(("movies_bytes", "series_bytes", "torrents_bytes", "other_bytes")),
+    }
+
+
 def _allocated_bytes(root: Path, *, device: int, seen: set[tuple[int, int]]) -> int:
     if not root.exists():
         return 0
@@ -171,6 +179,8 @@ class StatusProvider:
         host_max_age_seconds: float = 45,
         capacity_max_age_seconds: float = 30,
         expected_filesystem_id: str | None = None,
+        storage_registry_path: Path | None = None,
+        queue_path: Path | None = None,
     ) -> None:
         self.host_path = host_path
         self.capacity_path = capacity_path
@@ -178,6 +188,146 @@ class StatusProvider:
         self.host_max_age_seconds = host_max_age_seconds
         self.capacity_max_age_seconds = capacity_max_age_seconds
         self.expected_filesystem_id = expected_filesystem_id
+        self.storage_registry_path = storage_registry_path or Path(
+            os.environ.get("HOMESERVER_STORAGE_REGISTRY", "/run/homeserver/storage.json")
+        )
+        self.queue_path = queue_path or capacity_path.with_name("storage-queue.json")
+
+    def _pools(self, host: dict, capacity: dict, *, now: float, host_state: str) -> list[dict]:
+        expected = {}
+        registry_error = False
+        if self.storage_registry_path.exists():
+            from homeserver_common.storage import StorageRegistryError, load_storage_registry
+
+            try:
+                registry = load_storage_registry(self.storage_registry_path)
+                if registry is not None:
+                    expected = {key: pool.filesystem_id for key, pool in registry.pools.items()}
+            except (StorageRegistryError, OSError):
+                registry_error = True
+        if self.expected_filesystem_id is not None:
+            expected["ssd"] = self.expected_filesystem_id
+
+        def indexed(snapshot):
+            entries = snapshot.get("pools", [])
+            if not isinstance(entries, list):
+                return {}
+            result = {}
+            for entry in entries:
+                if isinstance(entry, dict) and entry.get("pool_id") in ("ssd", "hdd"):
+                    key = entry["pool_id"]
+                    # A duplicate physical sample is ambiguous, never last-writer-wins.
+                    result[key] = None if key in result else entry
+            return result
+
+        capacity_pools, host_pools = indexed(capacity), indexed(host)
+        queue = _read_json(self.queue_path) or {}
+        queue_pools = indexed(queue)
+        queue_fresh = (
+            _state(
+                _timestamp(queue.get("measured_at")),
+                now=now,
+                fresh_seconds=self.capacity_max_age_seconds,
+            )
+            == "ok"
+        )
+        result = []
+        for pool_id, label in (("ssd", "SSD"), ("hdd", "HD USB")):
+            sample = capacity_pools.get(pool_id) or {}
+            measured_at = _timestamp(sample.get("measured_at"))
+            freshness = _state(measured_at, now=now, fresh_seconds=self.capacity_max_age_seconds)
+            state = "ready" if freshness == "ok" else freshness
+            reason = sample.get("reason")
+            total, free, used = (
+                _number(sample.get(key)) for key in ("total_bytes", "free_bytes", "used_bytes")
+            )
+            identity = sample.get("filesystem_id")
+            if (
+                registry_error
+                or sample.get("state") != "ready"
+                or not isinstance(identity, str)
+                or not identity
+                or (pool_id in expected and identity != expected[pool_id])
+                or type(total) is not int
+                or total <= 0
+                or type(free) is not int
+                or free > total
+                or type(used) is not int
+                or used > total
+                or used + free > total
+            ):
+                state = "unavailable"
+                reason = reason or "invalid_storage_evidence"
+            storage = _empty_storage()
+            host_pool = host_pools.get(pool_id) or {}
+            host_fresh = (
+                _state(
+                    _timestamp(host_pool.get("measured_at")),
+                    now=now,
+                    fresh_seconds=self.host_max_age_seconds,
+                )
+                == "ok"
+            )
+            if (
+                state == "ready"
+                and host_state == "ok"
+                and host_fresh
+                and host_pool.get("state") == "ready"
+                and host_pool.get("filesystem_id") == identity
+                and host_pool.get("total_bytes") == total
+            ):
+                categories = host_pool.get("storage")
+                if isinstance(categories, dict) and categories.get("state") == "ok":
+                    values = {
+                        key: _number(categories.get(key))
+                        for key in ("movies_bytes", "series_bytes", "torrents_bytes", "other_bytes")
+                    }
+                    category_fresh = (
+                        _state(
+                            _timestamp(categories.get("measured_at")),
+                            now=now,
+                            fresh_seconds=self.host_max_age_seconds,
+                        )
+                        == "ok"
+                    )
+                    if (
+                        category_fresh
+                        and all(type(value) is int for value in values.values())
+                        and sum(values.values()) <= used
+                    ):
+                        storage = {
+                            "state": "ok",
+                            "measured_at": categories["measured_at"],
+                            **values,
+                        }
+            pending = available = None
+            queue_pool = queue_pools.get(pool_id) or {}
+            if state == "ready" and queue_fresh and queue_pool.get("filesystem_id") == identity:
+                candidate_pending = _number(queue_pool.get("pending_bytes"))
+                candidate_available = _number(queue_pool.get("available_bytes"))
+                if (
+                    type(candidate_pending) is int
+                    and type(candidate_available) is int
+                    and candidate_available <= max(0, free - candidate_pending)
+                ):
+                    pending, available = candidate_pending, candidate_available
+            result.append(
+                {
+                    "pool_id": pool_id,
+                    "label": label,
+                    "filesystem_id": identity,
+                    "state": state,
+                    "reason": reason,
+                    "measured_at": sample.get("measured_at"),
+                    "total_bytes": total if state == "ready" else None,
+                    "free_bytes": free if state == "ready" else None,
+                    "used_bytes": used if state == "ready" else None,
+                    "queue_remaining_bytes": pending,
+                    "admissible_bytes": available,
+                    "storage": storage,
+                }
+            )
+        return result
 
     def __call__(self) -> dict[str, Any]:
         now = time.time()
@@ -216,12 +366,34 @@ class StatusProvider:
             if host_state == "ok" and capacity_state == "ok" and isinstance(host_storage, dict):
                 host_total = _number(host_storage.get("total_bytes"))
                 host_used = _number(host_storage.get("used_bytes"))
-                if type(host_total) is int and host_total == total and type(host_used) is int:
+                same_identity = host_storage.get("filesystem_id") == capacity_snapshot.get(
+                    "filesystem_id"
+                )
+                sample_fresh = (
+                    _state(
+                        _timestamp(host_storage.get("measured_at")),
+                        now=now,
+                        fresh_seconds=self.host_max_age_seconds,
+                    )
+                    == "ok"
+                )
+                if (
+                    same_identity
+                    and sample_fresh
+                    and type(host_total) is int
+                    and host_total == total
+                    and type(host_used) is int
+                ):
                     if host_used <= total:
                         used = host_used
 
         interface = network.get("interface")
-        return {
+        multi_pool = (
+            "pools" in capacity_snapshot
+            or "pools" in host_snapshot
+            or self.storage_registry_path.exists()
+        )
+        result = {
             "schema_version": 2,
             "generated_at": datetime.fromtimestamp(now, UTC).isoformat(),
             "host": {
@@ -252,5 +424,17 @@ class StatusProvider:
                 "free_bytes": free,
                 "used_bytes": used,
             },
-            "storage": self.storage.snapshot(used_bytes=used),
+            "storage": _empty_storage() if multi_pool else self.storage.snapshot(used_bytes=used),
         }
+        if multi_pool:
+            pools = self._pools(host_snapshot, capacity_snapshot, now=now, host_state=host_state)
+            ssd = pools[0]
+            result["pools"] = pools
+            result["capacity"] = {
+                key: ssd[key]
+                for key in ("state", "measured_at", "total_bytes", "used_bytes", "free_bytes")
+            }
+            if result["capacity"]["state"] == "ready":
+                result["capacity"]["state"] = "ok"
+            result["storage"] = ssd["storage"]
+        return result

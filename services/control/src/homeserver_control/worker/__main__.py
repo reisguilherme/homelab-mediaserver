@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import signal
+import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -15,6 +16,7 @@ from pathlib import Path
 import httpx
 
 from homeserver_common.filesystem import filesystem_identity as _media_filesystem_id
+from homeserver_common.storage import load_storage_registry
 from homeserver_control.adapters.seerr import SeerrAdapter
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
@@ -42,6 +44,31 @@ from .subtitle_language import SubtitlePolicy
 from .tracker_availability import TrackerAvailabilityProbe
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _publish_storage_queue(path: Path, evidence, permits: PermitRegistry) -> None:
+    if not evidence.pools:
+        return
+    pools = []
+    for pool in evidence.pools:
+        pending = permits.pending_bytes(evidence, pool_id=pool.pool_id)
+        pools.append({'pool_id': pool.pool_id, 'filesystem_id': pool.filesystem_id,
+                      'pending_bytes': pending,
+                      'available_bytes': max(0, pool.free_bytes - pending)})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, encoding='utf-8',
+                                         prefix='.storage-queue-', delete=False) as output:
+            temporary = Path(output.name)
+            json.dump({'measured_at': time.time(), 'pools': pools}, output)
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.chmod(0o644)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def _snapshot_from_file(
@@ -75,6 +102,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     snapshot_path = os.environ.get("HOMESERVER_CAPACITY_SNAPSHOT")
     if not seerr_url or not seerr_key or not snapshot_path:
         return None
+    storage_registry = load_storage_registry()
     repository = ReservationRepository(database)
     repository.initialize()
     deletion_jobs = DeletionJobStore(database)
@@ -99,7 +127,9 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
         repository=repository,
         snapshot_provider=lambda: _snapshot_from_file(
             Path(snapshot_path),
-            expected_filesystem_id=os.environ.get("HOMESERVER_MEDIA_UUID") or None,
+            expected_filesystem_id=(storage_registry.pools['ssd'].filesystem_id
+                                    if storage_registry is not None else
+                                    os.environ.get("HOMESERVER_MEDIA_UUID") or None),
             max_age_seconds=float(
                 os.environ.get("HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS", "30")
             ),
@@ -114,7 +144,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     arr_uid = int(os.environ["HOMESERVER_ARR_UID"]) if "HOMESERVER_ARR_UID" in os.environ else None
     arr_gid = int(os.environ["HOMESERVER_ARR_GID"]) if "HOMESERVER_ARR_GID" in os.environ else None
     permits = (
-        PermitRegistry(database)
+        PermitRegistry(database, storage_registry=storage_registry)
         if (radarr_url and radarr_key) or (sonarr_url and sonarr_key)
         else None
     )
@@ -147,12 +177,13 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
         if not arr_token:
             raise ValueError("gateway token is required for capacity evidence")
         async with httpx.AsyncClient(timeout=httpx.Timeout(http_timeout)) as capacity_client:
-            return await read_capacity_evidence(
+            evidence = await read_capacity_evidence(
                 snapshot_path=Path(snapshot_path),
                 data_root=Path("/data"),
                 gateway_url=gateway_url,
                 arr_token=arr_token,
                 client=capacity_client,
+                storage_registry=storage_registry,
                 expected_filesystem_id=_media_filesystem_id(
                     Path("/data"), os.environ.get("HOMESERVER_MEDIA_UUID")
                 ),
@@ -160,6 +191,9 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                     os.environ.get("HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS", "30")
                 ),
             )
+        if storage_registry is not None and permits is not None:
+            _publish_storage_queue(database.parent / 'storage-queue.json', evidence, permits)
+        return evidence
 
     acquirer = None
     finalizer = None
@@ -282,6 +316,8 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
         Path(os.environ.get("HOMESERVER_MEDIA_ROOT", "/data")),
         os.environ.get("HOMESERVER_MEDIA_UUID"),
     )
+    if storage_registry is not None:
+        media_uuid = storage_registry.pools['ssd'].filesystem_id
     deletion_coordinator = None
     if all(
         (
@@ -302,6 +338,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
             data_root="/data",
             snapshot_path=snapshot_path,
             filesystem_id=media_uuid,
+            storage_registry=storage_registry,
             radarr_url=radarr_url,
             radarr_api_key=radarr_key,
             sonarr_url=sonarr_url,
@@ -316,6 +353,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     return WorkerCycle(
         source=source,
         scheduler=scheduler,
+        capacity_refresh=capacity_provider if storage_registry is not None and permits else None,
         acquirer=acquirer,
         finalizer=finalizer,
         series_acquirer=series_acquirer,

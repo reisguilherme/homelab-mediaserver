@@ -38,6 +38,8 @@ class Permit:
     probe_parent_id: str | None = None
     quality_rank: tuple[int, ...] | None = None
     season_pack_parent_id: str | None = None
+    pool_id: str = "ssd"
+    filesystem_id: str | None = None
 
 
 class PermitRegistry(ProbePermits):
@@ -49,9 +51,10 @@ class PermitRegistry(ProbePermits):
     uncertain upstream mutation.
     """
 
-    def __init__(self, db_path: str | Path | None = None) -> None:
+    def __init__(self, db_path: str | Path | None = None, *, storage_registry=None) -> None:
         self._permits: dict[str, Permit] = {}
         self._db_path = str(db_path) if db_path is not None else None
+        self.storage_registry = storage_registry
         self._lock = RLock()
         self._token_locks: dict[str, Lock] = {}
         self._season_pack_bindings: dict[str, dict[str, tuple[str, ...]]] = {}
@@ -120,6 +123,23 @@ class PermitRegistry(ProbePermits):
                 connection.execute("ALTER TABLE gateway_permits ADD COLUMN probe_parent_id TEXT")
             if "quality_rank_json" not in columns:
                 connection.execute("ALTER TABLE gateway_permits ADD COLUMN quality_rank_json TEXT")
+            if "pool_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE gateway_permits ADD COLUMN pool_id TEXT NOT NULL DEFAULT 'ssd'"
+                )
+            if "filesystem_id" not in columns:
+                connection.execute("ALTER TABLE gateway_permits ADD COLUMN filesystem_id TEXT")
+            if self.storage_registry is not None:
+                try:
+                    sample = self.storage_registry.inspect("ssd")
+                except (RuntimeError, ValueError, OSError):
+                    pass
+                else:
+                    connection.execute(
+                        "UPDATE gateway_permits SET filesystem_id=? WHERE pool_id='ssd' "
+                        "AND filesystem_id IS NULL AND destination='/data/torrents'",
+                        (sample.filesystem_id,),
+                    )
             connection.execute("DROP INDEX IF EXISTS idx_gateway_permit_reservation")
             connection.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_gateway_permit_reservation "
@@ -157,6 +177,7 @@ class PermitRegistry(ProbePermits):
         capacity: CapacityEvidence,
         *,
         include_infohash: str | None = None,
+        pool_id: str = "ssd",
     ) -> int:
         rows = connection.execute(
             """SELECT p.infohash, p.budget_bytes, p.state FROM gateway_permits p
@@ -166,33 +187,116 @@ class PermitRegistry(ProbePermits):
                    OR p.permit_id IN (SELECT parent_id FROM source_handovers WHERE state='pending'))
               AND (p.state != 'authorized' OR p.expires_at > ?)
               AND p.budget_bytes > 0
+              AND p.pool_id = ?
               AND NOT EXISTS (
                 SELECT 1 FROM episode_imports e
                 WHERE e.permit_id = p.permit_id AND e.state = 'complete'
               )""",
-            (datetime.now(UTC).isoformat(),),
+            (datetime.now(UTC).isoformat(), pool_id),
         ).fetchall()
-        return capacity.other_pending_bytes + sum(
-            min(
-                row["budget_bytes"],
-                capacity.remaining_by_hash.get(row["infohash"], row["budget_bytes"]),
-            )
-            for row in rows
-            if row["state"] != "confirmed"
-            or row["infohash"] not in capacity.paused_hashes
-            or row["infohash"] == include_infohash
-        )
+        per_pool = capacity.pool(pool_id)
+        # Registered queues retain commitments even after cancellation while
+        # qBit still owns a stopped partial source. Progress counts once by hash.
+        by_hash = dict(per_pool.remaining_by_hash) if capacity.pools else {}
+        for row in rows:
+            if (
+                capacity.pools
+                or row["state"] != "confirmed"
+                or row["infohash"] not in capacity.paused_hashes
+                or row["infohash"] == include_infohash
+            ):
+                by_hash[row["infohash"]] = max(
+                    by_hash.get(row["infohash"], 0),
+                    min(
+                        row["budget_bytes"],
+                        per_pool.remaining_by_hash.get(row["infohash"], row["budget_bytes"]),
+                    ),
+                )
+        return per_pool.other_pending_bytes + sum(by_hash.values())
 
     def pending_bytes(
         self,
         capacity: CapacityEvidence,
         *,
         include_infohash: str | None = None,
+        pool_id: str = "ssd",
     ) -> int:
         if self._db_path is None:
             raise ValueError("persistent permits required for queue capacity")
         with self._session() as connection:
-            return self._pending_bytes(connection, capacity, include_infohash=include_infohash)
+            return self._pending_bytes(
+                connection, capacity, include_infohash=include_infohash, pool_id=pool_id
+            )
+
+    def available_bytes(self, capacity: CapacityEvidence) -> int:
+        pools = [pool.pool_id for pool in capacity.pools] if capacity.pools else ["ssd"]
+        return max(
+            (
+                max(0, capacity.pool(pool).free_bytes - self.pending_bytes(capacity, pool_id=pool))
+                for pool in pools
+            ),
+            default=0,
+        )
+
+    def placement_valid(self, permit: Permit, *, writable: bool = True) -> bool:
+        if self.storage_registry is None:
+            return permit.pool_id == "ssd" and permit.destination == "/data/torrents"
+        try:
+            # The gateway deliberately has read-only physical binds. Inspection
+            # still proves the host filesystem is RW; only the worker creates paths.
+            sample = self.storage_registry.inspect(permit.pool_id)
+            if permit.filesystem_id is not None and sample.filesystem_id != permit.filesystem_id:
+                return False
+            if permit.destination == "/data/torrents" and permit.pool_id == "ssd":
+                return self.storage_registry.resolve("ssd", permit.destination).is_dir()
+            expected = (
+                f"/data/torrents/.placements/{permit.season_pack_parent_id or permit.permit_id}"
+            )
+            return (
+                permit.destination == expected
+                and self.storage_registry.validate_destination(
+                    permit.pool_id, permit.season_pack_parent_id or permit.permit_id
+                )
+                == expected
+            )
+        except (RuntimeError, ValueError, OSError):
+            return False
+
+    def _select_pool(self, connection, permit: Permit, capacity: CapacityEvidence) -> None:
+        if self.storage_registry is None:
+            if capacity.pools:
+                raise PermissionError("storage_registry_required")
+            if permit.budget_bytes > max(
+                0, capacity.free_bytes - self._pending_bytes(connection, capacity)
+            ):
+                raise PermissionError("waiting_space")
+            return
+        for pool_id in ("ssd", "hdd"):
+            try:
+                pool = next(item for item in capacity.pools if item.pool_id == pool_id)
+                sample = self.storage_registry.inspect(pool_id, writable=True)
+                if sample.filesystem_id != pool.filesystem_id:
+                    continue
+                free = min(pool.free_bytes, sample.free_bytes)
+                if permit.budget_bytes > max(
+                    0, free - self._pending_bytes(connection, capacity, pool_id=pool_id)
+                ):
+                    continue
+                destination = self.storage_registry.prepare_destination(pool_id, permit.permit_id)
+            except (StopIteration, RuntimeError, ValueError, OSError):
+                continue
+            permit.pool_id = pool_id
+            permit.filesystem_id = sample.filesystem_id
+            permit.destination = destination
+            return
+        raise PermissionError("waiting_space")
+
+    @staticmethod
+    def _persist_placement(connection, permit: Permit) -> None:
+        connection.execute(
+            "UPDATE gateway_permits SET pool_id=?,filesystem_id=?,destination=? WHERE permit_id=?",
+            (permit.pool_id, permit.filesystem_id, permit.destination, permit.permit_id),
+        )
 
     @staticmethod
     def _expires(value: str) -> datetime:
@@ -225,6 +329,8 @@ class PermitRegistry(ProbePermits):
             infohash=row["infohash"],
             metadata_sha256=row["metadata_sha256"],
             destination=row["destination"],
+            pool_id=row["pool_id"],
+            filesystem_id=row["filesystem_id"],
             category=row["category"],
             selected_files=tuple(json.loads(row["selected_files_json"])),
             budget_bytes=row["budget_bytes"],
@@ -253,6 +359,8 @@ class PermitRegistry(ProbePermits):
         capacity: CapacityEvidence | None = None,
         reported_seeders: int | None = None,
     ) -> Permit:
+        if self.storage_registry is not None and capacity is None:
+            raise ValueError("pool_capacity_required")
         permit = Permit(
             permit_id=str(uuid4()),
             token=secrets.token_urlsafe(32),
@@ -311,9 +419,7 @@ class PermitRegistry(ProbePermits):
                         or not reservation["media_key"].startswith("season:tmdb:")
                     ):
                         raise ValueError("invalid episode permit")
-                    pending = self._pending_bytes(connection, capacity)
-                    if budget_bytes > max(0, capacity.free_bytes - pending):
-                        raise PermissionError("waiting_space")
+                    self._select_pool(connection, permit, capacity)
                     connection.execute(
                         """UPDATE reservations SET budget_bytes = ? + COALESCE((
                             SELECT SUM(p.budget_bytes) FROM gateway_permits p
@@ -364,13 +470,17 @@ class PermitRegistry(ProbePermits):
                     ).fetchone()
                 ):
                     raise PermissionError("replacement_limit")
-                if scope_key is not None and connection.execute(
-                    "SELECT 1 FROM season_pack_episodes e JOIN gateway_permits p "
-                    "ON p.permit_id=e.parent_permit_id WHERE p.reservation_id=? "
-                    "AND e.scope_key=? AND p.state IN "
-                    "('authorized', 'dispatching', 'unknown', 'confirmed') LIMIT 1",
-                    (reservation_id, scope_key),
-                ).fetchone() is not None:
+                if (
+                    scope_key is not None
+                    and connection.execute(
+                        "SELECT 1 FROM season_pack_episodes e JOIN gateway_permits p "
+                        "ON p.permit_id=e.parent_permit_id WHERE p.reservation_id=? "
+                        "AND e.scope_key=? AND p.state IN "
+                        "('authorized', 'dispatching', 'unknown', 'confirmed') LIMIT 1",
+                        (reservation_id, scope_key),
+                    ).fetchone()
+                    is not None
+                ):
                     raise PermissionError("episode_already_permitted")
                 connection.execute(
                     """
@@ -397,6 +507,7 @@ class PermitRegistry(ProbePermits):
                         permit.state,
                     ),
                 )
+                self._persist_placement(connection, permit)
                 if reservation_id is not None or capacity is not None:
                     connection.commit()
         return permit
@@ -417,7 +528,7 @@ class PermitRegistry(ProbePermits):
                     for item in self._permits.values()
                     if item.infohash == infohash.lower()
                     and item.metadata_sha256 == digest
-                    and item.destination == destination
+                    and (self.storage_registry is not None or item.destination == destination)
                     and item.category == category
                     and item.state in {"authorized", "confirmed"}
                     and datetime.now(UTC) < item.expires_at
@@ -429,12 +540,18 @@ class PermitRegistry(ProbePermits):
                     SELECT p.* FROM gateway_permits p
                     JOIN reservations r ON r.id = p.reservation_id
                     WHERE p.infohash = ? AND p.metadata_sha256 = ?
-                      AND p.destination = ? AND p.category = ?
+                      AND (p.destination = ? OR ?) AND p.category = ?
                       AND p.state IN ('authorized', 'confirmed')
                       AND r.state IN ('reserved', 'downloading', 'waiting_episodes')
                       AND p.budget_bytes IS NOT NULL AND p.budget_bytes <= r.budget_bytes
                     """,
-                    (infohash.lower(), digest, destination, category),
+                    (
+                        infohash.lower(),
+                        digest,
+                        destination,
+                        self.storage_registry is not None,
+                        category,
+                    ),
                 ).fetchall()
             matches = [
                 self._permit_from_row(row)
@@ -458,7 +575,7 @@ class PermitRegistry(ProbePermits):
                     item
                     for item in self._permits.values()
                     if item.infohash == infohash.lower()
-                    and item.destination == destination
+                    and (self.storage_registry is not None or item.destination == destination)
                     and item.category == category
                     and item.metadata_sha256 is not None
                     and item.budget_bytes is not None
@@ -473,14 +590,14 @@ class PermitRegistry(ProbePermits):
                     """
                     SELECT p.* FROM gateway_permits p
                     JOIN reservations r ON r.id = p.reservation_id
-                    WHERE p.infohash = ? AND p.destination = ? AND p.category = ?
+                    WHERE p.infohash = ? AND (p.destination = ? OR ?) AND p.category = ?
                       AND p.state IN ('authorized', 'confirmed')
                       AND p.metadata_sha256 IS NOT NULL
                       AND p.budget_bytes > 0 AND p.budget_bytes <= r.budget_bytes
                       AND p.selected_files_json != '[]'
                       AND r.state IN ('reserved', 'downloading', 'waiting_episodes')
                     """,
-                    (infohash.lower(), destination, category),
+                    (infohash.lower(), destination, self.storage_registry is not None, category),
                 ).fetchall()
             matches = [
                 self._permit_from_row(row)
@@ -507,40 +624,97 @@ class PermitRegistry(ProbePermits):
             ).fetchone()
         return row is not None
 
+    def queue_entry(self, entry: dict) -> dict:
+        """Attribute queue progress only to an identity-checked physical destination."""
+        infohash = entry.get("hash")
+        admitted = self.is_admitted(infohash) if isinstance(infohash, str) else False
+        payload = {key: entry.get(key) for key in ("hash", "total_size", "amount_left", "state")}
+        payload["admitted"] = admitted
+        if self.storage_registry is None:
+            return payload
+        with self._session() as connection:
+            rows = connection.execute(
+                "SELECT * FROM gateway_permits WHERE infohash=? AND destination=? AND category=?",
+                (
+                    infohash.lower() if isinstance(infohash, str) else "",
+                    entry.get("save_path", "").rstrip("/"),
+                    entry.get("category"),
+                ),
+            ).fetchall()
+        placements = {(row["pool_id"], row["filesystem_id"], row["destination"]) for row in rows}
+        if len(placements) != 1:
+            return {**payload, "placement_verified": False}
+        permit = self._permit_from_row(rows[0])
+        return {
+            **payload,
+            "admitted": True,
+            "pool_id": permit.pool_id,
+            "filesystem_id": permit.filesystem_id
+            or self.storage_registry.pools[permit.pool_id].filesystem_id,
+            "save_path": permit.destination,
+            "reserved_bytes": permit.budget_bytes,
+            "placement_verified": self.placement_valid(permit, writable=False),
+        }
+
     @staticmethod
     def _season_pack_view(parent: Permit, scope: str, files: tuple[str, ...]) -> Permit:
         return replace(
-            parent, permit_id=f"{parent.permit_id}:{scope}", scope_key=scope,
-            selected_files=files, season_pack_parent_id=parent.permit_id,
+            parent,
+            permit_id=f"{parent.permit_id}:{scope}",
+            scope_key=scope,
+            selected_files=files,
+            season_pack_parent_id=parent.permit_id,
         )
 
-    @staticmethod
-    def _validate_pack_bindings(parent: Permit, episode_files: dict[str, tuple[str, ...]]) -> None:
+    def _validate_pack_bindings(
+        self, parent: Permit, episode_files: dict[str, tuple[str, ...]]
+    ) -> None:
         pack = re.fullmatch(r"S([0-9]{2,})PACK", parent.scope_key or "")
         if (
-            pack is None or parent.category != "sonarr" or parent.reservation_id is None
-            or parent.probe_parent_id is not None or parent.metadata_sha256 is None
-            or parent.destination != "/data/torrents"
+            pack is None
+            or parent.category != "sonarr"
+            or parent.reservation_id is None
+            or parent.probe_parent_id is not None
+            or parent.metadata_sha256 is None
+            or not self.placement_valid(parent)
             or parent.state not in {"authorized", "dispatching", "unknown", "confirmed"}
-            or not isinstance(episode_files, dict) or not episode_files
+            or not isinstance(episode_files, dict)
+            or not episode_files
         ):
             raise ValueError("invalid season pack bindings")
         for scope, files in episode_files.items():
             episode = re.fullmatch(r"S([0-9]{2,})E([0-9]{2,})", scope)
             if (
-                episode is None or int(episode[1]) != int(pack[1]) or int(episode[2]) <= 0
-                or not isinstance(files, tuple) or not files or len(files) != len(set(files))
+                episode is None
+                or int(episode[1]) != int(pack[1])
+                or int(episode[2]) <= 0
+                or not isinstance(files, tuple)
+                or not files
+                or len(files) != len(set(files))
                 or any(
                     not isinstance(path, str) or path not in parent.selected_files for path in files
                 )
             ):
                 raise ValueError("invalid season pack episode")
-            videos = [path for path in files if PurePosixPath(path).suffix.lower() in {
-                ".mkv", ".mp4", ".avi", ".m4v", ".ts", ".m2ts", ".mov", ".webm",
-            }]
+            videos = [
+                path
+                for path in files
+                if PurePosixPath(path).suffix.lower()
+                in {
+                    ".mkv",
+                    ".mp4",
+                    ".avi",
+                    ".m4v",
+                    ".ts",
+                    ".m2ts",
+                    ".mov",
+                    ".webm",
+                }
+            ]
             tag = re.compile(
                 rf"(?<![a-z0-9])s0*{int(episode[1])}e0*{int(episode[2])}"
-                r"(?![0-9]|e[0-9]|[ ._-]*[-e][0-9])", re.I,
+                r"(?![0-9]|e[0-9]|[ ._-]*[-e][0-9])",
+                re.I,
             )
             if len(videos) != 1 or any(not tag.search(PurePosixPath(path).name) for path in files):
                 raise ValueError("pack file belongs to another episode")
@@ -570,7 +744,8 @@ class PermitRegistry(ProbePermits):
             row = connection.execute(
                 "SELECT p.*, r.media_key FROM gateway_permits p "
                 "JOIN reservations r ON r.id=p.reservation_id WHERE p.token=? "
-                "AND r.state IN ('reserved', 'downloading', 'waiting_episodes')", (token,),
+                "AND r.state IN ('reserved', 'downloading', 'waiting_episodes')",
+                (token,),
             ).fetchone()
             if row is None:
                 raise PermissionError("reservation_required")
@@ -598,11 +773,14 @@ class PermitRegistry(ProbePermits):
                 ).fetchone()
                 if other is not None:
                     raise PermissionError("episode_already_permitted")
-            if connection.execute(
-                "SELECT 1 FROM gateway_permits WHERE infohash=? AND permit_id != ? "
-                "AND state IN ('authorized', 'dispatching', 'unknown', 'confirmed') LIMIT 1",
-                (parent.infohash, parent.permit_id),
-            ).fetchone() is not None:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM gateway_permits WHERE infohash=? AND permit_id != ? "
+                    "AND state IN ('authorized', 'dispatching', 'unknown', 'confirmed') LIMIT 1",
+                    (parent.infohash, parent.permit_id),
+                ).fetchone()
+                is not None
+            ):
                 raise PermissionError("torrent_already_permitted")
             connection.executemany(
                 "INSERT OR IGNORE INTO season_pack_episodes "
@@ -635,7 +813,8 @@ class PermitRegistry(ProbePermits):
                 for parent in self._permits.values():
                     files = self._season_pack_bindings.get(parent.permit_id, {}).get(scope_key)
                     if (
-                        files is not None and parent.reservation_id == reservation_id
+                        files is not None
+                        and parent.reservation_id == reservation_id
                         and parent.state in {"authorized", "dispatching", "unknown", "confirmed"}
                     ):
                         return self._season_pack_view(parent, scope_key, files)
@@ -659,7 +838,8 @@ class PermitRegistry(ProbePermits):
                 ).fetchone()
                 if binding is not None:
                     return self._season_pack_view(
-                        self._permit_from_row(binding), binding["episode_scope"],
+                        self._permit_from_row(binding),
+                        binding["episode_scope"],
                         tuple(json.loads(binding["episode_files"])),
                     )
         return self._permit_from_row(row) if row is not None else None
@@ -696,15 +876,19 @@ class PermitRegistry(ProbePermits):
             season = re.fullmatch(r"season:tmdb:[1-9][0-9]*:([1-9][0-9]*)", media_key)
             episode = re.fullmatch(r"S([0-9]{2,})E[0-9]{2,}", scope_key or "")
             if permit.state != "confirmed" and (
-                permit.category != "sonarr" or season is None or episode is None
+                permit.category != "sonarr"
+                or season is None
+                or episode is None
                 or int(season[1]) != int(episode[1])
                 or connection.execute(
-                    "SELECT 1 FROM tombstones WHERE media_key=?", (media_key,),
-                ).fetchone() is None
+                    "SELECT 1 FROM tombstones WHERE media_key=?",
+                    (media_key,),
+                ).fetchone()
+                is None
             ):
                 raise PermissionError("explicit season deletion required for historical source")
             if (
-                permit.destination != "/data/torrents"
+                not self.placement_valid(permit, writable=False)
                 or not re.fullmatch(r"[0-9a-f]{40}", permit.infohash)
                 or permit.metadata_sha256 is None
                 or not permit.selected_files
@@ -737,13 +921,18 @@ class PermitRegistry(ProbePermits):
         return permit
 
     def _pack_deletion_parent(
-        self, connection: sqlite3.Connection, *, token: str, media_key: str,
+        self,
+        connection: sqlite3.Connection,
+        *,
+        token: str,
+        media_key: str,
     ) -> tuple[Permit, dict[str, tuple[str, ...]]]:
         if not isinstance(token, str) or not isinstance(media_key, str):
             raise PermissionError("confirmed pack source required")
         row = connection.execute(
             "SELECT p.* FROM gateway_permits p JOIN reservations r ON r.id=p.reservation_id "
-            "WHERE p.token=? AND p.state='confirmed' AND r.media_key=?", (token, media_key),
+            "WHERE p.token=? AND p.state='confirmed' AND r.media_key=?",
+            (token, media_key),
         ).fetchone()
         season = re.fullmatch(r"season:tmdb:([1-9][0-9]*):([1-9][0-9]*)", media_key)
         if row is None or season is None:
@@ -752,33 +941,44 @@ class PermitRegistry(ProbePermits):
         if (
             parent.scope_key != f"S{int(season[2]):02d}PACK"
             or not re.fullmatch(r"[0-9a-f]{40}", parent.infohash)
-            or not isinstance(parent.budget_bytes, int) or parent.budget_bytes <= 0
+            or not isinstance(parent.budget_bytes, int)
+            or parent.budget_bytes <= 0
         ):
             raise PermissionError("pack source identity is invalid")
         bindings = {
             entry["scope_key"]: tuple(json.loads(entry["selected_files_json"]))
             for entry in connection.execute(
-                "SELECT * FROM season_pack_episodes WHERE parent_permit_id=?", (parent.permit_id,),
+                "SELECT * FROM season_pack_episodes WHERE parent_permit_id=?",
+                (parent.permit_id,),
             )
         }
         self._validate_pack_bindings(parent, bindings)
-        if connection.execute(
-            "SELECT 1 FROM gateway_permits WHERE infohash=? AND permit_id != ? "
-            "AND state IN ('authorized', 'dispatching', 'unknown', 'confirmed') LIMIT 1",
-            (parent.infohash, parent.permit_id),
-        ).fetchone() is not None:
+        if (
+            connection.execute(
+                "SELECT 1 FROM gateway_permits WHERE infohash=? AND permit_id != ? "
+                "AND state IN ('authorized', 'dispatching', 'unknown', 'confirmed') LIMIT 1",
+                (parent.infohash, parent.permit_id),
+            ).fetchone()
+            is not None
+        ):
             raise ValueError("torrent is shared by another active permit")
         return parent, bindings
 
     def season_pack_deletion_source(
-        self, *, token: str, media_key: str, scope_key: str,
+        self,
+        *,
+        token: str,
+        media_key: str,
+        scope_key: str,
     ) -> Permit:
         """Associate an explicit episode deletion without authorizing a pack delete."""
         if self._db_path is None:
             raise PermissionError("persistent pack source required")
         with self._session() as connection:
             parent, bindings = self._pack_deletion_parent(
-                connection, token=token, media_key=media_key,
+                connection,
+                token=token,
+                media_key=media_key,
             )
             if scope_key not in bindings:
                 raise PermissionError("confirmed pack episode required")
@@ -791,14 +991,21 @@ class PermitRegistry(ProbePermits):
         with self._session() as connection:
             try:
                 _, bindings = self._pack_deletion_parent(
-                    connection, token=token, media_key=media_key,
+                    connection,
+                    token=token,
+                    media_key=media_key,
                 )
             except (PermissionError, ValueError):
                 return False
             tmdb = media_key.split(":")[2]
-            return all(connection.execute(
-                "SELECT 1 FROM tombstones WHERE media_key=?", (f"episode:tmdb:{tmdb}:{scope}",),
-            ).fetchone() is not None for scope in bindings)
+            return all(
+                connection.execute(
+                    "SELECT 1 FROM tombstones WHERE media_key=?",
+                    (f"episode:tmdb:{tmdb}:{scope}",),
+                ).fetchone()
+                is not None
+                for scope in bindings
+            )
 
     def list_active_confirmed_movies(self) -> list[Permit]:
         """Return admitted movie sources whose reservations are still active."""
@@ -834,16 +1041,26 @@ class PermitRegistry(ProbePermits):
                 episodes = []
                 for permit in self._permits.values():
                     if (
-                        permit.state != "confirmed" or permit.category != "sonarr"
-                        or permit.probe_parent_id is not None or permit.scope_key is None
+                        permit.state != "confirmed"
+                        or permit.category != "sonarr"
+                        or permit.probe_parent_id is not None
+                        or permit.scope_key is None
                         or permit.reservation_id is None
                     ):
                         continue
                     bindings = self._season_pack_bindings.get(permit.permit_id)
                     if bindings:
-                        episodes.extend((permit.reservation_id, self._season_pack_view(
-                            permit, scope, files,
-                        )) for scope, files in sorted(bindings.items()))
+                        episodes.extend(
+                            (
+                                permit.reservation_id,
+                                self._season_pack_view(
+                                    permit,
+                                    scope,
+                                    files,
+                                ),
+                            )
+                            for scope, files in sorted(bindings.items())
+                        )
                     elif not permit.scope_key.endswith("PACK"):
                         episodes.append((permit.reservation_id, permit))
                 return episodes
@@ -872,11 +1089,20 @@ class PermitRegistry(ProbePermits):
                         "SELECT e.* FROM season_pack_episodes e WHERE e.parent_permit_id=? "
                         "AND NOT EXISTS (SELECT 1 FROM episode_imports i WHERE "
                         "i.permit_id=e.parent_permit_id || ':' || e.scope_key "
-                        "AND i.state='complete') ORDER BY e.scope_key", (permit.permit_id,),
+                        "AND i.state='complete') ORDER BY e.scope_key",
+                        (permit.permit_id,),
                     ).fetchall()
-                    episodes.extend((series_key, self._season_pack_view(
-                        permit, entry["scope_key"], tuple(json.loads(entry["selected_files_json"])),
-                    )) for entry in bindings)
+                    episodes.extend(
+                        (
+                            series_key,
+                            self._season_pack_view(
+                                permit,
+                                entry["scope_key"],
+                                tuple(json.loads(entry["selected_files_json"])),
+                            ),
+                        )
+                        for entry in bindings
+                    )
                 else:
                     episodes.append((series_key, permit))
         return episodes
@@ -1113,14 +1339,21 @@ class PermitRegistry(ProbePermits):
                 (permit.reservation_id,),
             ).fetchone():
                 raise PermissionError("reservation_required")
-            pending = self._pending_bytes(connection, capacity)
-            if permit.expires_at <= datetime.now(UTC):
+            pending = self._pending_bytes(connection, capacity, pool_id=permit.pool_id)
+            if permit.expires_at <= datetime.now(UTC) and (
+                not capacity.pools
+                or permit.infohash not in capacity.pool(permit.pool_id).remaining_by_hash
+            ):
                 pending += min(
                     permit.budget_bytes,
-                    capacity.remaining_by_hash.get(permit.infohash, permit.budget_bytes),
+                    capacity.pool(permit.pool_id).remaining_by_hash.get(
+                        permit.infohash, permit.budget_bytes
+                    ),
                 )
-            if pending > capacity.free_bytes:
+            if pending > capacity.pool(permit.pool_id).free_bytes:
                 raise PermissionError("waiting_space")
+            if self.storage_registry is not None and not self.placement_valid(permit):
+                raise PermissionError("storage placement unavailable")
             connection.execute(
                 "UPDATE gateway_permits SET expires_at = ? WHERE permit_id = ? "
                 "AND state = 'authorized'",
@@ -1264,10 +1497,8 @@ class PermitRegistry(ProbePermits):
                 (new_hash,),
             ).fetchone():
                 raise PermissionError("source_already_admitted")
-            pending = self._pending_bytes(connection, capacity)
-            if budget_bytes > max(0, capacity.free_bytes - pending):
-                raise PermissionError("waiting_space")
             new = replacement(old)
+            self._select_pool(connection, new, capacity)
             connection.execute(
                 "UPDATE gateway_permits SET state = 'superseded' "
                 "WHERE permit_id = ? AND state = 'confirmed'",
@@ -1295,6 +1526,7 @@ class PermitRegistry(ProbePermits):
                     new.expires_at.isoformat(),
                 ),
             )
+            self._persist_placement(connection, new)
             connection.execute(
                 """UPDATE reservations SET budget_bytes = COALESCE((
                     SELECT SUM(p.budget_bytes) FROM gateway_permits p
@@ -1320,14 +1552,16 @@ class PermitRegistry(ProbePermits):
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT permit_id, reservation_id FROM gateway_permits "
-                "WHERE token=? AND state='authorized'", (token,),
+                "WHERE token=? AND state='authorized'",
+                (token,),
             ).fetchone()
             if row is None:
                 connection.rollback()
                 return False
             connection.execute("DELETE FROM gateway_permits WHERE permit_id=?", (row["permit_id"],))
             connection.execute(
-                "DELETE FROM season_pack_episodes WHERE parent_permit_id=?", (row["permit_id"],),
+                "DELETE FROM season_pack_episodes WHERE parent_permit_id=?",
+                (row["permit_id"],),
             )
             if row["reservation_id"] is not None:
                 connection.execute(
@@ -1335,7 +1569,8 @@ class PermitRegistry(ProbePermits):
                         SELECT SUM(p.budget_bytes) FROM gateway_permits p
                         WHERE p.reservation_id=? AND p.state IN
                         ('authorized', 'dispatching', 'unknown', 'confirmed')
-                    ), 0) WHERE id=?""", (row["reservation_id"], row["reservation_id"]),
+                    ), 0) WHERE id=?""",
+                    (row["reservation_id"], row["reservation_id"]),
                 )
             connection.commit()
             return True

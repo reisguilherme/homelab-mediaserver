@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from homeserver_common.filesystem import filesystem_identity
+from homeserver_common.storage import load_storage_registry
 from homeserver_control.api.deletion_capture import DeletionAdmission, DeletionCaptureError
 from homeserver_control.domain.deletion_plan import DeletionPlanError, DeletionPlanner
 from homeserver_control.persistence.db import ReservationRepository
@@ -129,6 +130,7 @@ def _configured(value: str) -> bool:
 
 def create_app(*, state: ControlState | None = None) -> FastAPI:
     if state is None:
+        storage_registry = load_storage_registry()
         roots = tuple(
             item for item in os.environ.get("HOMESERVER_MEDIA_ROOTS", "").split(":") if item
         )
@@ -141,7 +143,9 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
                 "HOMESERVER_RECOVERY_MODE", "/var/lib/homeserver/RECOVERY_MODE"
             ),
             worker_health_required=True,
-            expected_filesystem_id=os.environ.get("HOMESERVER_MEDIA_UUID") or None,
+            expected_filesystem_id=(storage_registry.pools['ssd'].filesystem_id
+                                    if storage_registry is not None else
+                                    os.environ.get("HOMESERVER_MEDIA_UUID") or None),
             capacity_max_age_seconds=float(
                 os.environ.get("HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS", "30")
             ),
@@ -164,6 +168,8 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
             Path(os.environ.get("HOMESERVER_MEDIA_ROOT", "/data")),
             os.environ.get("HOMESERVER_MEDIA_UUID"),
         )
+        if storage_registry is not None:
+            media_uuid = storage_registry.pools['ssd'].filesystem_id
         if media_uuid and state.db_path is not None:
             deletion_jobs = DeletionJobStore(state.db_path)
             deletion_jobs.initialize()
@@ -174,6 +180,7 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
                     "HOMESERVER_CAPACITY_SNAPSHOT", "/run/homeserver/capacity.json"
                 ),
                 filesystem_id=media_uuid,
+                storage_registry=storage_registry,
                 jellyfin_url=os.environ.get("HOMESERVER_JELLYFIN_URL", "http://jellyfin:8096"),
                 radarr_url=os.environ.get("HOMESERVER_RADARR_URL", ""),
                 radarr_api_key=os.environ.get("HOMESERVER_RADARR_API_KEY", ""),

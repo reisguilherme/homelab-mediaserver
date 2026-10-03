@@ -224,8 +224,6 @@ class ProbePermits:
                 )
             ):
                 raise PermissionError("quality_downgrade")
-            if budget_bytes + self._pending_bytes(connection, capacity) > capacity.free_bytes:
-                raise PermissionError("waiting_space")
             probe = Permit(
                 permit_id=str(uuid4()),
                 token=secrets.token_urlsafe(32),
@@ -242,6 +240,7 @@ class ProbePermits:
                 probe_parent_id=old.permit_id,
                 quality_rank=quality_rank,
             )
+            self._select_pool(connection, probe, capacity)
             connection.execute(
                 """INSERT INTO gateway_permits(
                 permit_id,token,operation_id,reservation_id,scope_key,infohash,
@@ -266,6 +265,7 @@ class ProbePermits:
                     json.dumps(quality_rank) if quality_rank is not None else None,
                 ),
             )
+            self._persist_placement(connection, probe)
             self._update_probe_budget(connection, old.reservation_id)
             connection.commit()
         return probe

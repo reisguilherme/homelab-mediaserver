@@ -9,6 +9,8 @@ import json
 import os
 import platform
 import shutil
+import sqlite3
+import stat
 import subprocess
 import xml.etree.ElementTree as xml
 from pathlib import Path
@@ -16,6 +18,8 @@ from pathlib import Path
 from .env import load_settings, parse_env
 from .render import PROJECT_ROOT, atomic_write
 from .settings import Settings
+from .storage import load_storage_registry
+from .storage_startup import verify_storage_startup
 
 
 class DependencyError(RuntimeError):
@@ -53,7 +57,9 @@ def preflight(settings: Settings, *, host_tools=True, check_device=True):
     if settings.environment == "prod":
         if platform.system() != "Linux":
             raise ValueError("production runtime requires Linux")
-        if settings.media_uuid:
+        if load_storage_registry(Path(settings.run_root) / 'storage.json') is not None:
+            checks.append({"name": "media_uuid", "status": "registered_pools"})
+        elif settings.media_uuid:
             run_checked(
                 [
                     "bash",
@@ -133,8 +139,48 @@ def _native_seeds(settings):
     return seeds
 
 
+def prepare_controller_database(path: Path, *, uid: int, gid: int) -> None:
+    """Prevent root worker's first-create race; never repair existing state silently."""
+    if any(parent.is_symlink() for parent in (path, *path.parents)):
+        raise ValueError('controller database path must not contain a symlink')
+    if os.geteuid() != 0 and (uid, gid) != (os.geteuid(), os.getegid()):
+        raise ValueError('controller database preparation requires the service identity or root')
+    parent = path.parent.stat()
+    if (parent.st_uid != uid or parent.st_gid != gid
+            or not stat.S_ISDIR(parent.st_mode) or parent.st_mode & 0o700 != 0o700):
+        raise ValueError('controller database directory owner/access mismatch')
+    for candidate in (path, *(Path(str(path) + suffix)
+                              for suffix in ('-wal', '-shm', '-journal'))):
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            raise ValueError('controller database/sidecar must not contain a symlink')
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_gid != gid
+                or info.st_mode & 0o600 != 0o600):
+            raise ValueError('controller database/sidecar owner/access mismatch')
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        return  # Preserve existing database bytes, journal mode and permissions.
+    try:
+        if os.geteuid() == 0:
+            os.fchown(descriptor, uid, gid)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute('PRAGMA journal_mode = WAL')
+    finally:
+        connection.close()
+
+
 def prepare_runtime(settings: Settings):
     """Never replace native configs, remove data, or manage the host's services."""
+    registered_storage = verify_storage_startup(
+        Path(settings.run_root) / 'storage.json', Path(settings.media_root))
     preflight(settings, host_tools=False, check_device=False)
     appdata, media = Path(settings.appdata_root), Path(settings.media_root)
     directories = [Path(settings.run_root), Path(settings.transcode_root)]
@@ -159,6 +205,9 @@ def prepare_runtime(settings: Settings):
             path.mkdir(parents=True, mode=0o750)
             if os.geteuid() == 0:
                 os.chown(path, int(settings.service_uid), int(settings.service_gid))
+    if registered_storage:
+        prepare_controller_database(appdata / 'control/control.sqlite',
+                                    uid=int(settings.service_uid), gid=int(settings.service_gid))
     seeded = 0
     for path in (appdata / name / "config.xml" for name in ("sonarr", "radarr", "prowlarr")):
         if path.is_symlink():
