@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import mmap
 import os
 import re
 import shutil
@@ -74,7 +75,8 @@ def verify_view(view, branches, *, mountinfo=Path('/proc/self/mountinfo')):
         raise ValueError('mergerfs branches do not match the physical pools')
     for key, expected in {'category.create': 'epff', 'ignorepponrename': 'true',
                           'moveonenospc': 'false', 'link_cow': 'false',
-                          'symlinkify': 'false'}.items():
+                          'symlinkify': 'false', 'cache.files': 'auto-full',
+                          'dropcacheonclose': 'true'}.items():
         if os.getxattr(view / '.mergerfs', 'user.mergerfs.' + key).decode() != expected:
             raise ValueError(f'unsafe mergerfs option: {key}')
     return mount
@@ -102,6 +104,22 @@ def project_directories(root):
     guard(parent)  # Existing unsafe guards are refused, never silently adopted.
 
 
+def probe_mmap(path):
+    """Exercise libtorrent's shared mapping IO, not just ordinary file writes."""
+    marker = b'HomeServer mmap fixture\n'
+    payload = marker + bytes(4096 - len(marker))
+    with path.open('r+b', buffering=0) as stream:
+        with mmap.mmap(stream.fileno(), 4096, access=mmap.ACCESS_WRITE) as mapped:
+            mapped[:] = payload
+            mapped.flush()
+            if mapped[:] != payload:
+                raise ValueError('mmap readback differs from written fixture')
+        os.fsync(stream.fileno())
+    if path.read_bytes() != payload:
+        raise ValueError('mmap flush/readback failed')
+    return payload
+
+
 def probe(pool, other, view):
     """A child does real operations as downloader through the exact logical view."""
     identity = 'storage-probe-' + uuid4().hex
@@ -120,7 +138,8 @@ def probe(pool, other, view):
                 os.setuid(1000)
                 source = view / source_relative / 'payload'
                 link = view / media_relative / 'linked'
-                source.write_bytes(b'HomeServer storage fixture\n')
+                source.write_bytes(bytes(4096))
+                mmap_payload = probe_mmap(source)
                 os.link(source, link)
                 physical_source = pool / source_relative / 'payload'
                 physical_link = pool / media_relative / 'linked'
@@ -128,7 +147,9 @@ def probe(pool, other, view):
                 if ((first.st_dev, first.st_ino) != (second.st_dev, second.st_ino)
                         or first.st_uid != 1000 or first.st_gid != 1000
                         or first.st_nlink != 2 or (other / source_relative).exists()
-                        or (other / media_relative).exists()):
+                        or (other / media_relative).exists()
+                        or physical_source.read_bytes() != mmap_payload
+                        or link.read_bytes() != mmap_payload):
                     raise ValueError('hardlink/ownership/pool affinity probe failed')
                 renamed = link.with_name('renamed')
                 link.rename(renamed)

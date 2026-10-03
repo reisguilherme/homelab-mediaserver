@@ -3,6 +3,8 @@ from __future__ import annotations
 import errno
 import importlib.util
 import json
+import os
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -113,3 +115,96 @@ def test_startup_refuses_hdd_eio_instead_of_skipping_guard(monkeypatch, tmp_path
     monkeypatch.setattr(storage_startup, 'load_storage_registry', lambda *args: registry)
     with pytest.raises(StorageUnavailable, match='startup evidence unavailable'):
         storage_startup.verify_storage_startup(tmp_path / 'registry', tmp_path)
+
+
+def test_mmap_probe_performs_real_shared_write_flush_and_readback(tmp_path, monkeypatch):
+    module = installer()
+    path = tmp_path / 'payload'
+    path.write_bytes(bytes(4096))
+    calls = []
+    real_mmap = module.mmap.mmap
+
+    def observed_mmap(*args, **kwargs):
+        calls.append(kwargs.get('access'))
+        return real_mmap(*args, **kwargs)
+
+    monkeypatch.setattr(module.mmap, 'mmap', observed_mmap)
+    module.probe_mmap(path)
+    assert calls == [module.mmap.ACCESS_WRITE]
+    assert path.read_bytes().startswith(b'HomeServer mmap fixture\n')
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason='requires real root to UID1000 fixture')
+def test_installer_refuses_enodev_mmap_and_cleans_only_fixture(monkeypatch):
+    module = installer()
+
+    def unavailable(*args, **kwargs):
+        identity_file.write_text(str(os.geteuid()))
+        raise OSError(errno.ENODEV, 'mmap unavailable on uncached FUSE')
+
+    monkeypatch.setattr(module.mmap, 'mmap', unavailable)
+    with tempfile.TemporaryDirectory(prefix='homeserver-mmap-', dir='/tmp') as temporary:
+        root = Path(temporary)
+        root.chmod(0o755)
+        identity_file = root / 'observed-uid'
+        identity_file.touch(mode=0o600)
+        os.chown(identity_file, 1000, 1000)
+        pool, other = root / 'ssd', root / 'hdd'
+        for branch in (pool, other):
+            (branch / 'torrents/.placements').mkdir(parents=True, mode=0o755)
+            (branch / 'media').mkdir(mode=0o755)
+        with pytest.raises(ValueError, match='UID 1000.*probe failed'):
+            module.probe(pool, other, pool)
+        assert list((pool / 'torrents/.placements').iterdir()) == []
+        assert list((pool / 'media').iterdir()) == []
+        assert not (root / 'storage.json').exists()
+        assert identity_file.read_text() == '1000'
+
+
+@pytest.mark.parametrize('cache', ['off', 'auto-full'])
+def test_installer_view_requires_mmap_compatible_cache(tmp_path, monkeypatch, cache):
+    module = installer()
+    table = tmp_path / 'mountinfo'
+    device = tmp_path.stat().st_dev
+    table.write_text(f'1 0 {os.major(device)}:{os.minor(device)} / {tmp_path} rw '
+                     '- fuse.mergerfs data:external/homeserver rw\n')
+    attrs = {'branches': '/srv/data=RW:/srv/external/homeserver=RW',
+             'category.create': 'epff', 'ignorepponrename': 'true', 'moveonenospc': 'false',
+             'link_cow': 'false', 'symlinkify': 'false', 'cache.files': cache,
+             'dropcacheonclose': 'true'}
+    monkeypatch.setattr(module.os, 'getxattr',
+                        lambda path, key: attrs[key.removeprefix('user.mergerfs.')].encode())
+    branches = (Path('/srv/data'), Path('/srv/external/homeserver'))
+    if cache == 'off':
+        with pytest.raises(ValueError, match='cache.files'):
+            module.verify_view(tmp_path, branches, mountinfo=table)
+    else:
+        module.verify_view(tmp_path, branches, mountinfo=table)
+
+
+@pytest.mark.parametrize('cache', ['off', 'auto-full'])
+def test_worker_startup_refuses_cache_off(tmp_path, monkeypatch, cache):
+    from homeserver_common import storage_startup
+    from homeserver_common.storage import StorageUnavailable
+
+    registry = SimpleNamespace(pools={}, inspect=lambda *a: None,
+                               host_mountinfo=tmp_path / 'host', mountinfo=tmp_path / 'local')
+    device = tmp_path.stat().st_dev
+    host = SimpleNamespace(target=Path('/srv/media-view'), filesystem='fuse.mergerfs',
+                           root=Path('/'), device=device)
+    local = SimpleNamespace(target=tmp_path, filesystem='fuse.mergerfs',
+                            root=Path('/'), device=device)
+    monkeypatch.setattr(storage_startup, 'load_storage_registry', lambda *a: registry)
+    monkeypatch.setattr(storage_startup, '_mounts',
+                        lambda path: [host] if path == registry.host_mountinfo else [local])
+    attrs = {'branches': '/srv/data=RW:/srv/external/homeserver=RW',
+             'category.create': 'epff', 'ignorepponrename': 'true', 'moveonenospc': 'false',
+             'link_cow': 'false', 'symlinkify': 'false', 'cache.files': cache,
+             'dropcacheonclose': 'true'}
+    monkeypatch.setattr(storage_startup.os, 'getxattr',
+                        lambda path, key: attrs[key.removeprefix('user.mergerfs.')].encode())
+    if cache == 'off':
+        with pytest.raises(StorageUnavailable, match='cache.files'):
+            storage_startup.verify_storage_startup(tmp_path / 'registry', tmp_path)
+    else:
+        assert storage_startup.verify_storage_startup(tmp_path / 'registry', tmp_path)

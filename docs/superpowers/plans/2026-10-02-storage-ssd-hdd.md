@@ -93,11 +93,32 @@ Snapshot mantém campos legados do SSD e adiciona `pools`, lista de objetos com 
 
 - [x] Manter Compose básico e mídia atual funcionando; expansão opt-in exige cadastro e montagens verificadas.
 - [x] Gerar configuração técnica privada de identidade a partir de montagens explicitamente informadas; não gravar UUID real no Git.
-- [x] Preparar exemplo revisável de montagem NTFS e mergerfs sem substituir fstab nem ativar mergerfs nesta etapa.
-- [x] Prover probe de fixture pequena para UID/GID, hardlink, rename, unlink e proteção contra pool ausente.
-- [x] Documentar preparação, boot, ausência/reconexão, painel, limitações NTFS e comando Compose.
+- [x] Preparar montagem ext4 e mergerfs após autorização de formatação e montagem automática, preservando outras partições e entradas do fstab.
+- [x] Prover probe de fixture pequena para UID/GID, mmap, hardlink, rename, unlink e proteção contra pool ausente.
+- [x] Documentar preparação, boot, ausência/reconexão, painel e comando Compose.
 - [x] Rodar suíte completa, Ruff, Compose e revisão independente; ativação física somente após resolver a restrição explícita.
 
 ## Verificação inicial
 
 Base `aa99f00`: 1.247 testes passaram no WSL/Python 3.12. HD inspecionado somente leitura e desmontado ao final; nenhuma mudança em mídia ou montagens persistentes.
+
+## Validação da instalação
+
+A expansão foi ativada no servidor após as autorizações do usuário. O NTFS
+recusou escrita; somente a partição de mídia do HD foi formatada em ext4.
+As entradas existentes do fstab foram preservadas. A unidade de montagem
+gerada pelo systemd foi iniciada e sua ordem antes do Docker foi conferida.
+
+Fixtures pequenas dentro dos containers comprovaram a seleção SSD primeiro e
+HD quando a evidência isolada do teste limita o SSD a zero, sem encher discos
+ou alterar a fila real. Escrita como UID 1000, hardlinks físicos e limpeza
+das fixtures passaram nos dois pools. O painel foi conferido pelo Tailscale.
+
+A ativação revelou ENODEV no mmap do qBit com o cache de arquivos desativado
+no mergerfs 2.33.5. A montagem usa agora `cache.files=auto-full` e
+`dropcacheonclose=true`, e o instalador verifica mmap nos dois discos.
+Após a correção, os downloads existentes voltaram a transferir sem erro de
+arquivo. Sonarr e Radarr confirmaram suas bibliotecas acessíveis.
+
+Reboot físico, reprodução e uma importação Arr real no HD ainda não foram
+exercitados; a validação física de hardlinks usa arquivos isolados de teste.

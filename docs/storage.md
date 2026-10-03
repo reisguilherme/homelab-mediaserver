@@ -65,7 +65,7 @@ Para mergerfs 2.33.5, fornecido pelo Ubuntu 24.04:
 
 ```bash
 sudo mergerfs /srv/data:/srv/external/homeserver /srv/media-view \
-  -o category.create=epff,ignorepponrename=true,inodecalc=hybrid-hash,moveonenospc=false,link_cow=false,symlinkify=false,minfreespace=0,allow_other,use_ino,nodev,nosuid
+  -o category.create=epff,ignorepponrename=true,inodecalc=hybrid-hash,moveonenospc=false,link_cow=false,symlinkify=false,cache.files=auto-full,dropcacheonclose=true,minfreespace=0,allow_other,use_ino,nodev,nosuid
 findmnt /srv/media-view
 ```
 
@@ -76,6 +76,14 @@ confira as opções suportadas e refaça a fixture; não copie uma capacidade an
 disco. A instalação verifica os branches pelo xattr `user.mergerfs.branches`
 em `/srv/media-view/.mergerfs`, pois o campo source de mountinfo pode abreviar
 os nomes. Nunca monte os pools físicos sobre subpaths de `/data` no Arr.
+
+`cache.files=auto-full` permite o `mmap` compartilhado usado pelo libtorrent2
+do qBit. No mergerfs 2.33.5, `cache.files=off` impede esse acesso e pode produzir
+ENODEV (`No such device`), mesmo quando uma escrita comum e hardlinks funcionam.
+`dropcacheonclose=true` reduz cache duplicado ao fechar os arquivos. Ambas as
+opções existem no [manual oficial da versão 2.33.5](https://github.com/trapexit/mergerfs/blob/2.33.5/README.md#page-caching).
+O instalador e o startup exigem essas opções; a fixture testa escrita, flush e
+leitura via `mmap` pelo mesmo caminho lógico, como UID 1000.
 
 ## Verificar e ativar
 
@@ -90,7 +98,8 @@ sudo python3 scripts/prepare-storage.py \
 
 O script recusa mounts ausentes, RO, UUID errado, symlinks e uma visão que não
 seja mergerfs. Uma pequena fixture roda como UID/GID 1000 em cada disco, escreve
-pelo mesmo path lógico dos serviços, cria hardlink, renomeia e remove os próprios
+pelo mesmo path lógico dos serviços, testa `mmap` compartilhado com flush/readback,
+confere os bytes no pool físico, cria hardlink, renomeia e remove os próprios
 arquivos. Compara dispositivo/inode físicos, propriedade e ausência de contraparte;
 também tenta criar um destino não autorizado sob os pais protegidos. Somente
 um resultado completo grava capacidades positivas. Os diretórios temporários
@@ -141,7 +150,7 @@ Este é um exemplo para adaptar, não um comando do instalador:
 ```fstab
 # Preserve a entrada existente do SSD, que é obrigatório antes da união.
 UUID=UUID_DO_HD /srv/external ext4 defaults,nofail,x-systemd.device-timeout=10s 0 2
-/srv/data:/srv/external/homeserver /srv/media-view fuse.mergerfs defaults,category.create=epff,ignorepponrename=true,inodecalc=hybrid-hash,moveonenospc=false,link_cow=false,symlinkify=false,minfreespace=0,allow_other,use_ino,nodev,nosuid,x-systemd.requires-mounts-for=/srv/data,x-systemd.after=srv-external.mount,x-systemd.before=docker.service 0 0
+/srv/data:/srv/external/homeserver /srv/media-view fuse.mergerfs defaults,category.create=epff,ignorepponrename=true,inodecalc=hybrid-hash,moveonenospc=false,link_cow=false,symlinkify=false,cache.files=auto-full,dropcacheonclose=true,minfreespace=0,allow_other,use_ino,nodev,nosuid,x-systemd.requires-mounts-for=/srv/data,x-systemd.after=srv-external.mount,x-systemd.before=docker.service 0 0
 ```
 
 A união depende do SSD real e espera a tentativa de montagem do USB, com timeout

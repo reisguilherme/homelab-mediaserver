@@ -35,7 +35,8 @@ def verify_storage_startup(registry_path: Path, logical_root: Path) -> bool:
             raise StorageUnavailable('mergerfs branches differ from registered layout')
         for key, value in {'category.create': 'epff', 'ignorepponrename': 'true',
                            'moveonenospc': 'false', 'link_cow': 'false',
-                           'symlinkify': 'false'}.items():
+                           'symlinkify': 'false', 'cache.files': 'auto-full',
+                           'dropcacheonclose': 'true'}.items():
             if os.getxattr(control, 'user.mergerfs.' + key).decode() != value:
                 raise StorageUnavailable('unsafe mergerfs option: ' + key)
         return True
