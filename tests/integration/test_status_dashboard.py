@@ -6,6 +6,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -315,3 +316,61 @@ def test_status_pool_queue_requires_fresh_matching_identity(tmp_path):
     queue["measured_at"] = now - 90
     queue_path.write_text(json.dumps(queue))
     assert provider()["pools"][0]["queue_remaining_bytes"] is None
+
+
+def _queue_pool_status(tmp_path, *, queue_age=1, capacity_age=1, free=60_000,
+                       pending=20_000, available=40_000, queue_uuid='uuid-ssd'):
+    from homeserver_telemetry.status import StatusProvider
+
+    now = time.time()
+    host, capacity = _write_snapshots(tmp_path, generated_at=datetime.now(UTC))
+    capacity.write_text(json.dumps({'pools': [dict(
+        pool_id='ssd', filesystem_id='uuid-ssd', state='ready', measured_at=now - capacity_age,
+        total_bytes=100_000, used_bytes=30_000, free_bytes=free,
+    )]}))
+    (tmp_path / 'storage-queue.json').write_text(json.dumps({
+        'measured_at': now - queue_age, 'pools': [dict(
+            pool_id='ssd', filesystem_id=queue_uuid,
+            pending_bytes=pending, available_bytes=available,
+        )],
+    }))
+    provider = StatusProvider(host_path=host, capacity_path=capacity, media_root=tmp_path)
+    return provider()['pools'][0]
+
+
+@pytest.mark.parametrize('queue_age,capacity_age', [(1, 2), (2, 1)])
+@pytest.mark.parametrize('free,available,expected', [
+    (59_900, 40_000, 39_900),  # Capacity changed after queue calculation.
+    (60_000, 39_900, 39_900),  # The queue calculation is already more conservative.
+])
+def test_pool_queue_preserves_pending_across_independently_sampled_free_space(
+    tmp_path, queue_age, capacity_age, free, available, expected,
+):
+    status = _queue_pool_status(tmp_path, queue_age=queue_age, capacity_age=capacity_age,
+                                free=free, available=available)
+    assert status['state'] == 'ready'
+    assert status['queue_remaining_bytes'] == 20_000
+    assert status['admissible_bytes'] == expected
+
+
+@pytest.mark.parametrize('overrides', [
+    {'available': 100_001},
+    {'available': 90_000},  # Pending + available cannot exceed the physical total.
+    {'available': -1},
+    {'pending': -1},
+    {'available': 40_000.0},
+    {'pending': True},
+    {'queue_age': 90},
+    {'capacity_age': 90},
+    {'queue_uuid': 'different-disk'},
+])
+def test_pool_queue_reconciliation_rejects_invalid_or_stale_evidence(tmp_path, overrides):
+    status = _queue_pool_status(tmp_path, **overrides)
+    assert status['queue_remaining_bytes'] is None
+    assert status['admissible_bytes'] is None
+
+
+def test_pool_queue_keeps_overcommitted_pending_with_zero_available(tmp_path):
+    status = _queue_pool_status(tmp_path, pending=120_000, available=0)
+    assert status['queue_remaining_bytes'] == 120_000
+    assert status['admissible_bytes'] == 0

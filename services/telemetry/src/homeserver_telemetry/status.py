@@ -308,9 +308,12 @@ class StatusProvider:
                 if (
                     type(candidate_pending) is int
                     and type(candidate_available) is int
-                    and candidate_available <= max(0, free - candidate_pending)
+                    and candidate_available <= max(0, total - candidate_pending)
                 ):
-                    pending, available = candidate_pending, candidate_available
+                    pending = candidate_pending
+                    # These fresh snapshots are sampled independently while writes continue.
+                    # Keep the queue and display the more conservative available-space bound.
+                    available = min(candidate_available, max(0, free - pending))
             result.append(
                 {
                     "pool_id": pool_id,

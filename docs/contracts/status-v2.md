@@ -49,7 +49,12 @@ controlador. Seu DTO é:
 
 O status combina esse DTO somente quando o pool físico está `ready`, a identidade
 é a mesma, a amostra está dentro de `capacity_max_age_seconds`, os valores são
-inteiros não negativos e `available_bytes <= max(0, free_bytes - pending_bytes)`.
+inteiros não negativos e `available_bytes <= max(0, total_bytes - pending_bytes)`.
+Como as amostras de fila e espaço são independentes, o valor exibido de
+disponibilidade é `min(available_bytes, max(0, free_bytes - pending_bytes))`.
+Assim, uma gravação entre coletas não apaga uma fila válida nem aumenta o espaço
+apresentado. O controlador atualiza a fila em tarefa independente a cada cinco
+segundos; uma falha de leitura não renova o timestamp anterior.
 Sem prova válida ambos os campos de fila ficam nulos. `pending_bytes` inclui
 compromissos restantes, inclusive fila pausada e permissões pendentes; o painel
 apenas apresenta a contabilização do controlador, sem estimar ou admitir pedidos.
