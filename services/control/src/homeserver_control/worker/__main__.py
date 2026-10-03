@@ -44,6 +44,7 @@ from .subtitle_language import SubtitlePolicy
 from .tracker_availability import TrackerAvailabilityProbe
 
 LOGGER = logging.getLogger(__name__)
+_STORAGE_QUEUE_REFRESH_SECONDS = 5
 
 
 def _publish_storage_queue(path: Path, evidence, permits: PermitRegistry) -> None:
@@ -414,7 +415,20 @@ async def _run_forever(
             write_heartbeat()
             await asyncio.sleep(min(interval, 5))
 
+    capacity_refresh = getattr(cycle, 'capacity_refresh', None)
+
+    async def observe_storage():
+        # Read-only collection continues during maintenance/recovery; it never admits
+        # downloads. A failed read leaves the last snapshot and timestamp unchanged.
+        while should_run():
+            try:
+                await capacity_refresh()
+            except Exception as error:
+                LOGGER.warning('storage queue snapshot unavailable (%s)', type(error).__name__)
+            await asyncio.sleep(_STORAGE_QUEUE_REFRESH_SECONDS)
+
     pulse_task = asyncio.create_task(pulse()) if heartbeat is not None else None
+    storage_task = asyncio.create_task(observe_storage()) if capacity_refresh is not None else None
     try:
         while should_run():
             blocked = recovery_mode_blocks(recovery_mode_path) or (
@@ -444,10 +458,12 @@ async def _run_forever(
             if should_run():
                 await asyncio.sleep(interval)
     finally:
-        if pulse_task is not None:
-            pulse_task.cancel()
+        tasks = [task for task in (pulse_task, storage_task) if task is not None]
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
             try:
-                await pulse_task
+                await task
             except asyncio.CancelledError:
                 pass
         if cycle is not None and isinstance(cycle.source, SeerrAdapter):

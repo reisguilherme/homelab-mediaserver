@@ -172,7 +172,9 @@ testes locais não demonstram reboot, Tailscale, hardware ou reprodução.
 ## Ausência e reconexão do HD
 
 O painel apresenta SSD e HD USB separadamente, com usado/livre, fila/disponível
-e estado. Ausência ou evidência vencida produz números indisponíveis. CPU e rede
+e estado. A fila é consultada em uma tarefa independente a cada cinco segundos,
+mesmo durante buscas demoradas; falhas mantêm o timestamp anterior. Ausência ou
+evidência vencida produz números indisponíveis. CPU e rede
 continuam sendo coletadas. Downloads existentes no USB não são transferidos para
 o SSD; exclusões explícitas ficam pendentes enquanto sua identidade física não
 puder ser confirmada. Marcar como assistido não remove mídia.

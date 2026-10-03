@@ -123,3 +123,118 @@ async def test_blocked_worker_has_no_busy_lease_or_admission(tmp_path, marker):
     )
     assert store.snapshot()["cycle_deadline_at"] is None
     assert not store.ready(now=time.time(), max_age=90)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['busy', 'maintenance', 'recovery'])
+async def test_storage_queue_refreshes_independently_of_busy_or_blocked_cycle(
+    tmp_path, monkeypatch, mode,
+):
+    import json
+    from types import SimpleNamespace
+
+    from homeserver_control.worker.capacity_evidence import CapacityEvidence, PoolCapacityEvidence
+
+    monkeypatch.setattr(worker, '_STORAGE_QUEUE_REFRESH_SECONDS', 0.01, raising=False)
+    path = tmp_path / 'storage-queue.json'
+    marker = tmp_path / mode
+    if mode != 'busy':
+        marker.write_text('admission_enabled=false\n')
+    second_refresh = asyncio.Event()
+    release_cycle = asyncio.Event()
+    running = True
+    publications = []
+
+    class Cycle:
+        source = object()
+
+        async def run_once(self):
+            assert mode == 'busy', 'maintenance/recovery must not dispatch admission'
+            await release_cycle.wait()
+
+        async def capacity_refresh(self):
+            evidence = CapacityEvidence(100, {}, pools=(
+                PoolCapacityEvidence('ssd', 'fixture-uuid', 100),
+            ))
+            worker._publish_storage_queue(
+                path, evidence, SimpleNamespace(pending_bytes=lambda *args, **kwargs: 10),
+            )
+            publications.append(json.loads(path.read_text()))
+            if len(publications) >= 2:
+                second_refresh.set()
+
+    task = asyncio.create_task(worker._run_forever(
+        Cycle(), should_run=lambda: running, interval=0.01,
+        maintenance_path=marker if mode == 'maintenance' else None,
+        recovery_mode_path=marker if mode == 'recovery' else None,
+    ))
+    try:
+        await asyncio.wait_for(second_refresh.wait(), timeout=1)
+        assert not task.done()
+        assert len(publications) >= 2
+        assert publications[-1]['measured_at'] > publications[0]['measured_at']
+        assert publications[-1]['pools'][0]['available_bytes'] == 90
+    finally:
+        running = False
+        release_cycle.set()
+        await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_failed_storage_refresh_keeps_last_evidence_and_shutdown_cancels_inflight(
+    tmp_path, monkeypatch, caplog,
+):
+    from types import SimpleNamespace
+
+    from homeserver_control.worker.capacity_evidence import CapacityEvidence, PoolCapacityEvidence
+
+    monkeypatch.setattr(worker, '_STORAGE_QUEUE_REFRESH_SECONDS', 0.01, raising=False)
+    path = tmp_path / 'storage-queue.json'
+    release_cycle = asyncio.Event()
+    refresh_inflight = asyncio.Event()
+    refresh_cancelled = asyncio.Event()
+    running = True
+    first_publication = None
+    calls = 0
+
+    class Cycle:
+        source = object()
+
+        async def run_once(self):
+            await release_cycle.wait()
+
+        async def capacity_refresh(self):
+            nonlocal first_publication, calls
+            calls += 1
+            if calls == 1:
+                evidence = CapacityEvidence(100, {}, pools=(
+                    PoolCapacityEvidence('ssd', 'fixture-uuid', 100),
+                ))
+                worker._publish_storage_queue(
+                    path, evidence, SimpleNamespace(pending_bytes=lambda *args, **kwargs: 10),
+                )
+                first_publication = path.read_bytes()
+                return
+            if calls == 2:
+                raise RuntimeError('private upstream credentials must not appear in logs')
+            refresh_inflight.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                refresh_cancelled.set()
+
+    task = asyncio.create_task(worker._run_forever(
+        Cycle(), should_run=lambda: running, interval=0.01,
+    ))
+    try:
+        await asyncio.wait_for(refresh_inflight.wait(), timeout=1)
+        assert calls == 3
+        assert path.read_bytes() == first_publication
+        assert 'RuntimeError' in caplog.text
+        assert 'private upstream credentials' not in caplog.text
+    finally:
+        running = False
+        release_cycle.set()
+        await asyncio.wait_for(task, timeout=1)
+    assert refresh_cancelled.is_set()
+    assert path.read_bytes() == first_publication
