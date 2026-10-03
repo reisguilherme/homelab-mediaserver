@@ -317,6 +317,53 @@ def test_confirmed_pack_lists_only_episode_views_not_completed_children(tmp_path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("content_exists", [False, True])
+@pytest.mark.parametrize("file_state", ["new", "partial", "complete"])
+async def test_pack_waits_for_selected_files_before_resolving_content_path(
+    tmp_path, content_exists, file_state,
+):
+    paths = ("pack/Series.S02E01.mkv", "pack/Series.S02E01.pt-BR.srt")
+    repo, permits, parent = _registry(tmp_path, selected_files=paths)
+    permits.bind_season_pack(parent.token, episode_files={"S02E01": paths})
+    permits.authorize(
+        token=parent.token, infohash=parent.infohash, destination=parent.destination,
+        metadata_sha256=parent.metadata_sha256, effect=lambda _: {"accepted": True},
+    )
+    episode = permits.get_for_reservation(parent.reservation_id, scope_key="S02E01")
+    root = tmp_path / "torrents"
+    root.mkdir()
+    if content_exists:
+        (root / "pack").mkdir()
+
+    def handler(request):
+        if request.url.path == "/api/v2/torrents/info":
+            return httpx.Response(200, json=[{
+                "hash": parent.infohash, "progress": 0.5, "amount_left": 100,
+                "content_path": "/data/torrents/pack",
+            }])
+        if request.url.path == "/api/v2/torrents/files":
+            return httpx.Response(200, json=[] if file_state == "new" else [
+                {"name": path, "size": 5,
+                 "progress": 1 if index == 0 or file_state == "complete" else 0.5}
+                for index, path in enumerate(paths)
+            ])
+        raise AssertionError(f"Unexpected {request.method} {request.url}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        finalizer = SeriesFinalizer(
+            repository=repo, permits=permits, torrent_root=root, media_root=tmp_path / "media",
+            gateway_url="http://gateway:8081", arr_token="secret", sonarr_url="http://sonarr:8989",
+            sonarr_api_key="secret", client=client,
+        )
+        if file_state == "complete":
+            # A completed episode with missing content remains an integrity error.
+            with pytest.raises(FileNotFoundError):
+                await finalizer._validate_download(episode, season=2, number=1)
+        else:
+            assert await finalizer._validate_download(episode, season=2, number=1) is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("pack_progress", [1, 0.5])
 @pytest.mark.parametrize("subtitle_first", [False, True])
 async def test_pack_imports_exact_episode_file_then_waits_for_native_confirmation(

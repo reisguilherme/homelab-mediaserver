@@ -219,7 +219,6 @@ class SeriesFinalizer(MovieFinalizer):
         content_path = torrent.get("content_path")
         if not isinstance(content_path, str):
             raise ValidationError("torrent content path is missing")
-        content = self._content_path(permit, content_path)
         response = await self.client.get(
             f"{self.gateway_url}/api/v2/torrents/files",
             params={"hash": permit.infohash},
@@ -236,6 +235,7 @@ class SeriesFinalizer(MovieFinalizer):
             }
             if not set(permit.selected_files).issubset(completed):
                 return None
+        content = self._content_path(permit, content_path)
         sizes = {
             item["name"]: item["size"]
             for item in files
