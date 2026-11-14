@@ -83,7 +83,10 @@ desconhecidos. `.env.example` contém somente comentários opcionais.
 - [x] Conferir métricas consumidas pelo dashboard contra o exporter; não entregar painel com queries inexistentes.
 - [x] Revisar a estratégia de publicação dos dois snapshots: tarefa separada antes do deploy, sem montar diretório inteiro de controle nem depender de leitura da mídia.
 - [x] Rodar testes, lint/compilação e checks de Compose disponíveis; registrar ausência de runtime quando aplicável.
-- [ ] Commit/push na `refactor` com revisão de segredos e sem merge/deploy.
+- [x] Commit/push na `refactor` com revisão de segredos e sem merge/deploy.
+
+Preparação e alterações anteriores autorizadas publicadas em `e7aca0d` na branch
+`refactor`. A publicação de código não iniciou a stack nem o corte do servidor.
 
 Revisão independente corrigiu symlink ancestral, build da imagem do produtor e
 precedência do nome do projeto. Fixture Linux com root confirmou produtor UID1000,
