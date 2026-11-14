@@ -62,9 +62,11 @@ class SourceHealthStore:
         probe_seconds: int = 60,
         min_eta_gain: float = 0.2,
         slow_replacement_enabled: bool = True,
+        automatic_replacement_enabled: bool = False,
     ) -> None:
         if (
-            not isinstance(slow_replacement_enabled, bool)
+            not isinstance(automatic_replacement_enabled, bool)
+            or not isinstance(slow_replacement_enabled, bool)
             or
             any(
                 isinstance(value, bool)
@@ -89,6 +91,7 @@ class SourceHealthStore:
         self.probe_seconds = probe_seconds
         self.min_eta_gain = min_eta_gain
         self.slow_replacement_enabled = slow_replacement_enabled
+        self.automatic_replacement_enabled = automatic_replacement_enabled
         self.db_path = str(db_path)
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
@@ -148,6 +151,8 @@ class SourceHealthStore:
         """
         if not parent_id or not candidate_id or not math.isfinite(now) or now < 0:
             raise ValueError("invalid probe observation")
+        if not self.automatic_replacement_enabled:
+            return "reject"
         if old.amount_left <= 0 or old.progress >= 1 or self.is_protected(old.infohash):
             return "reject"
         if not self.slow_replacement_enabled and (old.num_seeds > 0 or old.dlspeed > 0):
@@ -273,7 +278,7 @@ class SourceHealthStore:
                     or health.amount_left == row["last_amount_left"]
                 )
             ):
-                return "replacing"
+                return "replacing" if self.automatic_replacement_enabled else None
             if health.state not in _ACTIVE_DOWNLOAD_STATES:
                 connection.execute("DELETE FROM source_health WHERE permit_id = ?", (permit_id,))
                 return None
@@ -321,6 +326,8 @@ class SourceHealthStore:
             """,
                 (health.amount_left, last_progress_at, window_started_at, window_left, permit_id),
             )
+            if not self.automatic_replacement_enabled:
+                return None
             if (
                 health.num_seeds == 0
                 and health.dlspeed == 0

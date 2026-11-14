@@ -27,6 +27,17 @@ def test_optional_jellyfin_deletion_preserves_unset_and_rejects_non_boolean(tmp_
         load_settings(path)
 
 
+def test_jellyfin_auto_collections_default_enabled_and_editable(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text("")
+    assert load_settings(path).jellyfin_auto_collections is True
+    path.write_text("HOMESERVER_JELLYFIN_AUTO_COLLECTIONS=false\n")
+    assert load_settings(path).jellyfin_auto_collections is False
+    path.write_text("HOMESERVER_JELLYFIN_AUTO_COLLECTIONS=maybe\n")
+    with pytest.raises(ValueError, match="HOMESERVER_JELLYFIN_AUTO_COLLECTIONS"):
+        load_settings(path)
+
+
 def test_invalid_and_unknown_keys(tmp_path):
     path = tmp_path / ".env"
     for key, value in [("DOWNLOAD_MAX_ACTIVE", "zero"), ("TYPO", "secret")]:
@@ -128,6 +139,9 @@ def test_download_preferences_default_to_ten_downloads_and_unlimited_seeding(tmp
     assert settings.release_indexer_priority == ("uindex", "1337x")
     assert settings.indexer_fallback_min_seeders == 5
     assert settings.movie_indexer_fallback_min_seeders == 20
+    assert settings.download_default_profile == "Standard"
+    assert settings.release_min_seeders == 5
+    assert settings.dubbed_audio_preferences == ("dual", "original")
     assert settings.movie_resolutions == ("2160", "1080")
     assert settings.series_resolutions == ("1080",)
 

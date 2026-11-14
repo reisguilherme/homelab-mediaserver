@@ -110,7 +110,7 @@ def test_startup_refuses_hdd_eio_instead_of_skipping_guard(monkeypatch, tmp_path
         if pool == 'hdd':
             raise OSError(errno.EIO, 'stale USB bind')
 
-    registry = SimpleNamespace(pools={'ssd': 'ssd', 'hdd': 'hdd'},
+    registry = SimpleNamespace(primary_pool_id='ssd', pools={'ssd': 'ssd', 'hdd': 'hdd'},
                                inspect=lambda *args: None, _guard_parent=guard)
     monkeypatch.setattr(storage_startup, 'load_storage_registry', lambda *args: registry)
     with pytest.raises(StorageUnavailable, match='startup evidence unavailable'):
@@ -187,7 +187,10 @@ def test_worker_startup_refuses_cache_off(tmp_path, monkeypatch, cache):
     from homeserver_common import storage_startup
     from homeserver_common.storage import StorageUnavailable
 
-    registry = SimpleNamespace(pools={}, inspect=lambda *a: None,
+    pools = {name: SimpleNamespace(host_root=Path(root)) for name, root in
+             (('ssd', '/srv/data'), ('hdd', '/srv/external/homeserver'))}
+    registry = SimpleNamespace(primary_pool_id='ssd', pools=pools, inspect=lambda *a: None,
+                               _guard_parent=lambda _: None,
                                host_mountinfo=tmp_path / 'host', mountinfo=tmp_path / 'local')
     device = tmp_path.stat().st_dev
     host = SimpleNamespace(target=Path('/srv/media-view'), filesystem='fuse.mergerfs',

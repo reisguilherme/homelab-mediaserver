@@ -1,9 +1,18 @@
-from urllib.parse import urlsplit
-
 import httpx
+
+from homeserver_common.jellyfin_auth import jellyfin_headers
+from homeserver_common.seerr_csrf import SeerrClient
 
 from .arr import collection
 from .native_config import NativeConfigurationError, ServiceOutcome, environment, plan_settings
+
+
+def jellyfin_admin_password(env: dict[str, str]) -> str:
+    return env.get('HOMESERVER_JELLYFIN_ADMIN_PASSWORD') or env.get('HOMESERVER_ADMIN_PASSWORD', '')
+
+
+def seerr_jellyfin_connection():
+    return {'ip': 'integration-proxy', 'port': 8787, 'urlBase': '/jellyfin', 'useSsl': False}
 
 
 async def bootstrap_jellyfin(settings, client, mode):
@@ -19,12 +28,12 @@ async def bootstrap_jellyfin(settings, client, mode):
             {},
             {
                 "startup.account": env.get("HOMESERVER_ADMIN_USERNAME", "admin"),
-                "password": env.get("HOMESERVER_ADMIN_PASSWORD", ""),
+                "password": jellyfin_admin_password(env),
             },
         )
         if mode != "apply":
             return ServiceOutcome("jellyfin", "planned" if mode == "plan" else "drift", changes)
-        if not env.get("HOMESERVER_ADMIN_PASSWORD"):
+        if not jellyfin_admin_password(env):
             raise NativeConfigurationError("Jellyfin startup requires explicit admin password")
         # Upstream GET initializes the first native user before POST updates it.
         response = await client.get("/Startup/User")
@@ -33,7 +42,7 @@ async def bootstrap_jellyfin(settings, client, mode):
             "/Startup/User",
             json={
                 "Name": env.get("HOMESERVER_ADMIN_USERNAME", "admin"),
-                "Password": env["HOMESERVER_ADMIN_PASSWORD"],
+                "Password": jellyfin_admin_password(env),
             },
         )
         # 403 means password already set after interrupted startup; do not reset it.
@@ -41,7 +50,7 @@ async def bootstrap_jellyfin(settings, client, mode):
             response.raise_for_status()
         # Authenticate before completing, so conflicting credentials cannot seal setup.
     token_valid = False
-    if completed and client.headers.get("X-Emby-Token"):
+    if completed and client.headers.get("Authorization"):
         response = await client.get("/System/Info")
         if response.status_code not in (401, 403):
             response.raise_for_status()
@@ -57,14 +66,14 @@ async def bootstrap_jellyfin(settings, client, mode):
             },
             json={
                 "Username": env.get("HOMESERVER_ADMIN_USERNAME", "admin"),
-                "Pw": env.get("HOMESERVER_ADMIN_PASSWORD", ""),
+                "Pw": jellyfin_admin_password(env),
             },
         )
         response.raise_for_status()
         token = response.json().get("AccessToken")
         if not token:
             raise NativeConfigurationError("Jellyfin authentication token missing")
-        client.headers["X-Emby-Token"] = token
+        client.headers.update(jellyfin_headers(token))
     if not completed:
         try:
             response = await client.post("/Startup/Complete")
@@ -79,6 +88,7 @@ async def bootstrap_jellyfin(settings, client, mode):
 
 
 async def bootstrap_seerr(settings, client, mode):
+    client = SeerrClient(client)
     env = environment(settings)
     response = await client.get("/api/v1/settings/public")
     response.raise_for_status()
@@ -100,33 +110,31 @@ async def bootstrap_seerr(settings, client, mode):
         {},
         {
             "startup.account": env.get("HOMESERVER_ADMIN_USERNAME", "admin"),
-            "password": env.get("HOMESERVER_ADMIN_PASSWORD", ""),
+            "password": jellyfin_admin_password(env),
         },
     )
     if mode != "apply":
         return ServiceOutcome("seerr", "planned" if mode == "plan" else "drift", changes)
-    if not env.get("HOMESERVER_ADMIN_PASSWORD"):
+    if not jellyfin_admin_password(env):
         raise NativeConfigurationError(
             "Seerr initialization requires explicit Jellyfin admin credentials"
         )
     credentials = {
         "username": env.get("HOMESERVER_ADMIN_USERNAME", "admin"),
-        "password": env["HOMESERVER_ADMIN_PASSWORD"],
+        "password": jellyfin_admin_password(env),
         "serverType": 2,
     }
     response = await client.post("/api/v1/auth/jellyfin", json=credentials)
     if response.status_code == 500:
         # Fresh Seerr needs connection fields; interrupted setup already has them
         # and rejects a hostname on login. Try existing configuration first.
-        parts = urlsplit(env.get("HOMESERVER_JELLYFIN_URL", "http://jellyfin:8096"))
+        connection = seerr_jellyfin_connection()
         response = await client.post(
             "/api/v1/auth/jellyfin",
             json=credentials
             | {
-                "hostname": parts.hostname,
-                "port": parts.port or (443 if parts.scheme == "https" else 80),
-                "urlBase": parts.path,
-                "useSsl": parts.scheme == "https",
+                'hostname': connection['ip'],
+                **{key: value for key, value in connection.items() if key != 'ip'},
             },
         )
     response.raise_for_status()
@@ -167,20 +175,19 @@ async def reconcile_media_server(service, settings, client, mode, *, transport=N
             observed.raise_for_status()
             if plan_settings("jellyfin", observed.json(), desired_encoding):
                 raise NativeConfigurationError("Jellyfin encoding read-back drift")
-    created_account = False
     if not any(user["Name"] == username for user in users.json()):
         changes += plan_settings(
             "jellyfin",
             {},
-            {"account": username, "password": env.get("HOMESERVER_ADMIN_PASSWORD", "")},
+            {"account": username, "password": jellyfin_admin_password(env)},
         )
         if mode == "apply":
-            if not env.get("HOMESERVER_ADMIN_PASSWORD"):
+            if not jellyfin_admin_password(env):
                 raise NativeConfigurationError("New Jellyfin account requires password")
             try:
                 response = await client.post(
                     "/Users/New",
-                    json={"Name": username, "Password": env["HOMESERVER_ADMIN_PASSWORD"]},
+                    json={"Name": username, "Password": jellyfin_admin_password(env)},
                 )
                 response.raise_for_status()
             except httpx.TransportError:
@@ -189,29 +196,36 @@ async def reconcile_media_server(service, settings, client, mode, *, transport=N
             users.raise_for_status()
             if not any(user["Name"] == username for user in users.json()):
                 raise NativeConfigurationError("Jellyfin user read-back drift")
-            created_account = True
     matches = [user for user in users.json() if user["Name"] == username]
     if len(matches) > 1:
         raise NativeConfigurationError("Ambiguous Jellyfin user identity")
     deletion = env.get("HOMESERVER_JELLYFIN_ENABLE_MEDIA_DELETION", "")
-    if matches and (deletion or created_account):
+    if matches:
         user = matches[0]
         policy = user.get("Policy")
         if not isinstance(policy, dict):
             return ServiceOutcome(
                 "jellyfin", "unsupported", changes, "Native user policy capability unavailable"
             )
-        desired_policy = {}
+        desired_policy = {
+            "IsAdministrator": True,
+            "EnableCollectionManagement": True,
+            "EnableSubtitleManagement": True,
+        }
         if deletion:
             desired_policy["EnableContentDeletion"] = deletion == "true"
-        if created_account:
-            desired_policy["IsAdministrator"] = True
         policy_changes = plan_settings("jellyfin", policy, desired_policy)
         changes += policy_changes
         if policy_changes and mode == "apply":
+            payload = policy | desired_policy
+            # The pinned Jellyfin 10.10.7 writes this permission but omits it
+            # from GetUserDto, which always reports false. Grant it alongside
+            # owner changes, without treating that broken read-back as drift.
+            if "EnableLyricManagement" in policy:
+                payload["EnableLyricManagement"] = True
             try:
                 response = await client.post(
-                    f"/Users/{user['Id']}/Policy", json=policy | desired_policy
+                    f"/Users/{user['Id']}/Policy", json=payload
                 )
                 response.raise_for_status()
             except httpx.TransportError:
@@ -230,7 +244,12 @@ async def reconcile_media_server(service, settings, client, mode, *, transport=N
         response = await client.get("/Library/VirtualFolders")
         response.raise_for_status()
         libraries = response.json()
-        if any(path in library.get("Locations", []) for library in libraries):
+        matches = [library for library in libraries if path in library.get("Locations", [])]
+        if matches:
+            if len(matches) != 1:
+                raise NativeConfigurationError("Ambiguous Jellyfin library identity")
+            if kind == "movies" and matches[0].get("CollectionType") == "movies":
+                changes += await reconcile_jellyfin_collections(env, client, matches[0], mode)
             continue
         if any(library.get("Name") == name for library in libraries):
             return ServiceOutcome(
@@ -250,7 +269,11 @@ async def reconcile_media_server(service, settings, client, mode, *, transport=N
                         "LibraryOptions": {
                             "PathInfos": [{"Path": path}],
                             "EnableRealtimeMonitor": True,
-                        }
+                        } | ({
+                            "AutomaticallyAddToCollection": env.get(
+                                "HOMESERVER_JELLYFIN_AUTO_COLLECTIONS", "true"
+                            ) == "true",
+                        } if kind == "movies" else {})
                     },
                 )
                 response.raise_for_status()
@@ -271,21 +294,83 @@ async def reconcile_media_server(service, settings, client, mode, *, transport=N
     )
 
 
+async def reconcile_jellyfin_collections(env, client, library, mode):
+    library_id = library.get("ItemId")
+    options = library.get("LibraryOptions")
+    if not library_id or not isinstance(options, dict):
+        raise NativeConfigurationError("Jellyfin library options capability unavailable")
+    desired = env.get("HOMESERVER_JELLYFIN_AUTO_COLLECTIONS", "true") == "true"
+    key = f"library.{library_id}.AutomaticallyAddToCollection"
+    changes = plan_settings(
+        "jellyfin", {key: options.get("AutomaticallyAddToCollection")}, {key: desired}
+    )
+    if changes and mode == "apply":
+        try:
+            response = await client.post(
+                "/Library/VirtualFolders/LibraryOptions",
+                json={
+                    "Id": library_id,
+                    "LibraryOptions": options | {"AutomaticallyAddToCollection": desired},
+                },
+            )
+            response.raise_for_status()
+        except httpx.TransportError:
+            pass
+        response = await client.get("/Library/VirtualFolders")
+        response.raise_for_status()
+        observed = [row for row in response.json() if row.get("ItemId") == library_id]
+        if len(observed) != 1 or observed[0].get("LibraryOptions", {}).get(
+            "AutomaticallyAddToCollection"
+        ) is not desired:
+            raise NativeConfigurationError("Jellyfin collections read-back drift")
+    return changes
+
+
+async def reconcile_seerr_security(env, client, mode):
+    origin = env.get('HOMESERVER_PUBLIC_SEERR_ORIGIN')
+    if not origin:
+        return []
+    parsed = httpx.URL(origin)
+    if parsed.scheme != 'https' or not parsed.host or parsed.username or parsed.password:
+        raise NativeConfigurationError('Public Seerr requires an HTTPS origin')
+    changes = []
+    for category, desired in [
+        ('main', {'newPlexLogin': False}),
+        ('network', {'csrfProtection': True, 'trustProxy': True}),
+    ]:
+        endpoint = f'/api/v1/settings/{category}'
+        response = await client.get(endpoint)
+        response.raise_for_status()
+        actual = response.json()
+        if not isinstance(actual, dict) or not desired.keys() <= actual.keys():
+            raise NativeConfigurationError('Native Seerr security settings unavailable')
+        planned = plan_settings('seerr', actual, desired)
+        changes += planned
+        if planned and mode == 'apply':
+            try:
+                response = await client.post(endpoint, json=desired)
+                response.raise_for_status()
+            except httpx.TransportError:
+                pass
+            observed = await client.get(endpoint)
+            observed.raise_for_status()
+            if plan_settings('seerr', observed.json(), desired):
+                raise NativeConfigurationError('Native Seerr security settings read-back drift')
+    return changes
+
+
 async def reconcile_seerr(settings, client, mode, *, transport=None):
+    client = SeerrClient(client)
     env = environment(settings)
+    changes = await reconcile_seerr_security(env, client, mode)
     endpoint = "/api/v1/settings/jellyfin"
     response = await client.get(endpoint)
     response.raise_for_status()
     actual = response.json()
-    parts = urlsplit(env.get("HOMESERVER_JELLYFIN_URL", "http://jellyfin:8096"))
-    desired = {
-        "ip": parts.hostname,
-        "port": parts.port or (443 if parts.scheme == "https" else 80),
-        "urlBase": parts.path,
-        "useSsl": parts.scheme == "https",
-    }
-    changes = plan_settings("seerr", actual, desired)
-    if changes and mode == "apply":
+    desired = seerr_jellyfin_connection()
+    connection_changes = plan_settings("seerr", actual, desired)
+    changes += connection_changes
+    if connection_changes and mode == "apply":
         try:
             # Native POST merges connection fields into existing settings. GET
             # also exposes read-only name/libraries, which cannot be echoed back.
@@ -312,7 +397,8 @@ async def reconcile_seerr(settings, client, mode, *, transport=None):
             response = await arr.get("/api/v3/qualityprofile")
             response.raise_for_status()
             profiles = [item for item in response.json() if item.get("name") == "HomeServer"]
-        if len(profiles) != 1:
+        named_profiles = "HOMESERVER_DOWNLOAD_DEFAULT_PROFILE" in env
+        if len(profiles) != 1 and not named_profiles:
             if mode == "plan":
                 changes += plan_settings(
                     "seerr", {}, {f"{service}.profile": "Resolve native ID after Arr apply"}
@@ -321,16 +407,13 @@ async def reconcile_seerr(settings, client, mode, *, transport=None):
             raise NativeConfigurationError(
                 "Seerr requires verified native HomeServer quality profile"
             )
-        parts = urlsplit(url)
         desired_arr = {
             "name": f"HomeServer {service.title()}",
-            "hostname": parts.hostname,
-            "port": parts.port or 80,
-            "useSsl": parts.scheme == "https",
-            "baseUrl": parts.path,
+            "hostname": "integration-proxy",
+            "port": 8787,
+            "useSsl": False,
+            "baseUrl": f"/{service}",
             "apiKey": api_key,
-            "activeProfileId": profiles[0]["id"],
-            "activeProfileName": profiles[0]["name"],
             "activeDirectory": "/data/media/movies" if service == "radarr" else "/data/media/tv",
             "is4k": False,
             "isDefault": True,
@@ -341,9 +424,22 @@ async def reconcile_seerr(settings, client, mode, *, transport=None):
             desired_arr["minimumAvailability"] = "released"
         else:
             desired_arr["enableSeasonFolders"] = True
-        changes += await collection(
-            "seerr", client, f"/api/v1/settings/{service}", desired_arr, "name", mode
-        )
+        if named_profiles:
+            from .quality_profiles import reconcile_seerr_profile_references
+
+            async with httpx.AsyncClient(
+                base_url=url, headers={"X-Api-Key": api_key}, transport=transport,
+                timeout=float(env.get("HOMESERVER_HTTP_TIMEOUT_SECONDS", "15")), trust_env=False,
+            ) as arr:
+                changes += await reconcile_seerr_profile_references(
+                    service, env, client, arr, desired_arr, mode
+                )
+        else:
+            desired_arr.update(activeProfileId=profiles[0]["id"],
+                               activeProfileName=profiles[0]["name"])
+            changes += await collection(
+                "seerr", client, f"/api/v1/settings/{service}", desired_arr, "name", mode
+            )
     # Jellyseerr 2.7.3's bare GET /library disables all libraries. Read the
     # connection resource instead, which is read-only on both API generations.
     response = await client.get(endpoint)

@@ -109,7 +109,9 @@ class LiveSourceProbes:
             probe = self.permits.get(probe.token)
         if probe.state == "authorized":
             capacity = await self.capacity_provider()
-            if self.permits.pending_bytes(capacity) > capacity.free_bytes:
+            if self.permits.pending_bytes(capacity, pool_id=probe.pool_id) > (
+                capacity.pool(probe.pool_id).usable_free_bytes
+            ):
                 return await self._decide_probe(probe, "reject")
             torrent = self.torrent_store.get(probe) if self.torrent_store else None
             if torrent is None or datetime.now(UTC) >= probe.expires_at:
@@ -135,7 +137,9 @@ class LiveSourceProbes:
             return "probing"
         if decision == "promote":
             capacity = await self.capacity_provider()
-            if self.permits.pending_bytes(capacity) > capacity.free_bytes:
+            if self.permits.pending_bytes(capacity, pool_id=probe.pool_id) > (
+                capacity.pool(probe.pool_id).usable_free_bytes
+            ):
                 decision = "reject"
         state = await self._decide_probe(probe, decision)
         return "replaced" if state == "promoted" else "probe_rejected"
@@ -151,6 +155,8 @@ class LiveSourceProbes:
         torrent,
         reported_seeders=None,
         quality_rank=None,
+        episode_catalog=None,
+        allow_absolute=False,
     ):
         if self.health_store.is_protected(old.infohash):
             return "source_protected"
@@ -168,6 +174,10 @@ class LiveSourceProbes:
             reported_seeders=reported_seeders,
             quality_rank=quality_rank,
         )
+        if episode_catalog is not None:
+            self.permits.bind_episode_identity(
+                candidate.token, episode_catalog=episode_catalog, allow_absolute=allow_absolute,
+            )
         self.torrent_store.put(candidate, torrent)
         await self._add_verified_torrent(candidate, torrent)
         return await self._monitor_probe(old) or "probing"

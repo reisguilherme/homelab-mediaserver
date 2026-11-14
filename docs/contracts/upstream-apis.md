@@ -14,7 +14,7 @@ compatíveis; uma resposta desconhecida não é tratada como sucesso.
 | Jellyfin | Bibliotecas, sessões e sincronização | Snapshot degradado não vira zero |
 | Operator | Plan/apply/read-back das preferências gerenciadas | Preserva IDs/estado e informa aplicação parcial ou drift |
 
-## Gateway e monitor qBit
+## Gateway e painel administrativo qBit
 
 Arr usa o cliente HomeServer Gateway. Admissão verifica identidade do torrent,
 destino, categoria, artefato inspecionado, tamanho real, reserva e capacidade
@@ -25,10 +25,11 @@ A API nativa qBit não tem porta administrativa publicada no host.
 O gateway e os clientes internos autorizados alcançam a rede de transferência.
 O operator tem acesso pontual às APIs para configurar preferências.
 
-O monitor público é um proxy separado, em loopback `18080`, com allowlist
-de arquivos da UI, GETs de monitoramento e login/logout. Adicionar, excluir,
-retomar, pausar ou alterar preferências pelo monitor retorna HTTP 403.
-O acesso externo à LAN ocorre dentro da tailnet por
+O serviço `qbit-monitor` é um proxy administrativo separado, em loopback
+`18080`, com autenticação nativa qBit. Ele permite a interface completa,
+incluindo adicionar, excluir, retomar, pausar e alterar preferências.
+Comandos manuais do proprietário são diretos; a automação continua sujeita
+ao contrato de admissão do gateway. O acesso remoto ocorre dentro da tailnet por
 [encaminhamento TCP Tailscale Serve](../installation.md#acesso-pelo-tailscale).
 
 ## Regras de mídia
@@ -37,6 +38,25 @@ Downloads de episódios podem ocorrer em paralelo dentro da janela por série
 e do limite global; importação no Jellyfin segue temporada/episódio em ordem.
 CDH Arr permanece desabilitado e hardlinks habilitados, de modo que o worker
 coordene validação, legenda e importação sem duplicar os bytes do vídeo.
+Filmes podem ser publicados antes da recuperação da legenda; a conexão nativa
+Radarr `HomeServer Jellyfin` informa importações, upgrades e renomeações à biblioteca.
+
+O Jellyfin pode escrever metadados e legendas. Exclusões de `Movie`, `Episode`
+e `Season` continuam capturadas e coordenadas pelo controlador. `DELETE /Items`
+em lote despacha cada ID pelo mesmo tratamento de seu tipo. Outros tipos,
+incluindo `BoxSet`, `Series`, `Playlist` e `Audio`, seguem para a API nativa com
+autenticação administrativa, sem depender do estado do worker. Exclusão nativa
+de uma série inteira não oferece a limpeza coordenada de Arr/qBit/Seerr;
+para essa coordenação, exclua suas temporadas.
+
+Remover vínculos de coleções ou playlists também usa a API nativa. Excluir uma
+coleção ou remover seus vínculos não equivale a excluir os filmes associados.
+
+O reconciler aplica `AutomaticallyAddToCollection` somente à biblioteca
+gerenciada `movies` em `/data/media/movies`, preservando as demais
+`LibraryOptions`. A escrita em `/Library/VirtualFolders/LibraryOptions` exige
+identidade da biblioteca e confirmação por leitura; falha de transporte só é
+aceita quando o valor aplicado pode ser confirmado.
 
 Fixtures de API ficam em `tests/fixtures/upstream/`, sem tokens, endereços
 privados ou nomes da biblioteca. Os contratos do monitor também executam

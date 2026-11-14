@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from series_metadata_fixtures import ongoing_transport
 
 from homeserver_control.domain.torrent_bytes import inspect_torrent
 from homeserver_control.gateway.permits import PermitRegistry
@@ -111,7 +112,7 @@ async def test_series_admits_more_than_one_episode_inside_bounded_window(
     async def capacity():
         return CapacityEvidence(free_bytes=free_bytes, remaining_by_hash=remaining)
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=ongoing_transport(handler)) as client:
         acquirer = SeriesAcquirer(
             repository=repo, permits=permits, sonarr_url="http://sonarr:8989",
             sonarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
@@ -158,7 +159,7 @@ async def test_series_resumes_multiple_window_episodes_without_touching_protecte
             metadata_sha256=permit.metadata_sha256, effect=lambda _: {"accepted": True},
         )
         issued[number] = permit
-    health = SourceHealthStore(repo.path)
+    health = SourceHealthStore(repo.path, automatic_replacement_enabled=True)
     if protect_later:
         health.protect_source(issued[3].infohash)
     paused, actions = {permit.infohash for permit in issued.values()}, []
@@ -207,7 +208,7 @@ async def test_series_resumes_multiple_window_episodes_without_touching_protecte
             paused_hashes=frozenset(paused),
         )
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=ongoing_transport(handler)) as client:
         acquirer = SeriesAcquirer(
             repository=repo, permits=permits, sonarr_url="http://sonarr:8989",
             sonarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
@@ -248,7 +249,7 @@ async def test_series_window_can_prefetch_next_season_without_importing_previous
             return httpx.Response(200, json=[])
         raise AssertionError(f"unexpected request {request.method} {request.url}")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=ongoing_transport(handler)) as client:
         acquirer = SeriesAcquirer(
             repository=repo, permits=permits, sonarr_url="http://sonarr:8989",
             sonarr_api_key="secret", prowlarr_url="http://prowlarr:9696", client=client,
@@ -320,7 +321,7 @@ async def test_completed_downloads_waiting_for_import_release_acquisition_window
             raise ValueError("fixture stale snapshot")
         return CapacityEvidence(free_bytes=100_000_000_000, remaining_by_hash=remaining)
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=ongoing_transport(handler)) as client:
         acquirer = SeriesAcquirer(
             repository=repo, permits=permits, sonarr_url="http://sonarr:8989",
             sonarr_api_key="fixture", prowlarr_url="http://prowlarr:9696", client=client,
@@ -411,7 +412,7 @@ async def test_complete_pack_parent_releases_slots_but_partial_parent_keeps_seas
     async def capacity():
         return CapacityEvidence(free_bytes=100_000_000_000, remaining_by_hash=remaining)
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=ongoing_transport(handler)) as client:
         acquirer = SeriesAcquirer(
             repository=repo, permits=permits, sonarr_url="http://sonarr:8989",
             sonarr_api_key="fixture", prowlarr_url="http://prowlarr:9696", client=client,

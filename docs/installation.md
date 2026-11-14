@@ -113,7 +113,7 @@ configurações ausentes; não substitui bancos existentes. O operator preserva
 IDs e confirma as preferências pela API. O checkout fica montado em `/project`
 nesse container para que API keys adotadas sejam salvas no próprio `.env`.
 
-Abra o painel em `http://IP_DO_SERVIDOR:8081` e confira Jellyfin/Seerr,
+Abra o painel em `http://IP_DO_SERVIDOR/` e confira Jellyfin/Seerr,
 bibliotecas, Arr e provedores. Indexadores começam vazios: configure-os conforme
 [o guia dos serviços](runbooks/service-setup.md). Ter todos os containers
 iniciados não comprova que uma fonte tenha peers ou que uma legenda esteja disponível.
@@ -131,12 +131,20 @@ tailscale ip -4
 ```
 
 Entre na mesma tailnet no dispositivo cliente. Use o IP retornado por
-`tailscale ip -4` com as portas do [README](../README.md#acessar), por exemplo
-`http://IP_TAILSCALE:8096` para Jellyfin e `http://IP_TAILSCALE:8081` para o
-painel. Não é necessário encaminhar portas no roteador.
+`tailscale ip -4` com os caminhos do [README](../README.md#acessar), por exemplo
+`http://IP_TAILSCALE/jellyfin/` e `http://IP_TAILSCALE/status/`. Com MagicDNS
+habilitado na tailnet, `http://NOME_MAGICDNS/jellyfin/` funciona da mesma forma;
+os cards preservam o host usado no navegador. Não é necessário encaminhar
+portas no roteador nem configurar Tailscale Serve para esses caminhos.
 
-O monitor qBit é um proxy somente leitura em `127.0.0.1:18080`. Para acessá-lo
-na tailnet:
+O serviço `service-proxy` publica a porta HTTP 80. Ela precisa estar livre no
+host. Se houver firewall local, permita o acesso apenas pelas redes doméstica
+e Tailscale pretendidas. Os serviços mantêm seus logins. `/seer` redireciona
+ao mesmo host em `:5055`, pois Seerr não suporta subpastas nativamente.
+
+O painel qBit completo já abre em `http://IP_TAILSCALE/qbittorrent/`, passando
+pelo proxy `qbit-monitor`. Para manter também um favorito antigo em `:18080`,
+o encaminhamento opcional abaixo publica apenas essa porta dentro da tailnet:
 
 ```bash
 sudo tailscale serve --bg --tcp=18080 tcp://127.0.0.1:18080
@@ -146,8 +154,42 @@ tailscale serve status
 Abra `http://IP_TAILSCALE:18080` ou `http://NOME_MAGICDNS:18080` no navegador.
 O [encaminhamento TCP](https://tailscale.com/docs/reference/tailscale-cli/serve#use-a-tcp-forwarder)
 leva essa porta da tailnet ao proxy Caddy em loopback. `--bg` mantém a
-configuração após reinício. O login é o nativo qBit; o proxy continua recusando
-mudanças na fila e nas preferências, sem publicar a API nativa na LAN.
+configuração após reinício. O login é o nativo qBit; o painel permite gerenciar
+fila, arquivos e preferências. A porta nativa permanece interna ao Compose.
+Os downloads iniciados pela automação continuam passando pelo gateway;
+ações manuais feitas nesse painel são comandos administrativos diretos.
+
+## Caminhos dos serviços em uma instalação existente
+
+O operator configura os Base URLs `/jellyfin`, `/sonarr`, `/radarr`, `/prowlarr`
+e `/bazarr` e atualiza as conexões internas. Na primeira aplicação sobre uma
+instalação antiga, ele prepara os prefixos e informa os reinícios pendentes;
+as conexões são reconciliadas na segunda aplicação, após os reinícios.
+Preserve o `.env` e os bancos existentes. Confira o plano antes de aplicar
+e faça essa atualização fora de uma reprodução ativa:
+
+```bash
+docker compose build control-api telemetry
+docker compose stop control-worker
+docker compose run --rm operator config apply --env-file /project/.env --in-container
+docker compose restart sonarr radarr prowlarr bazarr jellyfin
+docker compose run --rm operator config apply --env-file /project/.env --in-container
+docker compose up -d --no-deps --force-recreate jellyfin-proxy control-api control-worker download-gateway telemetry host-metrics service-proxy
+docker compose run --rm operator config verify --env-file /project/.env --in-container
+```
+
+Se a instalação usa SSD + HD, substitua `docker compose` por
+`docker compose -f compose.yaml -f compose.storage.yaml` em cada comando.
+Os torrents existentes permanecem no qBittorrent durante essa migração de URLs.
+O primeiro `apply` pode retornar código 4 com estado `planned` e instrução de
+reinício; nesse caso, prossiga com o reinício indicado e a segunda aplicação.
+Erros `failed` ou `unsupported` precisam ser resolvidos antes de continuar.
+
+Depois, teste `/status/`, o login dos painéis e
+`http://IP_DO_SERVIDOR/jellyfin/System/Info/Public`. O endereço antigo
+`http://IP_DO_SERVIDOR:8096/System/Info/Public` deve chegar ao mesmo Jellyfin.
+As ações de exclusão continuam atravessando o controlador nos dois caminhos.
+Arr/Bazarr mantêm suas portas anteriores, agora com o prefixo correspondente.
 
 ## Reutilizar uma instalação
 

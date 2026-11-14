@@ -47,6 +47,7 @@ def torrent(video_bytes, inflated):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["movie", "series"])
 @pytest.mark.parametrize("replacement", [False, True])
+@pytest.mark.parametrize("floor_enabled", [False, True])
 @pytest.mark.parametrize(
     "video_bytes,inflated,accepted",
     [
@@ -55,8 +56,8 @@ def torrent(video_bytes, inflated):
         (1_800_000_000, False, True),
     ],
 )
-async def test_candidates_enforce_actual_video_size_before_grab_or_probe(
-    tmp_path, kind, replacement, video_bytes, inflated, accepted
+async def test_candidates_apply_configured_size_floor_before_grab_or_probe(
+    tmp_path, kind, replacement, floor_enabled, video_bytes, inflated, accepted
 ):
     offered = {
         "title": "Fixture.S02E04.1080p.WEB-DL", "indexer": "UIndex",
@@ -83,7 +84,7 @@ async def test_candidates_enforce_actual_video_size_before_grab_or_probe(
             permits=permits,
             prowlarr_url="http://prowlarr:9696",
             client=client,
-            release_policy=ReleasePolicy(),
+            release_policy=ReleasePolicy(minimum_mib_per_min=((1080, 20 if floor_enabled else 0),)),
         )
         reason = "slow" if replacement else None
         if kind == "movie":
@@ -107,7 +108,7 @@ async def test_candidates_enforce_actual_video_size_before_grab_or_probe(
                 runtime_minutes=45,
             )
         observed = [item async for item in candidates]
-    assert bool(observed) is accepted
+    assert bool(observed) is (accepted or not floor_enabled)
     assert permits.get_for_reservation("not-created") is None
 
 
@@ -145,7 +146,7 @@ async def test_series_ordering_does_not_start_or_stop_protected_episode(tmp_path
         destination=permit.destination,
         effect=lambda _: {"accepted": True, "infohash": permit.infohash},
     )
-    health = SourceHealthStore(path)
+    health = SourceHealthStore(path, automatic_replacement_enabled=True)
     health.protect_source(permit.infohash)
     requests = []
 

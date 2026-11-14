@@ -17,6 +17,7 @@ def _script(name):
 
 class RegistryFixture:
     pool_ids = ("ssd", "hdd")
+    primary_pool_id = "ssd"
 
     def __init__(self, root, *, failed=()):
         self.failed = failed

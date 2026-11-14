@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,6 +11,7 @@ from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.deletion_jobs import DeletionJobStore
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
+from homeserver_control.worker.audio_audit import record_audio_selection
 from homeserver_control.worker.capacity_evidence import CapacityEvidence
 from homeserver_control.worker.series_finalization import SeriesFinalizer
 from homeserver_control.worker.validation import ValidationError, ValidationResult
@@ -74,6 +76,9 @@ async def test_completed_episode_is_validated_before_one_sonarr_import(tmp_path,
         metadata_sha256=permit.metadata_sha256,
         effect=lambda _permit: {"accepted": True},
     )
+    record_audio_selection(
+        repo, permit, {"languages": ["pt-BR", "en"]}, original_language="en",
+    )
     torrents = tmp_path / "torrents"
     folder = torrents / "Ted.Lasso.S04E01"
     folder.mkdir(parents=True)
@@ -85,7 +90,9 @@ async def test_completed_episode_is_validated_before_one_sonarr_import(tmp_path,
         lambda path, **_kwargs: ValidationResult(
             Path(path),
             5,
-            MediaProbe(1920, 1080, ("eng",), (), {}),
+            MediaProbe(1920, 1080, ("eng",), (), {
+                "streams": [{"codec_type": "audio", "tags": {"language": "eng"}}],
+            }),
         ),
     )
     posts = []
@@ -201,6 +208,12 @@ async def test_completed_episode_is_validated_before_one_sonarr_import(tmp_path,
     assert len(posts) == 1
     assert repo.episode_import_state(permit.permit_id) == "complete"
     assert (destination / "Ted.Lasso.S04E01.pt-BR.srt").stat().st_ino == subtitle.stat().st_ino
+    with repo._connect() as connection:
+        audits = connection.execute(
+            "SELECT payload_json FROM operations WHERE kind = 'audio_audit'",
+        ).fetchall()
+    assert len(audits) == 1
+    assert json.loads(audits[0]["payload_json"])["outcome"] == "mismatch"
 
 
 def test_legacy_episode_permit_cannot_import_another_episodes_subtitle(tmp_path):
@@ -264,6 +277,10 @@ def test_legacy_episode_permit_cannot_import_another_episodes_subtitle(tmp_path)
         "embedded_english",
         "embedded_with_brazilian",
         "original_ptbr",
+        "animated_dual",
+        "animated_dubbed",
+        "animated_original",
+        "animated_original_ptbr",
     ],
 )
 async def test_episode_subtitle_priority_and_original_audio(tmp_path, monkeypatch, subtitle_case):
@@ -327,6 +344,17 @@ async def test_episode_subtitle_priority_and_original_audio(tmp_path, monkeypatc
         if subtitle_case in {"embedded_english", "embedded_with_brazilian"}
         else {}
     )
+    if subtitle_case.startswith("animated"):
+        audio = {
+            "animated_dual": [
+                {"language": "pt-BR", "title": "Dublado"},
+                {"language": "eng", "title": "Original"},
+            ],
+            "animated_dubbed": [{"language": "pt-BR", "title": "Dublado"}],
+            "animated_original": [{"language": "eng", "title": "Original"}],
+            "animated_original_ptbr": [{"language": "pt-BR", "title": "Original"}],
+        }[subtitle_case]
+        raw = {"streams": [{"codec_type": "audio", "tags": tags} for tags in audio]}
     monkeypatch.setattr(
         "homeserver_control.worker.series_finalization.validate_media",
         lambda path, **_kwargs: ValidationResult(
@@ -375,8 +403,12 @@ async def test_episode_subtitle_priority_and_original_audio(tmp_path, monkeypatc
                 4,
                 1,
             )
-            self.calls.append(language)
+            self.calls.append((language, match_mode) if subtitle_case.startswith("animated")
+                              else language)
             if language == "BR_PT" and subtitle_case in {"brazilian", "embedded_with_brazilian"}:
+                return brazilian_srt
+            if (language == "BR_PT" and subtitle_case.startswith("animated")
+                    and match_mode == "same_duration"):
                 return brazilian_srt
             if language == "EN":
                 return english_srt
@@ -388,7 +420,10 @@ async def test_episode_subtitle_priority_and_original_audio(tmp_path, monkeypatc
         if request.url.path == "/api/v3/config/mediamanagement":
             return httpx.Response(200, json={"copyUsingHardlinks": True})
         if request.url.path == "/api/v3/series":
-            return httpx.Response(200, json=[{"id": 1, "tmdbId": 97546}])
+            return httpx.Response(200, json=[{
+                "id": 1, "tmdbId": 97546,
+                "genres": ["Animation"] if subtitle_case.startswith("animated") else ["Drama"],
+            }])
         if request.url.path == "/api/v3/episode":
             return httpx.Response(
                 200,
@@ -466,6 +501,13 @@ async def test_episode_subtitle_priority_and_original_audio(tmp_path, monkeypatc
             "embedded_english": ["BR_PT", "BR_PT"],
             "embedded_with_brazilian": ["BR_PT"],
             "original_ptbr": [],
+            **{
+                case: [("BR_PT", "exact"), ("BR_PT", "same_duration")]
+                for case in (
+                    "animated_dual", "animated_dubbed", "animated_original",
+                    "animated_original_ptbr",
+                )
+            },
         }[subtitle_case]
         assert source.calls == expected_calls
         expected_subtitle = {
@@ -474,6 +516,13 @@ async def test_episode_subtitle_priority_and_original_audio(tmp_path, monkeypatc
             "embedded_english": None,
             "embedded_with_brazilian": brazilian_srt,
             "original_ptbr": None,
+            **{
+                case: brazilian_srt
+                for case in (
+                    "animated_dual", "animated_dubbed", "animated_original",
+                    "animated_original_ptbr",
+                )
+            },
         }[subtitle_case]
         assert (
             SubtitleArtifactStore(database).get(
@@ -495,7 +544,8 @@ async def test_episode_subtitle_priority_and_original_audio(tmp_path, monkeypatc
     if expected_subtitle is None:
         assert not list(destination.glob("*.srt"))
     else:
-        suffix = "pt-BR" if subtitle_case in {"brazilian", "embedded_with_brazilian"} else "en"
+        suffix = ("pt-BR" if subtitle_case in {"brazilian", "embedded_with_brazilian"}
+                  or subtitle_case.startswith("animated") else "en")
         assert (destination / f"Ted.Lasso.S04E01.{suffix}.srt").read_bytes() == expected_subtitle
 
 

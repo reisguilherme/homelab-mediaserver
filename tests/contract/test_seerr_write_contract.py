@@ -50,7 +50,8 @@ async def test_existing_seerr_jellyfin_connection_changes_without_read_only_fiel
         assert first.status == "verified"
         assert (await reconcile_media_server("seerr", {}, client, "verify")).status == "verified"
         assert not (await reconcile_media_server("seerr", {}, client, "apply")).changes
-    desired = {"ip": "jellyfin", "port": 8096, "urlBase": "", "useSsl": False}
+    desired = {"ip": "integration-proxy", "port": 8787,
+               "urlBase": "/jellyfin", "useSsl": False}
     assert writes == [desired]
     assert state == original | desired
     assert "existing-jellyfin-token" not in repr(first)

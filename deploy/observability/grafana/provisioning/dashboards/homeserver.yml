@@ -1,0 +1,11 @@
+apiVersion: 1
+providers:
+  - name: HomeServer
+    orgId: 1
+    folder: HomeServer
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

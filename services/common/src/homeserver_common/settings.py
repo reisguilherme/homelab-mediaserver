@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from types import MappingProxyType
 
+from .download_profiles import DEFAULT_PROFILE_NAME, PROFILE_NAMES
+
 
 @dataclass(frozen=True)
 class Field:
@@ -85,16 +87,29 @@ for service, port in {**PORTS, "qbit": 8080}.items():
     if service in ("control", "status", "qbit_monitor"):
         continue
     host = "qbittorrent" if service == "qbit" else service
+    path = "" if service in ("qbit", "seerr") else "/" + service
     register(
-        service.upper() + "_URL", f"http://{host}:{port}", "url", "native_config", editable=False
+        service.upper() + "_URL", f"http://{host}:{port}{path}", "url", "native_config",
+        editable=False,
     )
     if service != "qbit":
         register(service.upper() + "_API_KEY", "", consumer="native_config", secret=True)
 register("QBIT_PEER_PORT", 6881, "port", minimum=1, editable=False)
+register("PUBLIC_JELLYFIN_PORT", 8097, "port", minimum=1, editable=False)
+register("PUBLIC_SEERR_PORT", 5056, "port", minimum=1, editable=False)
+register("PUBLIC_SEERR_ORIGIN", "", "url", "public_security")
 register("TRANSCODE_MODE", "cpu", choices=("cpu", "intel"), editable=False)
 register("INTEL_RENDER_DEVICE", "/dev/dri/renderD128", "path", editable=False)
 register("TRANSCODE_THREADS", 0, "int", "jellyfin", minimum=0)
 register("JELLYFIN_ENABLE_MEDIA_DELETION", "", "optionalbool", "jellyfin")
+register("JELLYFIN_AUTO_COLLECTIONS", True, "bool", "jellyfin", application="native")
+register("JELLYFIN_SUBTITLE_LABELS_ENABLED", True, "bool", "jellyfin_labels")
+register("JELLYFIN_SUBTITLE_LABEL_EN_US", "English - US", consumer="jellyfin_labels")
+register("JELLYFIN_SUBTITLE_LABEL_PT_BR", "Português BR", consumer="jellyfin_labels")
+register("JELLYFIN_COLLECTION_COVERS_ENABLED", True, "bool", "jellyfin_collections")
+register(
+    "JELLYFIN_COLLECTION_COVERS_INTERVAL_SECONDS", 300, "int", "jellyfin_collections", minimum=30
+)
 for name, default in {
     "DOWNLOAD_MAX_ACTIVE": 10,
     "TORRENT_MAX_CONNECTIONS": 500,
@@ -120,9 +135,13 @@ register(
 register("MOVIE_QUEUE_PRIORITY", "seeders", consumer="worker", choices=("seeders",), editable=False)
 register("SERIES_ORDER", "sequential", consumer="worker", choices=("sequential",), editable=False)
 register("SERIES_DOWNLOAD_WINDOW", 10, "int", "worker", minimum=1)
+register("STORAGE_MIN_FREE_GIB", 10, "int", "worker", unit="GiB per disk", minimum=0)
 register("SERIES_PREFER_SEASON_PACK SERIES_RELEASE_AFFINITY", True, "bool", "worker")
 register("RELEASE_INDEXER_PRIORITY", ("uindex", "1337x"), "list", "worker",
-         choices=("uindex", "1337x"))
+         choices=("uindex", "1337x", "amigosshare"))
+register("RELEASE_FALLBACK_INDEXERS", (), "optionallist", "worker",
+         choices=("uindex", "1337x", "amigosshare"))
+register("RELEASE_MIN_SEEDERS", 5, "int", "worker", minimum=1)
 register("INDEXER_FALLBACK_MIN_SEEDERS", 5, "int", "worker", minimum=1)
 register("MOVIE_INDEXER_FALLBACK_MIN_SEEDERS", 20, "int", "worker", minimum=1)
 for name, value in {
@@ -158,6 +177,7 @@ register("SOURCE_MIN_RATE_KIB", 1024, "float", "worker", unit="KiB/s", minimum=0
 register("SOURCE_MIN_TIME_GAIN_PERCENT", 20, "float", "worker", unit="percent", minimum=0)
 register("SOURCE_PROBE_ENABLED", True, "bool", "worker")
 register("SOURCE_SLOW_REPLACEMENT_ENABLED", False, "bool", "worker")
+register("SOURCE_AUTOMATIC_REPLACEMENT_ENABLED", False, "bool", "worker")
 register(
     "SOURCE_PROTECTED_HASHES",
     (),
@@ -172,17 +192,20 @@ register(
 )
 register("MEDIA_RESOLUTIONS", ("2160", "1080"), "list", "quality",
          choices=("1080", "2160"), editable=False)
-register("MOVIE_RESOLUTIONS", ("2160", "1080"), "list", "quality", choices=("1080", "2160"))
-register("SERIES_RESOLUTIONS", ("1080",), "list", "quality", choices=("1080",))
+register("MOVIE_RESOLUTIONS", ("2160", "1080"), "list", "quality",
+         choices=("1080", "2160"), editable=False)
+register("SERIES_RESOLUTIONS", ("1080",), "list", "quality", choices=("1080",), editable=False)
 register(
     "MEDIA_SOURCES",
     ("remux", "bluray", "webdl"),
     "list",
     "quality",
     choices=("remux", "bluray", "webdl"),
+    editable=False,
 )
+register("DOWNLOAD_DEFAULT_PROFILE", DEFAULT_PROFILE_NAME, "str", "quality", choices=PROFILE_NAMES)
 register("PREFER_DOLBY_VISION PREFER_ATMOS", True, "bool", "quality")
-for resolution, minimum in ((720, 10), (1080, 20), (2160, 50)):
+for resolution, minimum in ((720, 0), (1080, 0), (2160, 0)):
     register(
         f"QUALITY_MIN_MIB_PER_MIN_{resolution}",
         minimum,
@@ -193,6 +216,14 @@ for resolution, minimum in ((720, 10), (1080, 20), (2160, 50)):
     )
 register("AUTOMATIC_UPGRADES", False, "bool", "quality")
 register("AUDIO_LANGUAGES", ("original",), "list", "quality")
+register(
+    "ANIMATION_AUDIO_PREFERENCES", ("dual", "pt-BR", "original"), "list", "quality",
+    choices=("dual", "pt-BR", "original"), editable=False,
+)
+register(
+    "DUBBED_AUDIO_PREFERENCES", ("dual", "original"), "list", "quality",
+    choices=("dual", "pt-BR", "original"),
+)
 register("SUBTITLE_LANGUAGES", ("pt-BR", "en-US"), "list", "subtitles", choices=("pt-BR", "en-US"))
 register(
     "SUBTITLE_MATCH_MODES",
@@ -220,6 +251,9 @@ register(
     "bazarr",
     choices=("subdl", "opensubtitlescom"),
 )
+register("BAZARR_USE_SONARR", True, "bool", "bazarr")
+register("AUDITED_IMPORT_MANIFEST", "", "str", "worker")
+register("AUDITED_IMPORT_ALLOW_SEERR", False, "bool", "worker")
 register(
     "SUBDL_API_KEY OPENSUBTITLES_USERNAME OPENSUBTITLES_PASSWORD",
     "",
@@ -233,6 +267,7 @@ register(
     secret=True,
 )
 register("ADMIN_USERNAME QBIT_USERNAME", "root", consumer="native_config")
+register("JELLYFIN_ADMIN_PASSWORD", "", consumer="native_config", secret=True)
 register("PROWLARR_INDEXERS", (), "json", "prowlarr", secret=True)
 register("BYPARR_ENABLED", False, "bool")
 register("BYPARR_URL", "http://byparr:8191", "url", "prowlarr", editable=False)

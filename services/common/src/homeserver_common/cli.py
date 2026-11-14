@@ -71,7 +71,7 @@ def native_configuration(
     async def execute():
         outcomes = await function(settings)
         updates = {}
-        if action == "apply":
+        if action == "apply" and not any(item.status == "planned" for item in outcomes):
             try:
                 updates = await discover_native_credentials(settings)
             except Exception:

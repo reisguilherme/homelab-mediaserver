@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from series_metadata_fixtures import ongoing_transport
 
 from homeserver_control.domain.torrent_bytes import inspect_torrent
 from homeserver_control.gateway.permits import PermitRegistry
@@ -32,24 +33,22 @@ def _encode(value):
     "offers,expected,inspected_names",
     [
         ([('primary', 'UIndex (Prowlarr)', 1080, 10, 2_000_000_000),
-          ('backup', '1337x', 1080, 100, 2_000_000_000)], 'primary', ['primary']),
+          ('backup', '1337x', 1080, 100, 2_000_000_000)], 'backup', ['primary', 'backup']),
         ([('primary', 'UIndex', 1080, 2, 2_000_000_000),
           ('backup', '1337x (Prowlarr)', 1080, 20, 2_000_000_000)], 'backup',
-         ['primary', 'backup']),
+         ['backup']),
         ([('bad', 'UIndex', 1080, 100, 400_000_000),
           ('backup', '1337x', 1080, 10, 2_000_000_000)], 'backup', ['bad', 'backup']),
         ([('denied', 'BitSearch', 1080, 100, 2_000_000_000)], None, []),
         ([('unknown', None, 1080, 100, 2_000_000_000)], None, []),
         ([('unknown-seeds', 'UIndex.org', 1080, None, 2_000_000_000),
           ('backup', '1337x', 1080, 10, 2_000_000_000)], 'backup',
-         ['unknown-seeds', 'backup']),
+         ['backup']),
     ],
 )
-async def test_movie_and_series_choose_uindex_then_seed_fallback_after_real_quality_validation(
+async def test_movie_and_series_compare_indexers_after_real_quality_validation(
     tmp_path, kind, fallback_threshold, offers, expected, inspected_names,
 ):
-    if expected == "primary" and fallback_threshold == 20:
-        expected, inspected_names = "backup", ["primary", "backup"]
     status, posted, inspected_names_actual = await _choose_indexer(
         tmp_path, kind=kind, fallback_threshold=fallback_threshold, offers=offers,
     )
@@ -58,7 +57,10 @@ async def test_movie_and_series_choose_uindex_then_seed_fallback_after_real_qual
     assert inspected_names_actual == inspected_names
 
 
-async def _choose_indexer(tmp_path, *, kind, fallback_threshold, offers):
+async def _choose_indexer(
+    tmp_path, *, kind, fallback_threshold, offers, environment_overrides=None,
+    capacity_free_bytes=None,
+):
     repo = ReservationRepository(tmp_path / "control.sqlite")
     repo.initialize()
     media_key = "season:tmdb:101:1" if kind == "series" else "movie:tmdb:101"
@@ -104,7 +106,10 @@ async def _choose_indexer(tmp_path, *, kind, fallback_threshold, offers):
             return httpx.Response(200, json=[{
                 "id": 1, "tmdbId": 101, "monitored": True, "hasFile": False, "runtime": 45,
                 "originalLanguage": {"name": "English"},
+                "qualityProfileId": 1,
             }])
+        if path == "/api/v3/qualityprofile":
+            return httpx.Response(200, json=[{"id": 1, "name": "Max Quality"}])
         if path == "/api/v3/episode":
             return httpx.Response(200, json=[{
                 "id": 1, "seasonNumber": 1, "episodeNumber": 1, "monitored": True,
@@ -121,14 +126,22 @@ async def _choose_indexer(tmp_path, *, kind, fallback_threshold, offers):
             return httpx.Response(200, json={"accepted": True})
         raise AssertionError(f"unexpected request {request.method} {request.url}")
 
-    async def capacity():
-        return CapacityEvidence(free_bytes=50_000_000_000, remaining_by_hash={})
+    capacity_sequence = iter(capacity_free_bytes) if capacity_free_bytes is not None else None
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async def capacity():
+        return CapacityEvidence(
+            free_bytes=next(capacity_sequence) if capacity_sequence else 50_000_000_000,
+            remaining_by_hash={},
+        )
+
+    async with httpx.AsyncClient(transport=ongoing_transport(handler)) as client:
         environment = (
             {} if fallback_threshold is None else
             {"HOMESERVER_INDEXER_FALLBACK_MIN_SEEDERS": str(fallback_threshold)}
         )
+        environment["HOMESERVER_DOWNLOAD_DEFAULT_PROFILE"] = "Max Quality"
+        environment["HOMESERVER_QUALITY_MIN_MIB_PER_MIN_1080"] = "20"
+        environment.update(environment_overrides or {})
         options = dict(
             repository=repo, permits=permits, prowlarr_url="http://prowlarr:9696", client=client,
             capacity_provider=capacity, release_policy=ReleasePolicy.from_environment(
@@ -187,7 +200,7 @@ async def test_movie_default_fallback_prefers_well_seeded_affordable_uhd(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_healthy_primary_is_inspected_before_fallback_despite_earlier_weak_primary(tmp_path):
+async def test_indexers_compare_rank_without_skipping_a_better_alternative(tmp_path):
     from contextlib import aclosing
 
     repo = ReservationRepository(tmp_path / 'control.sqlite')
@@ -212,5 +225,5 @@ async def test_healthy_primary_is_inspected_before_fallback_despite_earlier_weak
             rows, eligible=eligible, rank=lambda row: row['rank'],
         )) as candidates:
             first = await anext(candidates)
-            assert first[0]['guid'] == 'weak-high-quality'
-    assert inspected == ['healthy-primary', 'weak-high-quality']
+            assert first[0]['guid'] == 'backup'
+    assert inspected == ['weak-high-quality', 'backup']

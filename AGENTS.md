@@ -27,9 +27,13 @@ Não formatar/particionar discos nem alterar montagens sem autorização explíc
 para os dispositivos e o escopo da operação. A expansão mergerfs opt-in está
 documentada em `docs/storage.md`; o instalador só verifica mounts, prepara pastas
 do projeto e testa fixtures, sem formatar, montar ou editar `fstab`.
-Não ativar RTX, substituir `fstab`,
-reescrever o serviço Lenovo, abrir portas no roteador, publicar a API nativa
-qBit, liberar downloads sem gateway/capacidade real ou apagar mídia automaticamente.
+Não ativar RTX, substituir `fstab`, reescrever o serviço Lenovo, abrir portas
+no roteador ou publicar diretamente a porta administrativa nativa qBit.
+O proprietário autorizou controle completo nos painéis autenticados: o proxy
+administrativo qBit em loopback/Tailscale permite ações manuais. Downloads
+automatizados continuam sujeitos ao gateway e à capacidade real. Não apagar
+mídia automaticamente. Jellyfin tem escrita para edições e legendas; exclusões
+de filmes, episódios e temporadas continuam coordenadas pelo controlador.
 
 O projeto atual não tem CI/CD, releases próprias, gerenciador de backups ou
 units do host. Não reintroduzir essas camadas. CYD/MQTT exclusivo foram retirados.

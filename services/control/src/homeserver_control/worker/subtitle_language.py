@@ -165,6 +165,52 @@ def has_embedded_english_subtitle(probe: MediaProbe) -> bool:
     return False
 
 
+def has_embedded_brazilian_subtitle(probe: MediaProbe) -> bool:
+    """Accept a full text subtitle explicitly identified as Brazilian Portuguese."""
+    streams = probe.raw.get("streams")
+    if not isinstance(streams, list):
+        return False
+    for stream in streams:
+        if not isinstance(stream, Mapping) or stream.get("codec_type") != "subtitle":
+            continue
+        if stream.get("codec_name") not in {"subrip", "ass", "ssa", "webvtt", "mov_text"}:
+            continue
+        disposition = stream.get("disposition")
+        if isinstance(disposition, Mapping) and (
+            disposition.get("forced") == 1 or disposition.get("comment") == 1
+        ):
+            continue
+        tags = stream.get("tags")
+        if not isinstance(tags, Mapping):
+            continue
+        tags = {str(key).lower(): value for key, value in tags.items()}
+        raw_language = tags.get("language")
+        language = raw_language.strip().lower().replace("_", "-") if isinstance(
+            raw_language, str,
+        ) else ""
+        title = " ".join(
+            value for key, value in tags.items()
+            if key in {"title", "handler_name"} and isinstance(value, str)
+        )
+        tokens = _tokens(title)
+        if set(tokens) & {
+            "forced", "sign", "signs", "song", "songs", "foreign", "partial",
+            "commentary", "comments", "comentarios", "forcada", "forcadas",
+            "sinais", "musicas", "parcial", "european", "portugal",
+        } or any(a == "pt" and b == "pt" for a, b in zip(tokens, tokens[1:], strict=False)):
+            continue
+        # A Portuguese language tag supplies the language when the subtitle
+        # title contains only its region, as in "por" + "Brazilian".
+        region_only = bool(tokens) and tokens[0] in {
+            "brazil", "brasil", "brazilian", "brasileiro", "brasileira",
+        } and set(tokens[1:]) <= {"sdh", "cc"}
+        if language in {"pt-br", "ptbr", "pob"} or (
+            language in {"por", "pt", "portuguese"} and (_explicit_ptbr(title) or region_only)
+        ):
+            return True
+    return False
+
+
 def _explicit_ptbr(value: str) -> bool:
     tokens = _tokens(value)
     if any(token in {"pob", "ptbr"} for token in tokens):

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark"><title>HomeServer · Downloads</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #080e16; color: #e9f0f6; }
+    * { box-sizing: border-box; } body { margin: 0; background: radial-gradient(ellipse at 85% 0, #153a43, transparent 44%), #080e16; min-height: 100vh; }
+    main { max-width: 1180px; margin: auto; padding: 40px 22px; } a { color: #66d6c7; text-decoration: none; } a:focus-visible, button:focus-visible { outline: 2px solid #66d6c7; outline-offset: 4px; }
+    .eyebrow { color: #66d6c7; font: 600 11px ui-monospace, monospace; letter-spacing: .12em; text-transform: uppercase; margin-top: 32px; }
+    h1 { margin: 10px 0; font-size: clamp(32px, 5vw, 50px); letter-spacing: -.04em; } .note, .muted { color: #8fa5b1; font-size: 13px; line-height: 1.7; }
+    #downloads-status { min-height: 25px; color: #91b6bb; font-size: 13px; margin: 28px 0 15px; }
+    .download { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 20px; border: 1px solid #263744; border-radius: 16px; padding: 22px; background: #121e29df; margin-bottom: 12px; }
+    h2 { font-size: 16px; margin: 0 0 15px; overflow-wrap: anywhere; line-height: 1.5; font-weight: 550; }
+    .metrics { display: flex; flex-wrap: wrap; gap: 9px 22px; font-size: 13px; color: #a3b7c3; font-variant-numeric: tabular-nums; }
+    .progress { width: 100%; height: 5px; margin: 18px 0; border-radius: 5px; background: #293741; overflow: hidden; }
+    .progress span { display: block; height: 100%; background: linear-gradient(90deg, #317f9d, #6ce1c1); }
+    button { border: 1px solid #396764; border-radius: 9px; padding: 11px 17px; color: #a8e8da; background: #14312f; cursor: pointer; font-size: 13px; white-space: nowrap; }
+    button:hover { background: #1c4742; } button:disabled { opacity: .5; cursor: default; } .action { display: flex; align-items: center; } .empty { border: 1px dashed #263744; border-radius: 16px; padding: 35px; text-align: center; color: #8fa5b1; }
+    @media(max-width: 650px) { .download { grid-template-columns: 1fr; padding: 18px; } main { padding: 25px 15px; } }
+  </style>
+</head>
+<body><main>
+  <a href="{{URL_BASE}}/">← Status do servidor</a>
+  <p class="eyebrow">HomeServer / controle</p><h1>Downloads</h1>
+  <p class="note">A fonte escolhida é mantida até concluir. “Trocar fonte” procura outra release compatível e mantém a atual enquanto não encontra uma candidata que caiba no disco.</p>
+  <div id="downloads-status" role="status" aria-live="polite">Conectando…</div>
+  <section id="downloads-list" aria-label="Downloads em andamento"></section>
+  <p class="note">Seeds são conexões ativas observadas pelo qBittorrent. A quantidade anunciada pelo indexador pode ser diferente.</p>
+  <section id="replacement-results" class="muted" aria-label="Solicitações recentes"></section>
+</main><script>
+  const list = document.getElementById('downloads-list');
+  const status = document.getElementById('downloads-status');
+  const states = { downloading: 'Baixando', stalledDL: 'Aguardando peers', queuedDL: 'Na fila', stoppedDL: 'Pausado', pausedDL: 'Pausado', metaDL: 'Obtendo metadados', forcedDL: 'Baixando' };
+  const poolLabels = { ssd: 'SSD', hdd: 'HD USB', hdd2: 'HD USB 2', hdd3: 'HD USB 3' };
+  const results = { queued: 'Troca solicitada', running: 'Consultando fontes', succeeded: 'Fonte substituída', no_candidate: 'Nenhuma alternativa compatível disponível; fonte atual mantida', failed: 'Não foi possível concluir a troca; confira os logs', stale: 'Fonte alterada ou solicitação cancelada', completed: 'Download já concluído; fonte mantida' };
+  function bytes(value) { if (!Number.isFinite(value) || value < 0) return '—'; const units = ['B', 'KiB', 'MiB', 'GiB']; let index = 0; while (value >= 1024 && index < 3) { value /= 1024; index++; } return `${value.toFixed(index ? 1 : 0)} ${units[index]}`; }
+  function element(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; if (text) node.textContent = text; return node; }
+  async function replace(item, button) {
+    button.disabled = true; status.textContent = 'Solicitando busca de outra fonte…';
+    try {
+      const response = await fetch(`{{URL_BASE}}/api/v1/downloads/${encodeURIComponent(item.infohash)}/replace`, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-HomeServer-Action': 'replace' }, body: JSON.stringify({ permit_id: item.permit_id }) });
+      if (!response.ok) throw new Error(response.status === 409 ? 'A fonte mudou ou já concluiu. Atualize a lista.' : 'Não foi possível solicitar a troca.');
+      status.textContent = 'Busca solicitada. O download atual continua até uma alternativa ser aprovada.';
+      await refresh();
+    } catch (error) { status.textContent = error.message; button.disabled = false; }
+  }
+  function render(items) {
+    list.replaceChildren();
+    if (!items.length) list.append(element('p', 'empty', 'Nenhum download pendente.'));
+    for (const item of items) {
+      const card = element('article', 'download'); const details = element('div');
+      details.append(element('h2', '', item.name));
+      const metrics = element('div', 'metrics');
+      for (const text of [`${(item.progress * 100).toFixed(1)}%`, `${bytes(item.download_bps)}/s`, `${item.seeds} seeds`, `${bytes(item.remaining_bytes)} restantes`, item.pool_label || poolLabels[item.pool_id] || 'Disco indisponível', states[item.state] || item.state]) metrics.append(element('span', '', text));
+      details.append(metrics); const progress = element('div', 'progress'); progress.setAttribute('role', 'progressbar'); progress.setAttribute('aria-label', `Progresso de ${item.name}`); progress.setAttribute('aria-valuemin', '0'); progress.setAttribute('aria-valuemax', '100'); progress.setAttribute('aria-valuenow', (item.progress * 100).toFixed(1)); const bar = element('span'); bar.style.width = `${item.progress * 100}%`; progress.append(bar); details.append(progress);
+      if (item.replacement) details.append(element('div', 'muted', results[item.replacement.state] || item.replacement.state));
+      if (!item.replace_allowed) details.append(element('div', 'muted', item.replace_unavailable_reason));
+      const action = element('div', 'action'); const button = element('button', '', 'Trocar fonte'); button.type = 'button'; button.disabled = !item.replace_allowed || ['queued', 'running'].includes(item.replacement?.state); button.addEventListener('click', () => replace(item, button)); action.append(button); card.append(details, action); list.append(card);
+    }
+  }
+  let loading = false;
+  async function refresh() {
+    if (loading) return; loading = true;
+    try {
+      const response = await fetch('{{URL_BASE}}/api/v1/downloads', { credentials: 'same-origin', cache: 'no-store' }); if (!response.ok) throw new Error('Não foi possível consultar os downloads.');
+      const payload = await response.json(); render(payload.items); status.textContent = `${payload.items.length} downloads pendentes · atualização a cada 10 s`;
+      const resultsNode = document.getElementById('replacement-results'); resultsNode.replaceChildren();
+      for (const job of (payload.recent_requests || [])) resultsNode.append(element('p', '', `${results[job.state] || job.state} · ${new Date(job.updated_at * 1000).toLocaleTimeString('pt-BR')}`));
+    } catch (error) { status.textContent = error.message; } finally { loading = false; }
+  }
+  refresh(); setInterval(refresh, 10000);
+</script></body></html>

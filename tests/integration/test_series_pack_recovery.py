@@ -13,6 +13,7 @@ from homeserver_control.worker.source_health import SourceHealthStore, TorrentHe
 @pytest.mark.asyncio
 async def test_pending_probe_does_not_block_admission_of_later_episode(tmp_path):
     fixture = SeriesFixture(tmp_path, episode_count=2)
+    fixture.ongoing = True
     first = fixture.existing(1)
     fixture.remaining[first.infohash] = first.budget_bytes
     fixture.episode_offers[2] = [fixture.release("second", [2])]
@@ -35,7 +36,11 @@ async def test_complete_pack_recovers_only_stalled_individual_with_fresh_guards(
     fixture.remaining[sources[2].infohash] = sources[2].budget_bytes
     fixture.pack_offers = [fixture.release("pack", [1, 2, 3], seeds=40)]
     paused, added = set(), []
-    health_store = SourceHealthStore(fixture.repo.path, slow_replacement_enabled=False)
+    health_store = SourceHealthStore(
+        fixture.repo.path,
+        slow_replacement_enabled=False,
+        automatic_replacement_enabled=True,
+    )
     deleted = False
 
     def handler(request):
@@ -115,7 +120,7 @@ async def test_bound_pack_recovers_after_worker_restart_even_when_authorization_
     fixture.remaining[source.infohash] = source.budget_bytes
     fixture.pack_offers = [fixture.release("pack", [1, 2], seeds=40)]
     paused = set()
-    healthy = SourceHealthStore(fixture.repo.path)
+    healthy = SourceHealthStore(fixture.repo.path, automatic_replacement_enabled=True)
     health = TorrentHealth(
         infohash=source.infohash, state="stalledDL", progress=.1,
         amount_left=source.budget_bytes, downloaded=0, dlspeed=0, num_seeds=0,

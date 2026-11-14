@@ -13,16 +13,67 @@ def _health(*, downloaded=0, left=100_000_000_000, seeds=0, speed=0,
     )
 
 
+def test_default_policy_observes_stall_and_slow_without_automatic_replacement(tmp_path):
+    store = SourceHealthStore(tmp_path / 'control.sqlite', slow_replacement_enabled=True)
+    assert store.automatic_replacement_enabled is False
+    assert store.observe('stall', _health(), now=1000) is None
+    assert store.observe('stall', _health(), now=1300) is None
+    assert store.observe('slow', _health(seeds=2, state='downloading'), now=1000) is None
+    assert store.observe('slow', _health(left=99_999_999_000, seeds=2, speed=1,
+                                       state='downloading'), now=1300) is None
+    with store._connect() as connection:
+        row = connection.execute('SELECT last_amount_left FROM source_health '
+                                 "WHERE permit_id='slow'").fetchone()
+    assert row['last_amount_left'] == 99_999_999_000
+
+
+def test_disabling_automatic_replacement_suppresses_durable_replacing_intent(tmp_path):
+    path = tmp_path / 'control.sqlite'
+    enabled = SourceHealthStore(path, automatic_replacement_enabled=True)
+    enabled.observe('old', _health(), now=1000)
+    enabled.mark_replacing('old')
+    disabled = SourceHealthStore(path)
+    assert disabled.observe('old', _health(state='stoppedDL'), now=1400) is None
+    assert disabled.observe('old', _health(), now=2000) is None
+
+
+def test_disabling_automatic_replacement_cannot_reuse_prior_probe_promotion(tmp_path):
+    path = tmp_path / 'control.sqlite'
+    enabled = SourceHealthStore(path, automatic_replacement_enabled=True)
+    assert enabled.probe_decision('old', 'probe', _health(), _health(), now=1000) == 'observing'
+    moving = _health(downloaded=1000, left=99_999_999_000, speed=100, state='downloading')
+    assert enabled.probe_decision('old', 'probe', _health(), moving, now=1100) == 'promote'
+    assert SourceHealthStore(path).probe_decision(
+        'old', 'probe', _health(), moving, now=1200,
+    ) == 'reject'
+
+
+@pytest.mark.parametrize('value', [None, 0, 1, 'false'])
+def test_automatic_replacement_switch_requires_boolean(tmp_path, value):
+    with pytest.raises(ValueError, match='invalid source health policy'):
+        SourceHealthStore(tmp_path / 'control.sqlite', automatic_replacement_enabled=value)
+
+
 def test_zero_peer_stall_retries_after_five_minutes_and_survives_restart(tmp_path):
     path = tmp_path / "control.sqlite"
-    store = SourceHealthStore(path)
+    store = SourceHealthStore(path, automatic_replacement_enabled=True)
     assert store.observe("permit-1", _health(), now=1000) is None
-    assert SourceHealthStore(path).observe("permit-1", _health(), now=1299) is None
-    assert SourceHealthStore(path).observe("permit-1", _health(), now=1300) == "stalled"
+    assert SourceHealthStore(
+        path,
+        automatic_replacement_enabled=True,
+    ).observe("permit-1", _health(), now=1299) is None
+    assert SourceHealthStore(
+        path,
+        automatic_replacement_enabled=True,
+    ).observe("permit-1", _health(), now=1300) == "stalled"
 
 
 def test_progress_and_queue_pause_reset_stall_window(tmp_path):
-    store = SourceHealthStore(tmp_path / "control.sqlite", slow_seconds=3600)
+    store = SourceHealthStore(
+        tmp_path / "control.sqlite",
+        slow_seconds=3600,
+        automatic_replacement_enabled=True,
+    )
     assert store.observe("permit-1", _health(), now=1000) is None
     assert store.observe("permit-1", _health(downloaded=10, left=99_999_990_000), now=2700) is None
     assert store.observe("permit-1", _health(downloaded=10, left=99_999_990_000), now=2999) is None
@@ -35,7 +86,11 @@ def test_progress_and_queue_pause_reset_stall_window(tmp_path):
 
 
 def test_slow_progress_uses_hour_average_not_instantaneous_speed(tmp_path):
-    store = SourceHealthStore(tmp_path / "control.sqlite", slow_seconds=3600)
+    store = SourceHealthStore(
+        tmp_path / "control.sqlite",
+        slow_seconds=3600,
+        automatic_replacement_enabled=True,
+    )
     assert store.observe("permit-1", _health(seeds=2, state="downloading"), now=1000) is None
     assert store.observe("permit-1", _health(downloaded=2_000_000_000,
                                               left=98_000_000_000,
@@ -48,7 +103,7 @@ def test_slow_progress_uses_hour_average_not_instantaneous_speed(tmp_path):
 
 
 def test_default_slow_window_is_five_minutes_and_uses_progress(tmp_path):
-    store = SourceHealthStore(tmp_path / "control.sqlite")
+    store = SourceHealthStore(tmp_path / "control.sqlite", automatic_replacement_enabled=True)
     assert store.observe("p", _health(seeds=5, state="downloading"), now=1000) is None
     assert store.observe("p", _health(downloaded=29_900_000, left=99_970_100_000,
                                      seeds=5, speed=5_000_000, state="downloading"),
@@ -60,9 +115,17 @@ def test_default_slow_window_is_five_minutes_and_uses_progress(tmp_path):
 
 def test_disabled_slow_replacement_keeps_progressing_source_but_recovers_dead_swarm(tmp_path):
     path = tmp_path / "control.sqlite"
-    store = SourceHealthStore(path, slow_replacement_enabled=False)
+    store = SourceHealthStore(
+        path,
+        slow_replacement_enabled=False,
+        automatic_replacement_enabled=True,
+    )
     assert store.observe("slow", _health(seeds=5, state="downloading"), now=1000) is None
-    assert SourceHealthStore(path, slow_replacement_enabled=False).observe(
+    assert SourceHealthStore(
+        path,
+        slow_replacement_enabled=False,
+        automatic_replacement_enabled=True,
+    ).observe(
         "slow", _health(downloaded=30_000_000, left=99_970_000_000,
                         seeds=5, speed=100_000, state="downloading"), now=1300,
     ) is None
@@ -71,7 +134,11 @@ def test_disabled_slow_replacement_keeps_progressing_source_but_recovers_dead_sw
 
 
 def test_disabled_slow_replacement_rejects_trial_of_progressing_source(tmp_path):
-    store = SourceHealthStore(tmp_path / "control.sqlite", slow_replacement_enabled=False)
+    store = SourceHealthStore(
+        tmp_path / "control.sqlite",
+        slow_replacement_enabled=False,
+        automatic_replacement_enabled=True,
+    )
     old = _health(seeds=5, speed=100_000, state="downloading")
     new = _health(downloaded=1, left=90_000_000_000, seeds=10,
                   speed=5_000_000, state="downloading")
@@ -82,16 +149,30 @@ def test_disabled_slow_replacement_rejects_trial_of_progressing_source(tmp_path)
 def test_probe_without_payload_expires_after_active_startup_grace(tmp_path, state):
     path = tmp_path / "control.sqlite"
     old, new = _health(), _health(state=state)
-    store = SourceHealthStore(path, slow_replacement_enabled=False, stalled_seconds=300)
+    store = SourceHealthStore(
+        path,
+        slow_replacement_enabled=False,
+        stalled_seconds=300,
+        automatic_replacement_enabled=True,
+    )
     assert store.probe_decision("old", "trial", old, new, now=1000) == "observing"
     assert store.probe_decision("old", "trial", old, new, now=1299) == "observing"
-    restarted = SourceHealthStore(path, slow_replacement_enabled=False, stalled_seconds=300)
+    restarted = SourceHealthStore(
+        path,
+        slow_replacement_enabled=False,
+        stalled_seconds=300,
+        automatic_replacement_enabled=True,
+    )
     assert restarted.probe_decision("old", "trial", old, new, now=1300) == "reject"
 
 
 @pytest.mark.parametrize("state", ["queuedDL", "pausedDL", "stoppedDL"])
 def test_probe_queue_or_pause_does_not_consume_active_startup_grace(tmp_path, state):
-    store = SourceHealthStore(tmp_path / "control.sqlite", stalled_seconds=300)
+    store = SourceHealthStore(
+        tmp_path / "control.sqlite",
+        stalled_seconds=300,
+        automatic_replacement_enabled=True,
+    )
     old, active, waiting = _health(), _health(), _health(state=state)
     assert store.probe_decision("old", "trial", old, active, now=1000) == "observing"
     assert store.probe_decision("old", "trial", old, waiting, now=1299) == "observing"
@@ -102,7 +183,11 @@ def test_probe_queue_or_pause_does_not_consume_active_startup_grace(tmp_path, st
 
 
 def test_probe_startup_grace_allows_progress_but_retains_recovered_original(tmp_path):
-    store = SourceHealthStore(tmp_path / "control.sqlite", slow_replacement_enabled=False)
+    store = SourceHealthStore(
+        tmp_path / "control.sqlite",
+        slow_replacement_enabled=False,
+        automatic_replacement_enabled=True,
+    )
     old = _health()
     assert store.probe_decision("old", "trial", old, _health(), now=1000) == "observing"
     moving = _health(downloaded=1000, left=99_999_999_000, speed=100, state="downloading")
@@ -112,24 +197,28 @@ def test_probe_startup_grace_allows_progress_but_retains_recovered_original(tmp_
 
 def test_probe_startup_uses_configured_stall_limit_and_reject_is_durable(tmp_path):
     path = tmp_path / "control.sqlite"
-    store = SourceHealthStore(path, stalled_seconds=45)
+    store = SourceHealthStore(path, stalled_seconds=45, automatic_replacement_enabled=True)
     assert store.probe_decision("old", "trial", _health(), _health(), now=1000) == "observing"
     assert store.probe_decision("old", "trial", _health(), _health(), now=1044) == "observing"
     assert store.probe_decision("old", "trial", _health(), _health(), now=1045) == "reject"
-    assert SourceHealthStore(path).probe_decision(
+    assert SourceHealthStore(path, automatic_replacement_enabled=True).probe_decision(
         "old", "trial", _health(), _health(), now=1400,
     ) == "reject"
 
 
 def test_probe_payload_progress_during_startup_can_promote_after_measured_window(tmp_path):
-    store = SourceHealthStore(tmp_path / "control.sqlite", slow_replacement_enabled=False)
+    store = SourceHealthStore(
+        tmp_path / "control.sqlite",
+        slow_replacement_enabled=False,
+        automatic_replacement_enabled=True,
+    )
     assert store.probe_decision("old", "trial", _health(), _health(), now=1000) == "observing"
     moving = _health(downloaded=1000, left=99_999_999_000, speed=100, state="downloading")
     assert store.probe_decision("old", "trial", _health(), moving, now=1100) == "promote"
 
 
 def test_fast_progress_and_completed_torrent_never_trigger_failover(tmp_path):
-    store = SourceHealthStore(tmp_path / "control.sqlite")
+    store = SourceHealthStore(tmp_path / "control.sqlite", automatic_replacement_enabled=True)
     assert store.observe("permit-1", _health(seeds=3, state="downloading"), now=1000) is None
     assert store.observe("permit-1", _health(downloaded=8_000_000_000,
                                               left=92_000_000_000,
@@ -142,10 +231,10 @@ def test_fast_progress_and_completed_torrent_never_trigger_failover(tmp_path):
 
 def test_replacement_intent_survives_stop_but_can_be_cleared(tmp_path):
     path = tmp_path / "control.sqlite"
-    store = SourceHealthStore(path)
+    store = SourceHealthStore(path, automatic_replacement_enabled=True)
     store.observe("permit-1", _health(), now=1000)
     store.mark_replacing("permit-1")
-    assert SourceHealthStore(path).observe(
+    assert SourceHealthStore(path, automatic_replacement_enabled=True).observe(
         "permit-1", _health(state="stoppedDL", left=99_999_999_000), now=1010
     ) == "replacing"
     store.clear_replacing("permit-1")
@@ -153,7 +242,7 @@ def test_replacement_intent_survives_stop_but_can_be_cleared(tmp_path):
 
 
 def test_retransmitted_bytes_do_not_hide_a_stalled_download(tmp_path):
-    store = SourceHealthStore(tmp_path / "control.sqlite")
+    store = SourceHealthStore(tmp_path / "control.sqlite", automatic_replacement_enabled=True)
     assert store.observe("permit-1", _health(), now=1000) is None
     assert store.observe("permit-1", _health(downloaded=30_000_000), now=2800) == "stalled"
 

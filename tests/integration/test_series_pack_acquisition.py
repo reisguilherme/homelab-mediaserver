@@ -54,18 +54,18 @@ async def test_deleted_episode_declines_new_pack_but_preserves_admitted_shared_p
             assert await acquirer.acquire("season:tmdb:101:1", fixture.reservation) == "grabbed"
         jobs.tombstone("episode:tmdb:101:S01E01", "jellyfin-episode")
         assert await acquirer.acquire("season:tmdb:101:1", fixture.reservation) == (
-            "waiting_episodes" if already_admitted else "grabbed"
+            "waiting_episodes" if already_admitted else "waiting_complete_season_pack"
         )
     parent = fixture.permits.get_for_reservation(fixture.reservation, scope_key="S01PACK")
     second = fixture.permits.get_for_reservation(fixture.reservation, scope_key="S01E02")
-    assert second is not None
-    assert fixture.posts == (["whole-season"] if already_admitted else ["episode-two"])
+    assert (second is not None) == already_admitted
+    assert fixture.posts == (["whole-season"] if already_admitted else [])
     if already_admitted:
         assert parent is not None and second.season_pack_parent_id == parent.permit_id
     else:
         assert parent is None
         assert fixture.permits.get_for_reservation(fixture.reservation, scope_key="S01E01") is None
-        assert all("S01E02" in name for name in second.selected_files)
+        assert second is None
 
 
 def _encode(value):
@@ -97,6 +97,7 @@ class SeriesFixture:
         self.remaining = {}
         self.posts, self.controls, self.searched, self.metadata = [], [], [], []
         self.episode_count, self.free_bytes = episode_count, free_bytes
+        self.ongoing = False
 
     def release(
         self, name, episodes, *, seeds=10, group="GROUP", video_bytes=1_500_000_000,
@@ -181,13 +182,21 @@ class SeriesFixture:
         if path == "/api/v3/series":
             return httpx.Response(200, json=[{
                 "id": 1, "tmdbId": 101, "monitored": True, "runtime": 45,
+                "status": "continuing" if self.ongoing else "ended",
             }])
         if path == "/api/v3/episode":
-            return httpx.Response(200, json=[{
+            rows = [{
                 "id": number, "seasonNumber": 1, "episodeNumber": number,
                 "monitored": True, "hasFile": False,
                 "airDateUtc": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
-            } for number in range(1, self.episode_count + 1)])
+            } for number in range(1, self.episode_count + 1)]
+            if self.ongoing:
+                rows.append({
+                    "id": 900000, "seasonNumber": 1, "episodeNumber": self.episode_count + 1,
+                    "monitored": False, "hasFile": False,
+                    "airDateUtc": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
+                })
+            return httpx.Response(200, json=rows)
         if path == "/api/v3/release" and request.method == "GET":
             if "seasonNumber" in request.url.params:
                 self.searched.append("pack")
@@ -222,7 +231,7 @@ class SeriesFixture:
             prowlarr_url="http://prowlarr:9696", gateway_url="http://gateway:8081",
             arr_token="fixture", torrent_store=TorrentArtifactStore(self.repo.path),
             capacity_provider=self.capacity,
-            release_policy=ReleasePolicy.from_environment({}, media_kind="series"),
+            release_policy=ReleasePolicy(resolutions=(1080,), indexer_fallback_min_seeders=5),
             **preferences,
         )
 
@@ -268,7 +277,7 @@ async def test_twenty_episode_pack_is_one_transfer_and_keeps_completed_individua
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["incomplete", "weak", "capacity"])
-async def test_bad_or_weak_or_nonfitting_pack_falls_back_to_good_episode(tmp_path, failure):
+async def test_bad_or_weak_or_nonfitting_complete_pack_waits_without_single(tmp_path, failure):
     fixture = SeriesFixture(tmp_path, free_bytes=3_000_000_000 if failure == "capacity" else
                             100_000_000_000)
     fixture.pack_offers = [fixture.release(
@@ -279,8 +288,8 @@ async def test_bad_or_weak_or_nonfitting_pack_falls_back_to_good_episode(tmp_pat
     async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handler)) as client:
         assert await fixture.acquirer(client, prefer_season_pack=True).acquire(
             "season:tmdb:101:1", fixture.reservation,
-        ) == "grabbed"
-    assert fixture.posts == ["episode-one"]
+        ) == "waiting_complete_season_pack"
+    assert fixture.posts == []
     assert fixture.permits.get_for_reservation(fixture.reservation, scope_key="S01PACK") is None
 
 
@@ -292,6 +301,7 @@ async def test_series_affinity_survives_restart_but_only_breaks_seed_ties(
     tmp_path, matching_seeds, expected,
 ):
     fixture = SeriesFixture(tmp_path, episode_count=2)
+    fixture.ongoing = True
     fixture.episode_offers[1] = [fixture.release("first", [1], group="PLAY", seeds=20)]
     fixture.episode_offers[2] = [
         fixture.release("other-family", [2], group="OTHER", seeds=100),
@@ -313,6 +323,7 @@ async def test_native_season_discovery_supplies_missing_primary_episodes_once(
     tmp_path, prefer_season_pack,
 ):
     fixture = SeriesFixture(tmp_path, episode_count=2)
+    fixture.ongoing = True
     fixture.pack_offers = [
         fixture.release(f"season-only-{number}", [number])
         | {"seriesId": 1, "fullSeason": False}
@@ -331,11 +342,19 @@ async def test_native_season_discovery_supplies_missing_primary_episodes_once(
         )
     assert fixture.posts == ["season-only-1", "season-only-2"]
     assert fixture.searched.count("pack") == 1
-    assert fixture.metadata == ["season-only-1", "season-only-2"]
+    assert fixture.metadata == ["season-only-1", "backup-1", "season-only-2", "backup-2"]
 
 
 @pytest.mark.asyncio
-async def test_season_discovery_refreshes_after_bounded_ttl_and_preserves_native_veto(tmp_path):
+async def test_season_discovery_refreshes_after_bounded_ttl_and_preserves_native_veto(
+    tmp_path, monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from homeserver_control.worker import series_acquisition
+
+    # A newly started host may have less uptime than the cache TTL.
+    monkeypatch.setattr(series_acquisition, 'time', SimpleNamespace(monotonic=lambda: 10.0))
     fixture = SeriesFixture(tmp_path, episode_count=2)
     offer = fixture.release("season-only", [1]) | {"seriesId": 1}
     fixture.pack_offers = [offer]
@@ -354,8 +373,12 @@ async def test_season_discovery_refreshes_after_bounded_ttl_and_preserves_native
         fixture.episode_offers[1] = []
         fixture.pack_offers = []
         # Expire the cached season without sleeping or changing the global event-loop clock.
+        expired_at = (
+            series_acquisition.time.monotonic()
+            - series_acquisition._SEASON_RELEASE_TTL_SECONDS - 1
+        )
         acquirer._season_release_cache = {
-            key: (0, rows) for key, (_, rows) in acquirer._season_release_cache.items()
+            key: (expired_at, rows) for key, (_, rows) in acquirer._season_release_cache.items()
         }
         assert await candidates() == []
     assert fixture.searched.count('pack') == 2
@@ -369,6 +392,7 @@ async def test_season_discovery_refreshes_after_bounded_ttl_and_preserves_native
 ])
 async def test_season_discovery_rejects_foreign_or_ambiguous_native_identity(tmp_path, identity):
     fixture = SeriesFixture(tmp_path, episode_count=1)
+    fixture.ongoing = True
     fixture.pack_offers = [fixture.release('foreign', [1]) | identity]
     async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handler)) as client:
         assert await fixture.acquirer(client).acquire(
@@ -382,8 +406,8 @@ async def test_season_discovery_rejects_foreign_or_ambiguous_native_identity(tmp
 @pytest.mark.parametrize("reasons,expected", [
     (["Existing file meets cutoff: WEB-DL-1080p"], "pack"),
     (["Release in queue already meets cutoff: WEB-DL-1080p"], "pack"),
-    (["Existing file meets cutoff: WEB-DL-1080p", "Unknown Series"], "single"),
-    (["Existing file meets cutoff: WEB-DL-1080p", "Quality is below minimum size"], "single"),
+    (["Existing file meets cutoff: WEB-DL-1080p", "Unknown Series"], None),
+    (["Existing file meets cutoff: WEB-DL-1080p", "Quality is below minimum size"], None),
 ])
 async def test_pack_partial_season_cutoff_does_not_bypass_other_native_vetoes(
     tmp_path, reasons, expected,
@@ -397,13 +421,14 @@ async def test_pack_partial_season_cutoff_does_not_bypass_other_native_vetoes(
     async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handler)) as client:
         assert await fixture.acquirer(client, prefer_season_pack=True).acquire(
             "season:tmdb:101:1", fixture.reservation,
-        ) == "grabbed"
-    assert fixture.posts == [expected]
+        ) == ("grabbed" if expected else "waiting_complete_season_pack")
+    assert fixture.posts == ([expected] if expected else [])
 
 
 @pytest.mark.asyncio
-async def test_healthy_uindex_takes_priority_over_previous_1337x_family(tmp_path):
+async def test_more_seeded_1337x_candidate_beats_healthy_uindex_and_preserves_family(tmp_path):
     fixture = SeriesFixture(tmp_path, episode_count=2)
+    fixture.ongoing = True
     fixture.episode_offers[1] = [{
         **fixture.release("first", [1], group="PLAY", seeds=20),
         "indexer": "1337x (Prowlarr)",
@@ -418,7 +443,7 @@ async def test_healthy_uindex_takes_priority_over_previous_1337x_family(tmp_path
             assert await fixture.acquirer(client, release_affinity=True).acquire(
                 "season:tmdb:101:1", fixture.reservation,
             ) == "grabbed"
-    assert fixture.posts == ["first", "uindex"]
+    assert fixture.posts == ["first", "old-family"]
 
 
 @pytest.mark.asyncio
@@ -452,11 +477,20 @@ async def test_pack_cannot_overwrite_any_retained_source_at_the_same_path(tmp_pa
     retained = fixture.existing(2, root_name="shared", state=state)
     fixture.pack_offers = [fixture.release("pack", [1, 2], root_name="shared")]
     fixture.episode_offers[1] = [fixture.release("single", [1])]
-    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handler)) as client:
+    def handler(request):
+        if request.url.path == "/internal/reconcile-source":
+            assert json.loads(request.content) == {"permit_token": retained.token}
+            return httpx.Response(200, json={"state": "missing"})
+        return fixture.handler(request)
+
+    expected = {
+        "unknown": "source_uncertain", "superseded": "replacement_missing_manual",
+    }.get(state, "waiting_complete_season_pack")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         assert await fixture.acquirer(client, prefer_season_pack=True).acquire(
             "season:tmdb:101:1", fixture.reservation,
-        ) == "grabbed"
-    assert fixture.posts == ["single"]
+        ) == expected
+    assert fixture.posts == []
     assert fixture.permits.get_for_reservation(fixture.reservation, scope_key="S01PACK") is None
     assert fixture.permits.get(retained.token).state == state
     assert not any(body["permit_token"] == retained.token for _, body in fixture.controls)
@@ -486,8 +520,8 @@ async def test_pack_path_guard_uses_full_artifact_and_linux_path_boundaries(
     async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handler)) as client:
         assert await fixture.acquirer(client, prefer_season_pack=True).acquire(
             "season:tmdb:101:1", fixture.reservation,
-        ) == "grabbed"
-    assert fixture.posts == [expected]
+        ) == ("grabbed" if expected == "pack" else "waiting_complete_season_pack")
+    assert fixture.posts == (["pack"] if expected == "pack" else [])
 
 
 @pytest.mark.asyncio
@@ -506,8 +540,8 @@ async def test_pack_cannot_overwrite_source_retained_from_another_request(tmp_pa
     async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handler)) as client:
         assert await fixture.acquirer(client, prefer_season_pack=True).acquire(
             "season:tmdb:101:1", fixture.reservation,
-        ) == "grabbed"
-    assert fixture.posts == ["single"]
+        ) == "waiting_complete_season_pack"
+    assert fixture.posts == []
     assert fixture.permits.get(retained.token).state == "confirmed"
     assert fixture.permits.get_for_reservation(fixture.reservation, scope_key="S01PACK") is None
     assert not any(body["permit_token"] == retained.token for _, body in fixture.controls)
@@ -531,8 +565,8 @@ async def test_invalid_retained_artifact_cannot_hide_a_payload_path_conflict(tmp
     async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handler)) as client:
         assert await fixture.acquirer(client, prefer_season_pack=True).acquire(
             "season:tmdb:101:1", fixture.reservation,
-        ) == "grabbed"
-    assert fixture.posts == ["single"]
+        ) == "waiting_complete_season_pack"
+    assert fixture.posts == []
 
 
 @pytest.mark.asyncio
@@ -546,8 +580,8 @@ async def test_legacy_source_without_artifact_still_protects_selected_video(tmp_
     async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.handler)) as client:
         assert await fixture.acquirer(client, prefer_season_pack=True).acquire(
             "season:tmdb:101:1", fixture.reservation,
-        ) == "grabbed"
-    assert fixture.posts == ["single"]
+        ) == "waiting_complete_season_pack"
+    assert fixture.posts == []
 
 
 @pytest.mark.asyncio

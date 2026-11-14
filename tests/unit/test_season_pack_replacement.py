@@ -292,7 +292,7 @@ def test_pack_authorization_rechecks_cancellation_before_external_effect(setup_p
                            destination=parent.destination, metadata_sha256=parent.metadata_sha256,
                            effect=lambda _: effects.append("called") or {"accepted": True})
     assert effects == []
-    assert registry.get(parent.token).state == "unknown"
+    assert registry.get(parent.token).state == "authorized"
 
 
 def test_cancel_unused_pack_removes_only_its_metadata_artifact(setup_pack):

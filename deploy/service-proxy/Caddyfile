@@ -1,0 +1,67 @@
+{
+	# Runtime upstream errors also carry URLs and legacy token headers.
+	log {
+		exclude http.log.access http.log.error
+	}
+}
+
+# Private LAN/Tailscale entry point. No control API or native qBit port is exposed.
+:80 {
+	redir / /status/ 302
+	redir /status /status/ 308
+	redir /jellyfin /jellyfin/ 308
+	redir /sonarr /sonarr/ 308
+	redir /radarr /radarr/ 308
+	redir /prowlarr /prowlarr/ 308
+	redir /bazarr /bazarr/ 308
+	redir /qbittorrent /qbittorrent/ 308
+
+	# Seerr needs a root URL and HTTPS for its native secure session cookies.
+	@seerr path /seer /seer/ /seerr /seerr/
+	redir @seerr https://homelab.coin-capella.ts.net/ 302
+
+	# Retire a legacy root-path SID after native qBit accepts a new login.
+	# Defer outside reverse_proxy so its cookie rewrite cannot scope this expiry.
+	@qbit_login {
+		method POST
+		path /qbittorrent/api/v2/auth/login
+	}
+	header @qbit_login {
+		+Set-Cookie "SID=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict"
+		defer
+		match header Set-Cookie "SID=*"
+	}
+
+	handle /jellyfin/* {
+		# Always traverse the existing coordinated-deletion proxy.
+		reverse_proxy jellyfin-proxy:8096
+	}
+	handle /sonarr/* {
+		reverse_proxy sonarr:8989
+	}
+	handle /radarr/* {
+		reverse_proxy radarr:7878
+	}
+	handle /prowlarr/* {
+		reverse_proxy prowlarr:9696
+	}
+	handle /bazarr/* {
+		reverse_proxy bazarr:6767
+	}
+	handle_path /qbittorrent/* {
+		# Preserve Host, Origin and Referer: authentication and CSRF stay native.
+		reverse_proxy qbit-monitor:8080 {
+			header_down Location "^/([^/].*)?$" "/qbittorrent/${1}"
+			header_down Set-Cookie "(?i)(;[ ]*Path=)/($|;)" "${1}/qbittorrent/${2}"
+		}
+	}
+	handle_path /status/* {
+		reverse_proxy telemetry:8080 {
+			# Fixed allowlisted path; telemetry keeps browser actions same-origin.
+			header_up X-HomeServer-Path /status
+		}
+	}
+	handle {
+		respond "Not found" 404
+	}
+}

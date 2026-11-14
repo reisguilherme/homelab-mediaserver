@@ -66,7 +66,15 @@ def test_partial_breakdown_preserves_unclassified_used_bytes():
 
 
 @pytest.mark.parametrize("capacity_state", ["ok", "unavailable"])
-def test_dashboard_renders_independent_physical_pool_cards(capacity_state):
+@pytest.mark.parametrize('breakdown,expected_active', [
+    ({'active_queue_remaining_bytes': 200, 'stopped_queue_remaining_bytes': 800}, '200 B'),
+    ({'active_queue_remaining_bytes': 0, 'stopped_queue_remaining_bytes': 1000}, '0 B'),
+    ({'active_queue_remaining_bytes': None, 'stopped_queue_remaining_bytes': None}, '—'),
+    ({}, '—'),
+])
+def test_dashboard_renders_independent_physical_pool_cards(
+    capacity_state, breakdown, expected_active,
+):
     node = shutil.which("node") or shutil.which("node.exe")
     if not node:
         pytest.skip("Node required for browser rendering contract")
@@ -95,6 +103,7 @@ global.setInterval = ()=>{};
                 free_bytes=3500,
                 queue_remaining_bytes=1000,
                 admissible_bytes=3000,
+                **breakdown,
                 storage=dict(state='ok', movies_bytes=2000, series_bytes=1000,
                              torrents_bytes=2000, other_bytes=1000),
             ),
@@ -116,6 +125,9 @@ global.setInterval = ()=>{};
         + json.dumps(payload)
         + """);
 const actual = {ssd: elements['pool-ssd-free'].textContent,
+ activeQueue: elements['pool-ssd-queue'].textContent,
+ stoppedRowPresent: Boolean(elements['pool-ssd-stopped'] || elements['pool-hdd-stopped']),
+ admissible: elements['pool-ssd-admissible'].textContent,
  hdd: elements['pool-hdd-free'].textContent,
  queue: elements['pool-hdd-queue'].textContent,
  cpu: elements.cpu.textContent, hidden: elements['legacy-storage'].hidden,
@@ -125,11 +137,13 @@ const actual = {ssd: elements['pool-ssd-free'].textContent,
  moviesBar: elements['pool-ssd-movies-bar'].style.width,
  ssdChartHidden: elements['pool-ssd-chart'].hidden,
  hddChartHidden: elements['pool-hdd-chart'].hidden,
+ graphSummary: elements['pool-ssd-chart-summary'].textContent,
  graphLabel: elements['pool-ssd-chart'].attributes['aria-label']};
 renderPools([{pool_id:'ssd', state:'stale'}]);
 actual.staleChartHidden = elements['pool-ssd-chart'].hidden;
 actual.staleMoviesBar = elements['pool-ssd-movies-bar'].style.width;
 actual.staleBreakdownHidden = elements['pool-ssd-breakdown'].hidden;
+actual.staleQueue = elements['pool-ssd-queue'].textContent;
 console.log(JSON.stringify(actual));
 """
     )
@@ -139,6 +153,10 @@ console.log(JSON.stringify(actual));
     assert actual["ssd"] != "—"
     assert actual["hdd"] == "—"
     assert actual["queue"] == "—"
+    assert actual['activeQueue'] == expected_active
+    assert actual['stoppedRowPresent'] is False
+    assert actual['admissible'] != '—'
+    assert actual['staleQueue'] == '—'
     assert actual["cpu"] == "42%"
     assert actual["hidden"] is True
     assert actual["poolsHidden"] is False
@@ -150,7 +168,8 @@ console.log(JSON.stringify(actual));
     assert actual['hddChartHidden'] is True
     assert 'Filmes 20%' in actual['graphLabel']
     assert 'Livre 35%' in actual['graphLabel']
-    assert 'Reservado / indisponível 5%' in actual['graphLabel']
+    assert 'Reserva do filesystem 5%' in actual['graphLabel']
+    assert '5% reserva do filesystem' in actual['graphSummary']
     assert actual['staleChartHidden'] is True
     assert actual['staleMoviesBar'] == '0%'
     assert actual['staleBreakdownHidden'] is True

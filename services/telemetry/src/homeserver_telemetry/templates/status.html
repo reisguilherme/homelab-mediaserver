@@ -33,6 +33,26 @@
     .meta { color: #748b99; letter-spacing: .08em; }
     .storage { display: grid; grid-template-columns: 235px 1fr; gap: 32px; align-items: center; padding: 28px; }
     [hidden] { display: none !important; }
+    .storage-overview .card-label { margin-bottom: 12px; }
+    .storage-overview-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 9px 18px; }
+    .storage-overview-heading .value { font-size: 36px; }
+    .storage-overview-heading p { margin: 0; color: #93a8b3; font-size: 14px; }
+    .storage-overview .meter { margin-top: 20px; height: 10px; }
+    .storage-free { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 22px 0 0; }
+    .storage-free > div { min-width: 0; padding-top: 14px; border-top: 1px solid #2a3d47; }
+    .storage-free dt { color: #93a8b3; font-size: 12px; }
+    .storage-free dd { margin: 6px 0 0; font-size: 15px; font-variant-numeric: tabular-nums; }
+    .storage-free dd span { font-size: 21px; font-weight: 550; }
+    .storage-free .pool-state { display: block; margin-top: 5px; font-size: 12px; font-weight: 400; }
+    .storage-more { margin-top: 14px; }
+    .storage-more > summary { display: inline-flex; align-items: center; gap: 10px; padding: 10px 14px; border: 1px solid #31515a; border-radius: 10px; color: #b0e3dc; background: #14262d; cursor: pointer; font-size: 13px; list-style: none; }
+    .storage-more > summary::-webkit-details-marker { display: none; }
+    .storage-more > summary::after { content: '+'; font-size: 18px; line-height: 1; }
+    .storage-more[open] > summary::after { content: '−'; }
+    .storage-more > summary:hover { border-color: #66d6c7; }
+    .storage-more > summary:focus-visible { outline: 2px solid #66d6c7; outline-offset: 3px; }
+    .storage-more > .pool-grid { margin-top: 14px; }
+    @media (max-width: 620px) { .storage-free { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 12px; } }
     .pool-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
     .pool-card h3 { margin: 0; font-size: 21px; }
     .pool-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 24px; }
@@ -115,8 +135,25 @@
 
     <section aria-labelledby="storage-title">
       <div class="section-heading"><h2 id="storage-title">Armazenamento</h2><span class="meta" id="storage-state">Aguardando medição</span></div>
+      <div class="card storage-overview" id="storage-overview" hidden>
+        <p class="card-label">Armazenamento total</p>
+        <div class="storage-overview-heading">
+          <div class="value" id="storage-total-percent">—</div>
+          <p><span id="storage-total-used">—</span> usados de <span id="storage-total-bytes">—</span> · <span id="storage-total-free">—</span> livres</p>
+        </div>
+        <div class="meter" id="storage-total-meter" role="progressbar" aria-label="Uso físico do armazenamento total" aria-valuemin="0" aria-valuemax="100"><span></span></div>
+        <dl class="storage-free" aria-label="Espaço livre por disco">
+          <div id="storage-ssd"><dt id="storage-ssd-label">SSD</dt><dd><span id="storage-ssd-free">—</span> livres<span class="pool-state" id="storage-ssd-state">Aguardando medição</span></dd></div>
+          <div id="storage-hdd"><dt id="storage-hdd-label">HD USB</dt><dd><span id="storage-hdd-free">—</span> livres<span class="pool-state" id="storage-hdd-state">Aguardando medição</span></dd></div>
+          <div id="storage-hdd2" hidden><dt id="storage-hdd2-label">HD USB 2</dt><dd><span id="storage-hdd2-free">—</span> livres<span class="pool-state" id="storage-hdd2-state">Aguardando medição</span></dd></div>
+          <div id="storage-hdd3" hidden><dt id="storage-hdd3-label">HD USB 3</dt><dd><span id="storage-hdd3-free">—</span> livres<span class="pool-state" id="storage-hdd3-state">Aguardando medição</span></dd></div>
+        </dl>
+        <p class="note" id="storage-summary-note">Aguardando medição de todos os discos.</p>
+      </div>
+      <details class="storage-more" id="storage-more" hidden>
+        <summary>Mais detalhes</summary>
       <div id="pool-storage" class="pool-grid" hidden>
-        <article class="card pool-card" aria-labelledby="pool-ssd-title">
+        <article class="card pool-card" id="pool-ssd-card" aria-labelledby="pool-ssd-title">
           <div class="pool-heading"><h3 id="pool-ssd-title">SSD</h3><span class="pool-state" id="pool-ssd-state">Aguardando medição</span></div>
           <dl class="pool-figures">
             <div><dt>Usado físico</dt><dd id="pool-ssd-used">—</dd></div><div><dt>Livre utilizável</dt><dd id="pool-ssd-free">—</dd></div>
@@ -135,13 +172,13 @@
             <div class="legend-item"><span class="legend-label"><i class="swatch torrents" aria-hidden="true"></i>Torrents</span><strong id="pool-ssd-torrents">—</strong></div>
             <div class="legend-item"><span class="legend-label"><i class="swatch other" aria-hidden="true"></i>Outros</span><strong id="pool-ssd-other">—</strong></div>
           </div>
-          <div class="legend" id="pool-ssd-chart-legend" aria-label="Livre e reservado do SSD" hidden>
+          <div class="legend" id="pool-ssd-chart-legend" aria-label="Livre e reserva do filesystem no SSD" hidden>
             <div class="legend-item" id="pool-ssd-used-legend"><span class="legend-label"><i class="swatch used" aria-hidden="true"></i><span id="pool-ssd-used-label">Usado</span></span><strong id="pool-ssd-unclassified">—</strong></div>
             <div class="legend-item"><span class="legend-label"><i class="swatch free" aria-hidden="true"></i>Livre</span><strong id="pool-ssd-chart-free">—</strong></div>
-            <div class="legend-item" id="pool-ssd-reserved-legend"><span class="legend-label"><i class="swatch reserved" aria-hidden="true"></i>Reservado / indisponível</span><strong id="pool-ssd-reserved">—</strong></div>
+            <div class="legend-item" id="pool-ssd-reserved-legend"><span class="legend-label" title="Blocos livres reservados pelo sistema de arquivos, indisponíveis aos serviços. Não corresponde à fila nem à margem de segurança dos downloads."><i class="swatch reserved" aria-hidden="true"></i>Reserva do filesystem</span><strong id="pool-ssd-reserved">—</strong></div>
           </div>
         </article>
-        <article class="card pool-card" aria-labelledby="pool-hdd-title">
+        <article class="card pool-card" id="pool-hdd-card" aria-labelledby="pool-hdd-title">
           <div class="pool-heading"><h3 id="pool-hdd-title">HD USB</h3><span class="pool-state" id="pool-hdd-state">Aguardando medição</span></div>
           <dl class="pool-figures">
             <div><dt>Usado físico</dt><dd id="pool-hdd-used">—</dd></div><div><dt>Livre utilizável</dt><dd id="pool-hdd-free">—</dd></div>
@@ -160,14 +197,65 @@
             <div class="legend-item"><span class="legend-label"><i class="swatch torrents" aria-hidden="true"></i>Torrents</span><strong id="pool-hdd-torrents">—</strong></div>
             <div class="legend-item"><span class="legend-label"><i class="swatch other" aria-hidden="true"></i>Outros</span><strong id="pool-hdd-other">—</strong></div>
           </div>
-          <div class="legend" id="pool-hdd-chart-legend" aria-label="Livre e reservado do HD USB" hidden>
+          <div class="legend" id="pool-hdd-chart-legend" aria-label="Livre e reserva do filesystem no HD USB" hidden>
             <div class="legend-item" id="pool-hdd-used-legend"><span class="legend-label"><i class="swatch used" aria-hidden="true"></i><span id="pool-hdd-used-label">Usado</span></span><strong id="pool-hdd-unclassified">—</strong></div>
             <div class="legend-item"><span class="legend-label"><i class="swatch free" aria-hidden="true"></i>Livre</span><strong id="pool-hdd-chart-free">—</strong></div>
-            <div class="legend-item" id="pool-hdd-reserved-legend"><span class="legend-label"><i class="swatch reserved" aria-hidden="true"></i>Reservado / indisponível</span><strong id="pool-hdd-reserved">—</strong></div>
+            <div class="legend-item" id="pool-hdd-reserved-legend"><span class="legend-label" title="Blocos livres reservados pelo sistema de arquivos, indisponíveis aos serviços. Não corresponde à fila nem à margem de segurança dos downloads."><i class="swatch reserved" aria-hidden="true"></i>Reserva do filesystem</span><strong id="pool-hdd-reserved">—</strong></div>
+          </div>
+        </article>
+        <article class="card pool-card" id="pool-hdd2-card" aria-labelledby="pool-hdd2-title" hidden>
+          <div class="pool-heading"><h3 id="pool-hdd2-title">HD USB 2</h3><span class="pool-state" id="pool-hdd2-state">Aguardando medição</span></div>
+          <dl class="pool-figures">
+            <div><dt>Usado físico</dt><dd id="pool-hdd2-used">—</dd></div><div><dt>Livre utilizável</dt><dd id="pool-hdd2-free">—</dd></div>
+            <div><dt>Restante da fila</dt><dd id="pool-hdd2-queue">—</dd></div><div><dt>Disponível para novos downloads</dt><dd id="pool-hdd2-admissible">—</dd></div>
+          </dl>
+          <p class="note">Total <span id="pool-hdd2-total">—</span> · Amostra <span id="pool-hdd2-age">—</span></p>
+          <div class="pool-chart">
+            <div class="segments pool-segments" id="pool-hdd2-chart" role="img" aria-label="Gráfico do HD USB 2 indisponível" hidden>
+              <span class="movies" id="pool-hdd2-movies-bar" aria-hidden="true"></span><span class="series" id="pool-hdd2-series-bar" aria-hidden="true"></span><span class="torrents" id="pool-hdd2-torrents-bar" aria-hidden="true"></span><span class="other" id="pool-hdd2-other-bar" aria-hidden="true"></span><span class="used" id="pool-hdd2-used-bar" aria-hidden="true"></span><span class="free" id="pool-hdd2-free-bar" aria-hidden="true"></span><span class="reserved" id="pool-hdd2-reserved-bar" aria-hidden="true"></span>
+            </div>
+            <p class="pool-chart-summary" id="pool-hdd2-chart-summary">Gráfico indisponível</p>
+          </div>
+          <div class="legend" id="pool-hdd2-breakdown" aria-label="Uso por categoria do HD USB 2" hidden>
+            <div class="legend-item"><span class="legend-label"><i class="swatch movies" aria-hidden="true"></i>Filmes</span><strong id="pool-hdd2-movies">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch series" aria-hidden="true"></i>Séries</span><strong id="pool-hdd2-series">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch torrents" aria-hidden="true"></i>Torrents</span><strong id="pool-hdd2-torrents">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch other" aria-hidden="true"></i>Outros</span><strong id="pool-hdd2-other">—</strong></div>
+          </div>
+          <div class="legend" id="pool-hdd2-chart-legend" aria-label="Livre e reserva do filesystem no HD USB 2" hidden>
+            <div class="legend-item" id="pool-hdd2-used-legend"><span class="legend-label"><i class="swatch used" aria-hidden="true"></i><span id="pool-hdd2-used-label">Usado</span></span><strong id="pool-hdd2-unclassified">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch free" aria-hidden="true"></i>Livre</span><strong id="pool-hdd2-chart-free">—</strong></div>
+            <div class="legend-item" id="pool-hdd2-reserved-legend"><span class="legend-label" title="Blocos livres reservados pelo sistema de arquivos, indisponíveis aos serviços. Não corresponde à fila nem à margem de segurança dos downloads."><i class="swatch reserved" aria-hidden="true"></i>Reserva do filesystem</span><strong id="pool-hdd2-reserved">—</strong></div>
+          </div>
+        </article>
+        <article class="card pool-card" id="pool-hdd3-card" aria-labelledby="pool-hdd3-title" hidden>
+          <div class="pool-heading"><h3 id="pool-hdd3-title">HD USB 3</h3><span class="pool-state" id="pool-hdd3-state">Aguardando medição</span></div>
+          <dl class="pool-figures">
+            <div><dt>Usado físico</dt><dd id="pool-hdd3-used">—</dd></div><div><dt>Livre utilizável</dt><dd id="pool-hdd3-free">—</dd></div>
+            <div><dt>Restante da fila</dt><dd id="pool-hdd3-queue">—</dd></div><div><dt>Disponível para novos downloads</dt><dd id="pool-hdd3-admissible">—</dd></div>
+          </dl>
+          <p class="note">Total <span id="pool-hdd3-total">—</span> · Amostra <span id="pool-hdd3-age">—</span></p>
+          <div class="pool-chart">
+            <div class="segments pool-segments" id="pool-hdd3-chart" role="img" aria-label="Gráfico do HD USB 3 indisponível" hidden>
+              <span class="movies" id="pool-hdd3-movies-bar" aria-hidden="true"></span><span class="series" id="pool-hdd3-series-bar" aria-hidden="true"></span><span class="torrents" id="pool-hdd3-torrents-bar" aria-hidden="true"></span><span class="other" id="pool-hdd3-other-bar" aria-hidden="true"></span><span class="used" id="pool-hdd3-used-bar" aria-hidden="true"></span><span class="free" id="pool-hdd3-free-bar" aria-hidden="true"></span><span class="reserved" id="pool-hdd3-reserved-bar" aria-hidden="true"></span>
+            </div>
+            <p class="pool-chart-summary" id="pool-hdd3-chart-summary">Gráfico indisponível</p>
+          </div>
+          <div class="legend" id="pool-hdd3-breakdown" aria-label="Uso por categoria do HD USB 3" hidden>
+            <div class="legend-item"><span class="legend-label"><i class="swatch movies" aria-hidden="true"></i>Filmes</span><strong id="pool-hdd3-movies">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch series" aria-hidden="true"></i>Séries</span><strong id="pool-hdd3-series">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch torrents" aria-hidden="true"></i>Torrents</span><strong id="pool-hdd3-torrents">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch other" aria-hidden="true"></i>Outros</span><strong id="pool-hdd3-other">—</strong></div>
+          </div>
+          <div class="legend" id="pool-hdd3-chart-legend" aria-label="Livre e reserva do filesystem no HD USB 3" hidden>
+            <div class="legend-item" id="pool-hdd3-used-legend"><span class="legend-label"><i class="swatch used" aria-hidden="true"></i><span id="pool-hdd3-used-label">Usado</span></span><strong id="pool-hdd3-unclassified">—</strong></div>
+            <div class="legend-item"><span class="legend-label"><i class="swatch free" aria-hidden="true"></i>Livre</span><strong id="pool-hdd3-chart-free">—</strong></div>
+            <div class="legend-item" id="pool-hdd3-reserved-legend"><span class="legend-label" title="Blocos livres reservados pelo sistema de arquivos, indisponíveis aos serviços. Não corresponde à fila nem à margem de segurança dos downloads."><i class="swatch reserved" aria-hidden="true"></i>Reserva do filesystem</span><strong id="pool-hdd3-reserved">—</strong></div>
           </div>
         </article>
         <p class="note">Hardlinks são contados uma vez por disco. Fila e disponibilidade exigem evidência atual; “—” indica dados indisponíveis.</p>
       </div>
+      </details>
       <div class="card storage" id="legacy-storage">
         <div class="ring" id="ring" role="img" aria-label="Uso do armazenamento indisponível"><div class="ring-inner"><strong id="used-percent">—</strong><span>ocupado</span></div></div>
         <div class="storage-details">
@@ -186,6 +274,7 @@
     <section aria-labelledby="services-title">
       <div class="section-heading"><h2 id="services-title">Serviços</h2><span class="meta">{{SERVICE_ACCESS_STATE}}</span></div>
       <div class="services">
+        <a class="card service-card" id="service-downloads" href="{{URL_BASE}}/ui/downloads"><p class="card-label">Controle</p><div class="service-name">Downloads<span class="service-arrow" aria-hidden="true">↗</span></div><span class="service-description">Progresso, seeds e troca manual de fonte</span></a>
         <a class="card service-card" id="service-jellyfin" {{SERVICE_JELLYFIN_LINK}}><span class="card-label">Biblioteca</span><span class="service-name">Jellyfin <span class="service-arrow" aria-hidden="true">↗</span></span><span class="service-description">Filmes, séries e reprodução</span></a>
         <a class="card service-card" id="service-seerr" {{SERVICE_SEERR_LINK}}><span class="card-label">Pedidos</span><span class="service-name">Seerr <span class="service-arrow" aria-hidden="true">↗</span></span><span class="service-description">Solicitações e descobertas</span></a>
         <a class="card service-card" id="service-sonarr" {{SERVICE_SONARR_LINK}}><span class="card-label">Séries</span><span class="service-name">Sonarr <span class="service-arrow" aria-hidden="true">↗</span></span><span class="service-description">Fila, atividade e histórico de episódios</span></a>
@@ -240,7 +329,7 @@
         for (const key of ['movies', 'series', 'torrents', 'other', 'used', 'free', 'reserved']) $(prefix + key + '-bar').style.width = '0%';
         return;
       }
-      const labels = { movies: 'Filmes', series: 'Séries', torrents: 'Torrents', other: 'Outros', used: chart.breakdown ? 'Sem classificação' : 'Usado', free: 'Livre', reserved: 'Reservado / indisponível' };
+      const labels = { movies: 'Filmes', series: 'Séries', torrents: 'Torrents', other: 'Outros', used: chart.breakdown ? 'Sem classificação' : 'Usado', free: 'Livre', reserved: 'Reserva do filesystem' };
       const accessible = [`${label}: total ${bytes(pool.total_bytes)}`];
       for (const [key, value] of Object.entries(chart.segments)) {
         $(prefix + key + '-bar').style.width = `${value}%`;
@@ -254,20 +343,55 @@
       $(prefix + 'reserved').textContent = bytes(pool.total_bytes - pool.used_bytes - pool.free_bytes);
       $(prefix + 'reserved-legend').hidden = chart.segments.reserved === 0;
       let summary = `${percent(100 * pool.used_bytes / pool.total_bytes)} usado · ${percent(chart.segments.free)} livre`;
-      if (chart.segments.reserved > 0) summary += ` · ${percent(chart.segments.reserved)} reservado`;
+      if (chart.segments.reserved > 0) summary += ` · ${percent(chart.segments.reserved)} reserva do filesystem`;
       if (!chart.breakdown) summary += ' · detalhamento indisponível';
       $(prefix + 'chart-summary').textContent = summary;
     }
+    const poolLabels = { ssd: 'SSD', hdd: 'HD USB', hdd2: 'HD USB 2', hdd3: 'HD USB 3' };
+    function renderStorageSummary(pools) {
+      const valid = pools.length > 0 && pools.every(pool => poolChart(pool) !== null);
+      const total = valid ? pools.reduce((sum, pool) => sum + pool.total_bytes, 0) : null;
+      const used = valid ? pools.reduce((sum, pool) => sum + pool.used_bytes, 0) : null;
+      const free = valid ? pools.reduce((sum, pool) => sum + pool.free_bytes, 0) : null;
+      const occupied = valid ? 100 * used / total : null;
+      $('storage-total-percent').textContent = percent(occupied);
+      $('storage-total-used').textContent = bytes(used);
+      $('storage-total-bytes').textContent = bytes(total);
+      $('storage-total-free').textContent = bytes(free);
+      setMeter('storage-total-meter', occupied);
+      $('storage-total-meter').setAttribute('aria-valuetext', valid ? `${percent(occupied)} usado; ${bytes(used)} de ${bytes(total)}; ${bytes(free)} livres` : 'Armazenamento total indisponível');
+      const missing = pools.filter(pool => poolChart(pool) === null).length;
+      $('storage-summary-note').textContent = valid ? 'Espaço livre nos discos, antes das reservas para downloads.' : `Total indisponível · ${missing} ${missing === 1 ? 'disco sem medição válida' : 'discos sem medição válida'}.`;
+      for (const [id, label] of Object.entries(poolLabels)) {
+        const pool = pools.find(item => item.pool_id === id);
+        $(`storage-${id}`).hidden = !pool;
+        $(`storage-${id}-label`).textContent = pool?.label || label;
+        const ready = pool && poolChart(pool) !== null;
+        $(`storage-${id}-free`).textContent = bytes(ready ? pool.free_bytes : null);
+        $(`storage-${id}-state`).textContent = ready ? 'Disponível' : pool?.state === 'stale' ? 'Medição antiga' : 'Indisponível';
+        $(`storage-${id}-state`).dataset.state = ready ? 'ready' : pool?.state === 'stale' ? 'stale' : 'unavailable';
+        $(`storage-${id}-state`).hidden = ready;
+      }
+    }
+    let knownPools = [];
     function renderPools(pools) {
-      for (const id of ['ssd', 'hdd']) {
-        const pool = pools.find(item => item.pool_id === id) || {};
+      if (pools === null) pools = knownPools.map(pool => ({ ...pool, state: 'unavailable' }));
+      else knownPools = pools.map(({ pool_id, label }) => ({ pool_id, label }));
+      renderStorageSummary(pools);
+      const labels = poolLabels;
+      for (const id of Object.keys(labels)) {
+        const found = pools.find(item => item.pool_id === id);
+        const pool = found || {};
+        $(`pool-${id}-card`).hidden = ['hdd2', 'hdd3'].includes(id) && !found;
         const ready = pool.state === 'ready';
         const prefix = `pool-${id}-`;
+        const label = pool.label || labels[id];
+        $(prefix + 'title').textContent = label;
         const chart = poolChart(pool);
-        renderPoolChart(pool, prefix, id === 'ssd' ? 'SSD' : 'HD USB');
+        renderPoolChart(pool, prefix, label);
         $(prefix + 'state').textContent = { ready: 'Disponível', stale: 'Medição antiga', unavailable: 'Indisponível' }[pool.state] || 'Indisponível';
         $(prefix + 'state').dataset.state = pool.state || 'unavailable';
-        for (const [field, key] of [['total', 'total_bytes'], ['used', 'used_bytes'], ['free', 'free_bytes'], ['queue', 'queue_remaining_bytes'], ['admissible', 'admissible_bytes']]) {
+        for (const [field, key] of [['total', 'total_bytes'], ['used', 'used_bytes'], ['free', 'free_bytes'], ['queue', 'active_queue_remaining_bytes'], ['admissible', 'admissible_bytes']]) {
           $(prefix + field).textContent = bytes(ready ? pool[key] : null);
         }
         const measured = pool.measured_at == null ? NaN : sampleDate(pool.measured_at).getTime();
@@ -293,11 +417,14 @@
       $('temperature').textContent = isNumber(host.cpu_celsius) ? `${number.format(host.cpu_celsius)} °C` : '—';
       $('updated').textContent = host.measured_at ? new Date(host.measured_at).toLocaleTimeString('pt-BR') : '—';
       const hasPools = Array.isArray(data.pools) && data.pools.length > 0;
+      if (!hasPools) knownPools = [];
       $('legacy-storage').hidden = hasPools;
       $('pool-storage').hidden = !hasPools;
+      $('storage-overview').hidden = !hasPools;
+      $('storage-more').hidden = !hasPools;
       if (hasPools) {
         renderPools(data.pools);
-        $('storage-state').textContent = 'Capacidade por disco';
+        $('storage-state').textContent = `${data.pools.length} ${data.pools.length === 1 ? 'disco' : 'discos'}`;
         return;
       }
       $('free').textContent = bytes(cap.free_bytes);
@@ -316,10 +443,10 @@
     }
     async function refresh() {
       try {
-        const response = await fetch('/api/v1/status', { cache: 'no-store' });
+        const response = await fetch('{{URL_BASE}}/api/v1/status', { cache: 'no-store' });
         if (!response.ok) throw new Error('status unavailable');
         render(await response.json());
-      } catch (_) { setLive('unavailable'); if (!$('pool-storage').hidden) renderPools([]); }
+      } catch (_) { setLive('unavailable'); if (!$('pool-storage').hidden) renderPools(null); }
     }
     refresh();
     setInterval(refresh, 5000);

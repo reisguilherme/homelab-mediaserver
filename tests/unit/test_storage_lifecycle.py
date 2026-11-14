@@ -17,6 +17,8 @@ from homeserver_control.worker.validation import ValidationError
 
 
 class Registry:
+    primary_pool_id = 'ssd'
+
     def __init__(self, root):
         self.pools = {
             name: SimpleNamespace(root=root / name, host_root=Path('/srv') / name,
@@ -257,8 +259,10 @@ def test_queue_snapshot_preserves_individual_pool_commitments(tmp_path):
     payload = json.loads(destination.read_text())
     assert isinstance(payload['measured_at'], float)
     assert payload['pools'] == [
-        dict(pool_id='ssd', filesystem_id='ssd-uuid', pending_bytes=15, available_bytes=0),
-        dict(pool_id='hdd', filesystem_id='hdd-uuid', pending_bytes=20, available_bytes=30),
+        dict(pool_id='ssd', filesystem_id='ssd-uuid', pending_bytes=15, available_bytes=0,
+             active_pending_bytes=15, stopped_pending_bytes=0, min_free_bytes=0),
+        dict(pool_id='hdd', filesystem_id='hdd-uuid', pending_bytes=20, available_bytes=30,
+             active_pending_bytes=20, stopped_pending_bytes=0, min_free_bytes=0),
     ]
     assert list(destination.parent.iterdir()) == [destination]
 
@@ -309,12 +313,16 @@ async def test_registered_series_pack_scans_only_selected_file_at_placement(
 
     base = finalizer(tmp_path, registry)
     registry.pools['hdd'].root = tmp_path / 'union'
+    base.permits.episode_identity_matches = lambda source, path: (
+        source.scope_key == 'S01E01' and path == 'Show/Show.S01E01.mkv'
+    )
     worker = SeriesFinalizer(repository=base.repository, permits=base.permits,
                              torrent_root=base.torrent_root, media_root=tmp_path / 'union/media/tv',
                              gateway_url='http://gateway', arr_token='fixture',
                              sonarr_url='http://sonarr', sonarr_api_key='fixture')
     permit = SimpleNamespace(destination='/data/torrents/.placements/pack', pool_id='hdd',
                              filesystem_id='hdd-uuid', selected_files=('Show/Show.S01E01.mkv',),
+                             permit_id='pack-child',
                              reservation_id='reservation', scope_key='S01E01',
                              infohash='a' * 40, season_pack_parent_id='pack', budget_bytes=5)
     source = worker.torrent_root / '.placements/pack/Show/Show.S01E01.mkv'
@@ -431,6 +439,12 @@ async def test_series_import_completion_remains_ordered_across_physical_pools(
                 (permit.permit_id, 'accepted'),
             )
     base.permits.get_for_reservation = lambda reservation, scope_key: permits.get(scope_key)
+    base.permits.probe_reservation_active = lambda permit: (
+        base.repository.active_reservation(permit.reservation_id) is not None
+    )
+    base.permits.active_source = lambda permit: (
+        permits.get(permit.scope_key) is permit and permit.state == 'confirmed'
+    )
     imported = {2}
 
     def handler(request):

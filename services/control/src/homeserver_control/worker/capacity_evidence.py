@@ -11,6 +11,15 @@ from pathlib import Path
 
 import httpx
 
+from homeserver_common.storage import POOL_IDS
+
+
+def configured_min_free_bytes() -> int:
+    value = int(os.environ.get("HOMESERVER_STORAGE_MIN_FREE_GIB", "10"))
+    if value < 0:
+        raise ValueError("invalid minimum free GiB")
+    return value * 1024**3
+
 
 @dataclass(frozen=True)
 class CapacityEvidence:
@@ -19,6 +28,11 @@ class CapacityEvidence:
     other_pending_bytes: int = 0
     paused_hashes: frozenset[str] = frozenset()
     pools: tuple[PoolCapacityEvidence, ...] = ()
+    min_free_bytes: int = 0
+
+    @property
+    def usable_free_bytes(self) -> int:
+        return max(0, self.free_bytes - self.min_free_bytes)
 
     def pool(self, pool_id: str = "ssd") -> CapacityEvidence:
         if not self.pools:
@@ -33,10 +47,13 @@ class CapacityEvidence:
                     pool.other_pending_bytes,
                     pool.paused_hashes,
                     (pool,),
+                    pool.min_free_bytes,
                 )
         raise ValueError("pool_capacity_unavailable")
 
     def __post_init__(self) -> None:
+        if type(self.min_free_bytes) is not int or self.min_free_bytes < 0:
+            raise ValueError("invalid minimum free bytes")
         if (
             isinstance(self.free_bytes, bool)
             or not isinstance(self.free_bytes, int)
@@ -72,12 +89,18 @@ class PoolCapacityEvidence:
     remaining_by_hash: dict[str, int] = field(default_factory=dict)
     other_pending_bytes: int = 0
     paused_hashes: frozenset[str] = frozenset()
+    min_free_bytes: int = 0
+
+    @property
+    def usable_free_bytes(self) -> int:
+        return max(0, self.free_bytes - self.min_free_bytes)
 
     def __post_init__(self) -> None:
-        if self.pool_id not in {"ssd", "hdd"} or not self.filesystem_id:
+        if self.pool_id not in POOL_IDS or not self.filesystem_id:
             raise ValueError("invalid capacity pool identity")
         CapacityEvidence(
-            self.free_bytes, self.remaining_by_hash, self.other_pending_bytes, self.paused_hashes
+            self.free_bytes, self.remaining_by_hash, self.other_pending_bytes, self.paused_hashes,
+            min_free_bytes=self.min_free_bytes,
         )
 
 
@@ -91,6 +114,7 @@ async def read_capacity_evidence(
     expected_filesystem_id: str | None = None,
     max_age_seconds: float = 30,
     storage_registry=None,
+    min_free_bytes: int = 0,
 ) -> CapacityEvidence:
     """Read current free bytes and trusted remaining bytes of admitted torrents."""
     response = await client.get(
@@ -106,6 +130,7 @@ async def read_capacity_evidence(
         expected_filesystem_id=expected_filesystem_id,
         max_age_seconds=max_age_seconds,
         storage_registry=storage_registry,
+        min_free_bytes=min_free_bytes,
     )
 
 
@@ -117,10 +142,15 @@ def capacity_from_queue(
     expected_filesystem_id: str | None = None,
     max_age_seconds: float = 30,
     storage_registry=None,
+    min_free_bytes: int = 0,
 ) -> CapacityEvidence:
+    if type(min_free_bytes) is not int or min_free_bytes < 0:
+        raise ValueError("invalid minimum free bytes")
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     if storage_registry is not None:
-        return _registered_capacity(snapshot, payload, storage_registry, max_age_seconds)
+        return _registered_capacity(
+            snapshot, payload, storage_registry, max_age_seconds, min_free_bytes,
+        )
     measured = snapshot.get("measured_at")
     if (
         not snapshot.get("filesystem_id")
@@ -174,10 +204,11 @@ def capacity_from_queue(
         remaining_by_hash=remaining,
         other_pending_bytes=other_pending,
         paused_hashes=frozenset(paused),
+        min_free_bytes=min_free_bytes,
     )
 
 
-def _registered_capacity(snapshot, payload, registry, max_age_seconds):
+def _registered_capacity(snapshot, payload, registry, max_age_seconds, min_free_bytes):
     if not isinstance(payload, list) or not isinstance(snapshot.get("pools"), list):
         raise ValueError("filesystem_snapshot_unavailable")
     for entry in payload:
@@ -269,15 +300,17 @@ def _registered_capacity(snapshot, payload, registry, max_age_seconds):
                 remaining,
                 sum(other.values()),
                 frozenset(paused),
+                min_free_bytes,
             )
         )
     if not pools:
         raise ValueError("filesystem_snapshot_unavailable")
-    ssd = next((pool for pool in pools if pool.pool_id == "ssd"), None)
+    primary = next((pool for pool in pools if pool.pool_id == registry.primary_pool_id), None)
     return CapacityEvidence(
-        ssd.free_bytes if ssd else 0,
+        primary.free_bytes if primary else 0,
         {key: value for pool in pools for key, value in pool.remaining_by_hash.items()},
-        ssd.other_pending_bytes if ssd else 0,
+        primary.other_pending_bytes if primary else 0,
         frozenset(key for pool in pools for key in pool.paused_hashes),
         tuple(pools),
+        min_free_bytes,
     )

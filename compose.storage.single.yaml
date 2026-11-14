@@ -1,0 +1,466 @@
+# Standalone media layout using only the registered large USB disk.
+services:
+  sonarr:
+    volumes:
+    - type: bind
+      source: /srv/media-view
+      target: /data
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ./scripts/storage-entrypoint.sh
+      target: /run/storage-entrypoint.sh
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/external3
+      target: /run/storage-physical
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/appdata/control/storage-native.identity
+      target: /run/storage-native.identity
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /proc/1/mountinfo
+      target: /run/host-mountinfo
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /dev/disk/by-uuid
+      target: /run/host-uuids
+      read_only: true
+      bind:
+        create_host_path: false
+    entrypoint:
+    - /bin/sh
+    - /run/storage-entrypoint.sh
+    - /data
+    - /init
+    environment:
+      HOMESERVER_STORAGE_SINGLE_GUARD: '1'
+  radarr:
+    volumes:
+    - type: bind
+      source: /srv/media-view
+      target: /data
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ./scripts/storage-entrypoint.sh
+      target: /run/storage-entrypoint.sh
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/external3
+      target: /run/storage-physical
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/appdata/control/storage-native.identity
+      target: /run/storage-native.identity
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /proc/1/mountinfo
+      target: /run/host-mountinfo
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /dev/disk/by-uuid
+      target: /run/host-uuids
+      read_only: true
+      bind:
+        create_host_path: false
+    entrypoint:
+    - /bin/sh
+    - /run/storage-entrypoint.sh
+    - /data
+    - /init
+    environment:
+      HOMESERVER_STORAGE_SINGLE_GUARD: '1'
+  qbittorrent:
+    volumes:
+    - type: bind
+      source: /srv/media-view
+      target: /data
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ./scripts/storage-entrypoint.sh
+      target: /run/storage-entrypoint.sh
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/external3
+      target: /run/storage-physical
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/appdata/control/storage-native.identity
+      target: /run/storage-native.identity
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /proc/1/mountinfo
+      target: /run/host-mountinfo
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /dev/disk/by-uuid
+      target: /run/host-uuids
+      read_only: true
+      bind:
+        create_host_path: false
+    entrypoint:
+    - /bin/sh
+    - /run/storage-entrypoint.sh
+    - /data
+    - /init
+    environment:
+      HOMESERVER_STORAGE_SINGLE_GUARD: '1'
+  control-worker:
+    volumes:
+    - type: bind
+      source: /srv/media-view
+      target: /data
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /proc/1/mountinfo
+      target: /run/host-mountinfo
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /dev/disk/by-uuid
+      target: /run/host-uuids
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/appdata/control/storage.json
+      target: /run/homeserver/storage.json
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/external3
+      target: /storage/hdd3
+      read_only: false
+      bind:
+        create_host_path: false
+    user: 0:0
+    cap_drop:
+    - ALL
+    cap_add:
+    - CHOWN
+    - DAC_OVERRIDE
+    - SETUID
+    - SETGID
+    entrypoint:
+    - python
+    - -m
+    - homeserver_common.storage_startup
+    - python
+    - -m
+    - homeserver_common.runtime
+  control-api:
+    volumes:
+    - type: bind
+      source: /srv/media-view
+      target: /data
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /proc/1/mountinfo
+      target: /run/host-mountinfo
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /dev/disk/by-uuid
+      target: /run/host-uuids
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/appdata/control/storage.json
+      target: /run/homeserver/storage.json
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/external3
+      target: /storage/hdd3
+      read_only: true
+      bind:
+        create_host_path: false
+  download-gateway:
+    volumes:
+    - type: bind
+      source: /srv/media-view
+      target: /data
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /proc/1/mountinfo
+      target: /run/host-mountinfo
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /dev/disk/by-uuid
+      target: /run/host-uuids
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/appdata/control/storage.json
+      target: /run/homeserver/storage.json
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/external3
+      target: /storage/hdd3
+      read_only: true
+      bind:
+        create_host_path: false
+  telemetry:
+    volumes:
+    - type: bind
+      source: /srv/media-view
+      target: /data
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /proc/1/mountinfo
+      target: /run/host-mountinfo
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /dev/disk/by-uuid
+      target: /run/host-uuids
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/appdata/control/storage.json
+      target: /run/homeserver/storage.json
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/external3
+      target: /storage/hdd3
+      read_only: true
+      bind:
+        create_host_path: false
+  host-metrics:
+    volumes:
+    - type: bind
+      source: /srv/media-view
+      target: /data
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /proc/1/mountinfo
+      target: /run/host-mountinfo
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /dev/disk/by-uuid
+      target: /run/host-uuids
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/appdata/control/storage.json
+      target: /run/homeserver/storage.json
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/external3
+      target: /storage/hdd3
+      read_only: true
+      bind:
+        create_host_path: false
+  operator:
+    volumes:
+    - type: bind
+      source: /srv/media-view
+      target: /data
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /proc/1/mountinfo
+      target: /run/host-mountinfo
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /dev/disk/by-uuid
+      target: /run/host-uuids
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/appdata/control/storage.json
+      target: /run/homeserver/storage.json
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/external3
+      target: /storage/hdd3
+      read_only: true
+      bind:
+        create_host_path: false
+  jellyfin:
+    volumes:
+    - type: bind
+      source: /srv/media-view/media
+      target: /data/media
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ./scripts/storage-entrypoint.sh
+      target: /run/storage-entrypoint.sh
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/external3
+      target: /run/storage-physical
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/appdata/control/storage-native.identity
+      target: /run/storage-native.identity
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /proc/1/mountinfo
+      target: /run/host-mountinfo
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /dev/disk/by-uuid
+      target: /run/host-uuids
+      read_only: true
+      bind:
+        create_host_path: false
+    entrypoint:
+    - /bin/sh
+    - /run/storage-entrypoint.sh
+    - /data/media
+    - /jellyfin/jellyfin
+    environment:
+      HOMESERVER_STORAGE_SINGLE_GUARD: '1'
+  bazarr:
+    volumes:
+    - type: bind
+      source: /srv/media-view/media
+      target: /data/media
+      read_only: false
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ./scripts/storage-entrypoint.sh
+      target: /run/storage-entrypoint.sh
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/external3
+      target: /run/storage-physical
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/appdata/control/storage-native.identity
+      target: /run/storage-native.identity
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /proc/1/mountinfo
+      target: /run/host-mountinfo
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /dev/disk/by-uuid
+      target: /run/host-uuids
+      read_only: true
+      bind:
+        create_host_path: false
+    entrypoint:
+    - /bin/sh
+    - /run/storage-entrypoint.sh
+    - /data/media
+    - /init
+    environment:
+      HOMESERVER_STORAGE_SINGLE_GUARD: '1'
+  init:
+    volumes:
+    - type: bind
+      source: /srv/media-view
+      target: /srv/data
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /proc/1/mountinfo
+      target: /run/host-mountinfo
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /dev/disk/by-uuid
+      target: /run/host-uuids
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/appdata/control/storage.json
+      target: /run/homeserver/storage.json
+      read_only: true
+      bind:
+        create_host_path: false
+    - type: bind
+      source: /srv/external3
+      target: /storage/hdd3
+      read_only: true
+      bind:
+        create_host_path: false

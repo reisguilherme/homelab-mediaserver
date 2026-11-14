@@ -305,7 +305,7 @@ services:
     - type: bind
       source: /srv/media-view/media
       target: /data/media
-      read_only: true
+      read_only: false
       bind:
         create_host_path: false
     - type: bind

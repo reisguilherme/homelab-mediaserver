@@ -8,9 +8,11 @@ import logging
 import math
 import os
 import signal
+import sqlite3
 import tempfile
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -19,25 +21,40 @@ from homeserver_common.filesystem import filesystem_identity as _media_filesyste
 from homeserver_common.storage import load_storage_registry
 from homeserver_control.adapters.seerr import SeerrAdapter
 from homeserver_control.gateway.permits import PermitRegistry
+from homeserver_control.persistence.audited_imports import (
+    AuditedImportStore,
+)
+from homeserver_control.persistence.audited_imports import (
+    load_manifest as load_audited_manifest,
+)
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.deletion_jobs import DeletionJobStore
 from homeserver_control.persistence.heartbeat import WorkerHeartbeatStore
+from homeserver_control.persistence.source_requests import SourceReplacementRequests
 from homeserver_control.persistence.subtitle_artifacts import SubtitleArtifactStore
 from homeserver_control.persistence.torrent_artifacts import TorrentArtifactStore
 from homeserver_control.recovery import recovery_mode_blocks
 
 from .acquisition import MovieAcquirer
+from .audited_imports import AuditedManifestImporter
 from .cancellation import CancellationReconciler
-from .capacity_evidence import read_capacity_evidence
+from .capacity_evidence import configured_min_free_bytes, read_capacity_evidence
 from .deletion_coordinator import DeletionCoordinator
+from .discarded_sources import DiscardedSourceReconciler
+from .dubbed_discovery import DubbedDiscovery
 from .finalization import MovieFinalizer
+from .jellyfin_brazilian_metadata import JellyfinBrazilianMetadataReconciler
+from .jellyfin_collections import JellyfinCollectionReconciler
 from .magnet_metadata import resolve_magnet_metadata
+from .manual_sources import ManualSourceReplacements
 from .movie_priority import MoviePrioritizer
 from .release_quality import ReleasePolicy
+from .request_profiles import RequestProfileSynchronizer
 from .runtime import WorkerCycle
 from .scheduler import AdmissionScheduler, FilesystemSnapshot
 from .series_acquisition import SeriesAcquirer
 from .series_finalization import SeriesFinalizer
+from .series_identity import SeriesIdentityResolver
 from .source_health import SourceHealthStore
 from .source_reconciliation import SourceReconciler
 from .subdl import SubDLSource
@@ -54,9 +71,16 @@ def _publish_storage_queue(path: Path, evidence, permits: PermitRegistry) -> Non
     pools = []
     for pool in evidence.pools:
         pending = permits.pending_bytes(evidence, pool_id=pool.pool_id)
+        stopped = sum(
+            remaining for infohash, remaining in pool.remaining_by_hash.items()
+            if infohash in pool.paused_hashes
+        )
         pools.append({'pool_id': pool.pool_id, 'filesystem_id': pool.filesystem_id,
                       'pending_bytes': pending,
-                      'available_bytes': max(0, pool.free_bytes - pending)})
+                      'active_pending_bytes': pending - stopped,
+                      'stopped_pending_bytes': stopped,
+                      'min_free_bytes': pool.min_free_bytes,
+                      'available_bytes': max(0, pool.usable_free_bytes - pending)})
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
@@ -93,18 +117,161 @@ def _snapshot_from_file(
     )
 
 
+class _AuditedOnly:
+    async def list_approved(self, _page):
+        raise RuntimeError('Seerr is disabled for audited imports')
+
+    def admit(self, _candidate):
+        raise RuntimeError('source selection is disabled for audited imports')
+
+
+def _build_collection_reconciler(http_timeout: float) -> JellyfinCollectionReconciler | None:
+    key = os.environ.get('HOMESERVER_JELLYFIN_API_KEY')
+    enabled = os.environ.get('HOMESERVER_JELLYFIN_COLLECTION_COVERS_ENABLED', 'true')
+    if not key or enabled.lower() != 'true':
+        return None
+    return JellyfinCollectionReconciler(
+        httpx.AsyncClient(timeout=httpx.Timeout(http_timeout)),
+        base_url=os.environ.get('HOMESERVER_JELLYFIN_URL', 'http://jellyfin:8096'),
+        api_key=key,
+        admin_username=os.environ.get('HOMESERVER_ADMIN_USERNAME', 'admin'),
+        interval_seconds=float(os.environ.get(
+            'HOMESERVER_JELLYFIN_COLLECTION_COVERS_INTERVAL_SECONDS', '300',
+        )),
+    )
+
+
+def _build_brazilian_metadata_reconciler(
+    http_timeout: float,
+) -> JellyfinBrazilianMetadataReconciler | None:
+    key = os.environ.get('HOMESERVER_JELLYFIN_API_KEY')
+    if not key:
+        return None
+    return JellyfinBrazilianMetadataReconciler(
+        httpx.AsyncClient(timeout=httpx.Timeout(http_timeout)),
+        base_url=os.environ.get('HOMESERVER_JELLYFIN_URL', 'http://jellyfin:8096'),
+        api_key=key,
+        admin_username=os.environ.get('HOMESERVER_ADMIN_USERNAME', 'admin'),
+        interval_seconds=float(os.environ.get(
+            'HOMESERVER_JELLYFIN_COLLECTION_COVERS_INTERVAL_SECONDS', '300',
+        )),
+    )
+
+
+def _build_audited_importer(
+    database: Path, path: Path, *, repository, permits, capacity_provider,
+) -> AuditedManifestImporter:
+    """Use the same registry/capacity evidence as Seerr without a second worker cycle."""
+    token = os.environ.get('HOMESERVER_ARR_TOKEN')
+    if permits is None or not token:
+        raise ValueError('audited imports require the shared permit registry and gateway')
+    gateway_url = os.environ.get('HOMESERVER_QBIT_GATEWAY_URL', 'http://download-gateway:8081')
+    timeout = float(os.environ.get('HOMESERVER_HTTP_TIMEOUT_SECONDS', '15'))
+    policy = SubtitlePolicy.from_environment(os.environ)
+    subdl_key = os.environ.get('HOMESERVER_SUBDL_API_KEY')
+    uid = int(os.environ.get('HOMESERVER_ARR_UID', '1000'))
+    gid = int(os.environ.get('HOMESERVER_ARR_GID', '1000'))
+    if (uid, gid) != (1000, 1000):
+        raise ValueError('audited native imports require UID/GID 1000')
+    helpers = {}
+    for category, constructor, prefix in (
+        ('radarr', MovieFinalizer, 'RADARR'), ('sonarr', SeriesFinalizer, 'SONARR'),
+    ):
+        url = os.environ.get(f'HOMESERVER_{prefix}_URL')
+        key = os.environ.get(f'HOMESERVER_{prefix}_API_KEY')
+        if not url or not key:
+            continue
+        client = httpx.AsyncClient(timeout=httpx.Timeout(timeout))
+        subtitles = policy if category == 'radarr' else replace(policy, providers=('subdl',))
+        kwargs = {f'{category}_url': url, f'{category}_api_key': key}
+        helpers[category] = constructor(
+            repository=repository, permits=permits, torrent_root='/data/torrents',
+            gateway_url=gateway_url, arr_token=token, client=client,
+            subtitle_policy=subtitles, import_uid=uid, import_gid=gid,
+            jellyfin_url=os.environ.get('HOMESERVER_JELLYFIN_URL', 'http://jellyfin:8096'),
+            jellyfin_api_key=os.environ.get('HOMESERVER_JELLYFIN_API_KEY'),
+            subtitle_source=(SubDLSource(api_key=subdl_key, client=client, policy=subtitles)
+                             if subdl_key else None), **kwargs,
+        )
+    if not helpers:
+        raise ValueError('audited native import clients are unavailable')
+
+    return AuditedManifestImporter(
+        store=AuditedImportStore(database),
+        manifest_loader=lambda: load_audited_manifest(path, database), permits=permits,
+        torrent_store=TorrentArtifactStore(database), helpers=helpers,
+        gateway_url=gateway_url, arr_token=token, capacity_provider=capacity_provider,
+    )
+
+
+def _build_audited_cycle(database: Path, manifest_path: str) -> WorkerCycle:
+    # The loader enforces a fixed private path beside this control database.
+    path = Path(manifest_path)
+    load_audited_manifest(path, database)
+    storage = load_storage_registry()
+    token = os.environ.get('HOMESERVER_ARR_TOKEN')
+    snapshot = os.environ.get('HOMESERVER_CAPACITY_SNAPSHOT')
+    if storage is None or not token or not snapshot:
+        raise ValueError('audited imports require physical storage and gateway evidence')
+    repository = ReservationRepository(database)
+    repository.initialize()
+    permits = PermitRegistry(database, storage_registry=storage)
+    gateway_url = os.environ.get('HOMESERVER_QBIT_GATEWAY_URL', 'http://download-gateway:8081')
+    timeout = float(os.environ.get('HOMESERVER_HTTP_TIMEOUT_SECONDS', '15'))
+
+    async def refresh():
+        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+            evidence = await read_capacity_evidence(
+                snapshot_path=Path(snapshot), data_root=Path('/data'), gateway_url=gateway_url,
+                arr_token=token, client=client, storage_registry=storage,
+                min_free_bytes=configured_min_free_bytes(),
+                expected_filesystem_id=_media_filesystem_id(
+                    Path('/data'), os.environ.get('HOMESERVER_MEDIA_UUID'),
+                ),
+                max_age_seconds=float(os.environ.get(
+                    'HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS', '30',
+                )),
+            )
+        _publish_storage_queue(database.parent / 'storage-queue.json', evidence, permits)
+        return evidence
+
+    return WorkerCycle(
+        source=_AuditedOnly(), scheduler=_AuditedOnly(), capacity_refresh=refresh,
+        jellyfin_collections=_build_collection_reconciler(timeout),
+        jellyfin_brazilian_metadata=_build_brazilian_metadata_reconciler(timeout),
+        audited_imports=_build_audited_importer(
+            database, path, repository=repository, permits=permits, capacity_provider=refresh,
+        ),
+    )
+
+
 def _build_cycle(database: Path) -> WorkerCycle | None:
     recovery_mode_path = os.environ.get(
         "HOMESERVER_RECOVERY_MODE", "/var/lib/homeserver/RECOVERY_MODE"
     )
     if recovery_mode_blocks(recovery_mode_path):
         return None
+    audited = os.environ.get('HOMESERVER_AUDITED_IMPORT_MANIFEST', '')
+    hybrid = bool(audited) and os.environ.get(
+        'HOMESERVER_AUDITED_IMPORT_ALLOW_SEERR', 'false',
+    ).lower() == 'true'
+    if audited and not hybrid:
+        return _build_audited_cycle(database, audited)
+    if hybrid:
+        # Refuse bad paths/plans before creating clients or touching Seerr.
+        load_audited_manifest(Path(audited), database)
     seerr_url = os.environ.get("HOMESERVER_SEERR_URL")
     seerr_key = os.environ.get("HOMESERVER_SEERR_API_KEY")
     snapshot_path = os.environ.get("HOMESERVER_CAPACITY_SNAPSHOT")
     if not seerr_url or not seerr_key or not snapshot_path:
         return None
     storage_registry = load_storage_registry()
+    if hybrid and (
+        storage_registry is None or not os.environ.get('HOMESERVER_ARR_TOKEN')
+        or (int(os.environ.get('HOMESERVER_ARR_UID', '1000')),
+            int(os.environ.get('HOMESERVER_ARR_GID', '1000'))) != (1000, 1000)
+    ):
+        raise ValueError('audited imports require physical storage, gateway and UID/GID 1000')
     repository = ReservationRepository(database)
     repository.initialize()
     deletion_jobs = DeletionJobStore(database)
@@ -114,22 +281,30 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     subtitle_policy = SubtitlePolicy.from_environment(os.environ)
     movie_release_policy = ReleasePolicy.from_environment(os.environ, media_kind="movie")
     series_release_policy = ReleasePolicy.from_environment(os.environ, media_kind="series")
+    series_identity = SeriesIdentityResolver()
     gateway_url = os.environ.get("HOMESERVER_QBIT_GATEWAY_URL", "http://download-gateway:8081")
     http_timeout = float(os.environ.get("HOMESERVER_HTTP_TIMEOUT_SECONDS", "15"))
     search_timeout = float(os.environ.get("HOMESERVER_SEARCH_TIMEOUT_SECONDS", "90"))
     retry_seconds = float(os.environ.get("HOMESERVER_SEARCH_RETRY_SECONDS", "300"))
     source_retry_seconds = float(os.environ.get("HOMESERVER_SOURCE_SEARCH_RETRY_SECONDS", "300"))
-    live_probes = os.environ.get("HOMESERVER_SOURCE_PROBE_ENABLED", "true") == "true"
+    automatic_replacement = os.environ.get(
+        "HOMESERVER_SOURCE_AUTOMATIC_REPLACEMENT_ENABLED", "false"
+    ) == "true"
+    live_probes = (
+        automatic_replacement
+        and os.environ.get("HOMESERVER_SOURCE_PROBE_ENABLED", "true") == "true"
+    )
     source = SeerrAdapter(
         base_url=seerr_url,
         api_key=seerr_key,
         client=httpx.AsyncClient(timeout=httpx.Timeout(http_timeout)),
+        include_series_titles=True,
     )
     scheduler = AdmissionScheduler(
         repository=repository,
         snapshot_provider=lambda: _snapshot_from_file(
             Path(snapshot_path),
-            expected_filesystem_id=(storage_registry.pools['ssd'].filesystem_id
+            expected_filesystem_id=(storage_registry.primary_pool.filesystem_id
                                     if storage_registry is not None else
                                     os.environ.get("HOMESERVER_MEDIA_UUID") or None),
             max_age_seconds=float(
@@ -150,11 +325,12 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
         if (radarr_url and radarr_key) or (sonarr_url and sonarr_key)
         else None
     )
-    if permits is not None:
+    if permits is not None and not hybrid:
         repository.normalize_verified_budgets()
     health_store = (
         SourceHealthStore(
             database,
+            automatic_replacement_enabled=automatic_replacement,
             slow_seconds=float(os.environ.get("HOMESERVER_SOURCE_SLOW_WINDOW_SECONDS", "300")),
             stalled_seconds=float(os.environ.get("HOMESERVER_SOURCE_STALL_SECONDS", "300")),
             slow_bytes_per_second=float(os.environ.get("HOMESERVER_SOURCE_MIN_RATE_KIB", "1024"))
@@ -186,6 +362,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 arr_token=arr_token,
                 client=capacity_client,
                 storage_registry=storage_registry,
+                min_free_bytes=configured_min_free_bytes(),
                 expected_filesystem_id=_media_filesystem_id(
                     Path("/data"), os.environ.get("HOMESERVER_MEDIA_UUID")
                 ),
@@ -201,9 +378,25 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     finalizer = None
     series_acquirer = None
     series_finalizer = None
+    dubbed_discovery = None
+
+    def dubbed_search(client):
+        return DubbedDiscovery(
+            client=client,
+            prowlarr_url=os.environ.get("HOMESERVER_PROWLARR_URL", "http://prowlarr:9696/prowlarr"),
+            prowlarr_api_key=os.environ.get("HOMESERVER_PROWLARR_API_KEY", ""),
+            seerr_url=seerr_url,
+            seerr_api_key=seerr_key,
+            byparr_url=(
+                os.environ.get("HOMESERVER_BYPARR_URL", "http://byparr:8191")
+                if os.environ.get("HOMESERVER_BYPARR_ENABLED", "false") == "true" else None
+            ),
+        )
+
     if radarr_url and radarr_key:
         assert permits is not None
         movie_client = httpx.AsyncClient(timeout=httpx.Timeout(http_timeout))
+        dubbed_discovery = dubbed_search(movie_client)
         acquirer = MovieAcquirer(
             repository=repository,
             permits=permits,
@@ -211,6 +404,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
             radarr_api_key=radarr_key,
             prowlarr_url=os.environ.get("HOMESERVER_PROWLARR_URL", "http://prowlarr:9696"),
             client=movie_client,
+            dubbed_discovery=dubbed_discovery,
             subtitle_source=(
                 SubDLSource(api_key=subdl_key, client=movie_client, policy=subtitle_policy)
                 if subdl_key
@@ -242,6 +436,8 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 radarr_url=radarr_url,
                 radarr_api_key=radarr_key,
                 client=finalizer_client,
+                jellyfin_url=os.environ.get("HOMESERVER_JELLYFIN_URL", "http://jellyfin:8096"),
+                jellyfin_api_key=os.environ.get("HOMESERVER_JELLYFIN_API_KEY"),
                 subtitle_source=(
                     SubDLSource(api_key=subdl_key, client=finalizer_client, policy=subtitle_policy)
                     if subdl_key
@@ -255,13 +451,17 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
     if sonarr_url and sonarr_key:
         assert permits is not None
         series_client = httpx.AsyncClient(timeout=httpx.Timeout(http_timeout))
+        if dubbed_discovery is None:
+            dubbed_discovery = dubbed_search(series_client)
         series_acquirer = SeriesAcquirer(
+            series_identity=series_identity,
             repository=repository,
             permits=permits,
             sonarr_url=sonarr_url,
             sonarr_api_key=sonarr_key,
             prowlarr_url=os.environ.get("HOMESERVER_PROWLARR_URL", "http://prowlarr:9696"),
             client=series_client,
+            dubbed_discovery=dubbed_discovery,
             subtitle_source=(
                 SubDLSource(api_key=subdl_key, client=series_client, policy=subtitle_policy)
                 if subdl_key
@@ -294,6 +494,7 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
         if arr_token:
             series_finalizer_client = httpx.AsyncClient(timeout=httpx.Timeout(http_timeout))
             series_finalizer = SeriesFinalizer(
+                series_identity=series_identity,
                 repository=repository,
                 permits=permits,
                 torrent_root="/data/torrents",
@@ -302,6 +503,8 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 sonarr_url=sonarr_url,
                 sonarr_api_key=sonarr_key,
                 client=series_finalizer_client,
+                jellyfin_url=os.environ.get('HOMESERVER_JELLYFIN_URL', 'http://jellyfin:8096'),
+                jellyfin_api_key=os.environ.get('HOMESERVER_JELLYFIN_API_KEY'),
                 subtitle_source=(
                     SubDLSource(
                         api_key=subdl_key, client=series_finalizer_client, policy=subtitle_policy
@@ -321,9 +524,9 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
         os.environ.get("HOMESERVER_MEDIA_UUID"),
     )
     if storage_registry is not None:
-        media_uuid = storage_registry.pools['ssd'].filesystem_id
+        media_uuid = storage_registry.primary_pool.filesystem_id
     deletion_coordinator = None
-    if all(
+    if not hybrid and all(
         (
             media_uuid,
             jellyfin_key,
@@ -356,10 +559,22 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
         )
     return WorkerCycle(
         source=source,
+        jellyfin_collections=_build_collection_reconciler(http_timeout),
+        jellyfin_brazilian_metadata=_build_brazilian_metadata_reconciler(http_timeout),
+        request_profiles=RequestProfileSynchronizer(
+            series_identity=series_identity,
+            database=database, source=source,
+            services={name: (url, key) for name, url, key in (
+                ("radarr", radarr_url, radarr_key), ("sonarr", sonarr_url, sonarr_key),
+            ) if url and key},
+        ),
         scheduler=scheduler,
         capacity_refresh=capacity_provider if storage_registry is not None and permits else None,
         acquirer=acquirer,
         finalizer=finalizer,
+        pending_movie_imports=repository.pending_movie_imports,
+        pending_series_imports=repository.pending_series_imports,
+        series_identity=series_identity,
         series_acquirer=series_acquirer,
         series_finalizer=series_finalizer,
         cancellation=CancellationReconciler(source=source, repository=repository),
@@ -370,7 +585,27 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                 arr_token=arr_token,
                 client=httpx.AsyncClient(timeout=httpx.Timeout(http_timeout)),
             )
-            if permits is not None and arr_token
+            if permits is not None and arr_token and not hybrid
+            else None
+        ),
+        discarded_sources=(
+            DiscardedSourceReconciler(
+                permits=permits,
+                gateway_url=gateway_url,
+                arr_token=arr_token,
+                client=httpx.AsyncClient(timeout=httpx.Timeout(http_timeout)),
+            )
+            if permits is not None and arr_token and not hybrid
+            else None
+        ),
+        manual_source_replacements=(
+            ManualSourceReplacements(
+                requests=SourceReplacementRequests(database),
+                permits=permits,
+                movie_acquirer=acquirer,
+                series_acquirer=series_acquirer,
+            )
+            if permits is not None and arr_token and not hybrid
             else None
         ),
         movie_prioritizer=(
@@ -382,10 +617,17 @@ def _build_cycle(database: Path) -> WorkerCycle | None:
                     os.environ.get("HOMESERVER_MOVIE_PRIORITY_INTERVAL_SECONDS", "60")
                 ),
             )
-            if permits is not None and arr_token
+            if permits is not None and arr_token and not hybrid
             else None
         ),
         deletion_coordinator=deletion_coordinator,
+        audited_allow_seerr=hybrid,
+        audited_imports=(
+            _build_audited_importer(
+                database, Path(audited), repository=repository, permits=permits,
+                capacity_provider=capacity_provider,
+            ) if hybrid else None
+        ),
     )
 
 
@@ -415,7 +657,12 @@ async def _run_forever(
 
     async def pulse():
         while should_run():
-            write_heartbeat()
+            try:
+                write_heartbeat()
+            except sqlite3.OperationalError as error:
+                LOGGER.warning(
+                    'worker heartbeat persistence failed (%s); retrying', type(error).__name__,
+                )
             await asyncio.sleep(min(interval, 5))
 
     capacity_refresh = getattr(cycle, 'capacity_refresh', None)
@@ -469,15 +716,33 @@ async def _run_forever(
                 await task
             except asyncio.CancelledError:
                 pass
+        if cycle is not None and isinstance(
+            getattr(cycle, 'audited_imports', None), AuditedManifestImporter,
+        ):
+            for helper in cycle.audited_imports.helpers.values():
+                await helper.client.aclose()
         if cycle is not None and isinstance(cycle.source, SeerrAdapter):
             await cycle.source.client.aclose()
+        if cycle is not None and isinstance(
+            getattr(cycle, 'jellyfin_collections', None), JellyfinCollectionReconciler
+        ):
+            await cycle.jellyfin_collections.client.aclose()
+        if cycle is not None and isinstance(
+            getattr(cycle, 'jellyfin_brazilian_metadata', None),
+            JellyfinBrazilianMetadataReconciler,
+        ):
+            await cycle.jellyfin_brazilian_metadata.client.aclose()
         if cycle is not None and isinstance(getattr(cycle, "acquirer", None), MovieAcquirer):
+            if cycle.acquirer.dubbed_discovery is not None:
+                await cycle.acquirer.dubbed_discovery.aclose()
             await cycle.acquirer.client.aclose()
         if cycle is not None and isinstance(getattr(cycle, "finalizer", None), MovieFinalizer):
             await cycle.finalizer.client.aclose()
         if cycle is not None and isinstance(
             getattr(cycle, "series_acquirer", None), SeriesAcquirer
         ):
+            if cycle.series_acquirer.dubbed_discovery is not None:
+                await cycle.series_acquirer.dubbed_discovery.aclose()
             await cycle.series_acquirer.client.aclose()
         if cycle is not None and isinstance(
             getattr(cycle, "series_finalizer", None), SeriesFinalizer
@@ -487,6 +752,10 @@ async def _run_forever(
             getattr(cycle, "source_reconciler", None), SourceReconciler
         ):
             await cycle.source_reconciler.client.aclose()
+        if cycle is not None and isinstance(
+            getattr(cycle, "discarded_sources", None), DiscardedSourceReconciler
+        ):
+            await cycle.discarded_sources.client.aclose()
         if cycle is not None and isinstance(
             getattr(cycle, "movie_prioritizer", None), MoviePrioritizer
         ):

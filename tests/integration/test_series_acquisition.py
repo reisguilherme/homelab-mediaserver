@@ -77,7 +77,31 @@ def _transport(handler):
     def route(request):
         if request.url.path == "/api/v3/config/mediamanagement":
             return httpx.Response(200, json={"copyUsingHardlinks": True})
-        return handler(request)
+        response = handler(request)
+        # These fixtures exercise released singles in seasons still broadcasting.
+        # The full canonical catalog includes the announced next episode.
+        if request.url.path == "/api/v3/episode" and request.method == "GET":
+            rows = response.json()
+            for season in {row["seasonNumber"] for row in rows if row.get("seasonNumber", 0) > 0}:
+                existing = {row["episodeNumber"] for row in rows if row["seasonNumber"] == season}
+                # Older fixtures abbreviated already imported early episodes.
+                for missing in set(range(1, max(existing) + 1)) - existing:
+                    rows.append({
+                        "id": 910000 + season * 100 + missing,
+                        "seasonNumber": season, "episodeNumber": missing,
+                        "monitored": False, "hasFile": True,
+                        "airDateUtc": (datetime.now(UTC) - timedelta(days=7)).isoformat(),
+                    })
+                number = max(
+                    row["episodeNumber"] for row in rows if row["seasonNumber"] == season
+                ) + 1
+                rows.append({
+                    "id": 900000 + season, "seasonNumber": season, "episodeNumber": number,
+                    "monitored": False, "hasFile": False,
+                    "airDateUtc": (datetime.now(UTC) + timedelta(days=7)).isoformat(),
+                })
+            return httpx.Response(response.status_code, json=rows)
+        return response
     return httpx.MockTransport(route)
 
 
@@ -1026,7 +1050,7 @@ async def test_series_replaces_stalled_first_episode_without_starting_later_epis
             metadata_sha256=old.metadata_sha256, effect=lambda _: {"accepted": True},
         )
     torrents.put(old, old_torrent)
-    SourceHealthStore(tmp_path / "control.sqlite").observe(
+    SourceHealthStore(tmp_path / "control.sqlite", automatic_replacement_enabled=True).observe(
         old.permit_id,
         TorrentHealth(
             infohash=old.infohash, downloaded=0,
@@ -1165,7 +1189,10 @@ async def test_series_replaces_stalled_first_episode_without_starting_later_epis
             sonarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
             client=client, capacity_provider=history_capacity,
             gateway_url="http://download-gateway:8081", arr_token="worker-secret",
-            health_store=SourceHealthStore(tmp_path / "control.sqlite"),
+            health_store=SourceHealthStore(
+                tmp_path / "control.sqlite",
+                automatic_replacement_enabled=True,
+            ),
             torrent_store=torrents,
             **({"availability_probe": availability} if tracker_mode else {}),
         )
@@ -1259,7 +1286,10 @@ async def test_series_reconciles_initial_unknown_episode_without_new_grab(tmp_pa
             sonarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
             client=client, capacity_provider=capacity_provider,
             gateway_url="http://download-gateway:8081", arr_token="worker-secret",
-            health_store=SourceHealthStore(repo.path), torrent_store=torrents,
+            health_store=SourceHealthStore(
+                repo.path,
+                automatic_replacement_enabled=True,
+            ), torrent_store=torrents,
         )
         assert await acquirer.acquire("season:tmdb:97546:4", reservation_id) == (
             "reconciled"

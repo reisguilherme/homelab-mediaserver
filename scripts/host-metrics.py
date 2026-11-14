@@ -214,7 +214,8 @@ def collect(
                 }
             pools.append(sample)
         result["pools"] = pools
-        result["storage"] = next(pool for pool in pools if pool["pool_id"] == "ssd")
+        result["storage"] = next(
+            pool for pool in pools if pool["pool_id"] == registry.primary_pool_id)
     return result
 
 
@@ -268,6 +269,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=Path("/run/homeserver/host.json"))
     parser.add_argument("--env-file", type=Path)
     parser.add_argument("--loop", action="store_true")
+    parser.add_argument("--metrics-output-dir", type=Path)
     parser.add_argument(
         "--storage-registry", type=Path, default=Path("/run/homeserver/storage.json")
     )
@@ -298,6 +300,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     while running:
+        capacity_snapshot = None
         registry_error = None
         try:
             registry = load_storage_registry(args.storage_registry)
@@ -329,10 +332,8 @@ def main() -> int:
                 }
                 for pool_id, label in (("ssd", "SSD"), ("hdd", "HD USB"))
             ]
-            write_atomic(
-                args.output.parent / "capacity.json",
-                {**unavailable_pools[0], "pools": unavailable_pools},
-            )
+            capacity_snapshot = {**unavailable_pools[0], "pools": unavailable_pools}
+            write_atomic(args.output.parent / "capacity.json", capacity_snapshot)
         if capacity_ok and registry is None and settings and settings.media_uuid:
             guard = subprocess.run(
                 ["bash", str(root / "scripts/check-mount.sh"), str(media), settings.media_uuid],
@@ -341,31 +342,29 @@ def main() -> int:
             )
             if guard.returncode:
                 # Never report a root-filesystem reading as mounted media capacity.
-                write_atomic(
-                    Path(settings.run_root) / "capacity.json",
-                    {"filesystem_id": None, "state": "missing", "measured_at": time.time()},
-                )
+                capacity_snapshot = {
+                    "filesystem_id": None, "state": "missing", "measured_at": time.time(),
+                }
+                write_atomic(Path(settings.run_root) / "capacity.json", capacity_snapshot)
                 capacity_ok = False
         filesystem_id = settings.media_uuid if settings and settings.media_uuid else None
         if registry is None and capacity_ok:
             try:
                 volume = os.statvfs(media)
                 filesystem_id = filesystem_id or "device:" + str(os.stat(media).st_dev)
-                write_atomic(
-                    args.output.parent / "capacity.json",
-                    {
-                        "filesystem_id": filesystem_id,
-                        "measured_at": time.time(),
-                        "free_bytes": volume.f_bavail * volume.f_frsize,
-                        "used_bytes": (volume.f_blocks - volume.f_bfree) * volume.f_frsize,
-                        "total_bytes": volume.f_blocks * volume.f_frsize,
-                    },
-                )
+                capacity_snapshot = {
+                    "filesystem_id": filesystem_id,
+                    "measured_at": time.time(),
+                    "free_bytes": volume.f_bavail * volume.f_frsize,
+                    "used_bytes": (volume.f_blocks - volume.f_bfree) * volume.f_frsize,
+                    "total_bytes": volume.f_blocks * volume.f_frsize,
+                }
+                write_atomic(args.output.parent / "capacity.json", capacity_snapshot)
             except OSError:
-                write_atomic(
-                    args.output.parent / "capacity.json",
-                    {"filesystem_id": None, "state": "missing", "measured_at": time.time()},
-                )
+                capacity_snapshot = {
+                    "filesystem_id": None, "state": "missing", "measured_at": time.time(),
+                }
+                write_atomic(args.output.parent / "capacity.json", capacity_snapshot)
                 capacity_ok = False
         snapshot = collect(
             previous=previous,
@@ -380,18 +379,23 @@ def main() -> int:
         if registry_error is not None:
             snapshot["pools"] = unavailable_pools
         if registry is not None:
-            ssd = next(pool for pool in snapshot["pools"] if pool["pool_id"] == "ssd")
-            write_atomic(
-                args.output.parent / "capacity.json",
-                {
-                    **{key: value for key, value in ssd.items() if key != "storage"},
-                    "pools": [
-                        {key: value for key, value in pool.items() if key != "storage"}
-                        for pool in snapshot["pools"]
-                    ],
-                },
-            )
+            primary = next(pool for pool in snapshot["pools"]
+                           if pool["pool_id"] == registry.primary_pool_id)
+            capacity_snapshot = {
+                **{key: value for key, value in primary.items() if key != "storage"},
+                "pools": [
+                    {key: value for key, value in pool.items() if key != "storage"}
+                    for pool in snapshot["pools"]
+                ],
+            }
+            write_atomic(args.output.parent / "capacity.json", capacity_snapshot)
         write_atomic(args.output, snapshot)
+        if args.metrics_output_dir is not None:
+            from homeserver_common.metrics_snapshot import publish_metrics_snapshots
+
+            publish_metrics_snapshots(
+                args.metrics_output_dir, host=snapshot, capacity=capacity_snapshot or {},
+            )
         if not args.loop:
             return 0 if capacity_ok else 4
         time.sleep(interval)

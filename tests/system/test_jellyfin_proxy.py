@@ -13,7 +13,7 @@ def test_only_proxy_publishes_jellyfin_port():
     assert "ports" not in services["jellyfin"]
     assert {(p["host_ip"], int(p["published"]), p["target"])
             for p in services["jellyfin-proxy"]["ports"]} == {("0.0.0.0",8096,8096)}
-    assert any(v["target"] == "/data/media" and v["read_only"]
+    assert any(v["target"] == "/data/media" and not v["read_only"]
                for v in services["jellyfin"]["volumes"])
 
 
@@ -21,9 +21,9 @@ def test_delete_services_load_credentials_from_env_and_use_internal_urls():
     services = _compose_services()
     for name in ("control-api", "control-worker"):
         service = services[name]
-        assert service["environment"]["HOMESERVER_JELLYFIN_URL"] == "http://jellyfin:8096"
-        assert service["environment"]["HOMESERVER_RADARR_URL"] == "http://radarr:7878"
-        assert service["environment"]["HOMESERVER_SONARR_URL"] == "http://sonarr:8989"
+        assert service["environment"]["HOMESERVER_JELLYFIN_URL"] == "http://jellyfin:8096/jellyfin"
+        assert service["environment"]["HOMESERVER_RADARR_URL"] == "http://radarr:7878/radarr"
+        assert service["environment"]["HOMESERVER_SONARR_URL"] == "http://sonarr:8989/sonarr"
         assert "HOMESERVER_JELLYFIN_API_KEY" not in service["environment"]
         assert service["entrypoint"] == ["python", "-m", "homeserver_common.runtime"]
         assert any(v["target"] == "/project" and v["read_only"] for v in service["volumes"])
@@ -36,7 +36,7 @@ def test_items_delete_route_covers_normalized_paths() -> None:
     pattern, upstream = route.groups()
     assert upstream == "control-api:8080"
     assert re.search(r"(?m)^\s*default jellyfin:8096;$", config)
-    assert "proxy_pass http://$jellyfin_destination$request_uri;" in config
+    assert "proxy_pass http://$jellyfin_destination$jellyfin_request_uri;" in config
     matcher = re.compile(pattern, re.IGNORECASE)
 
     for request in (
@@ -46,7 +46,15 @@ def test_items_delete_route_covers_normalized_paths() -> None:
         "DELETE:/jellyfin/Items/abc",
     ):
         assert matcher.search(request), request
-    for request in ("GET:/Items/abc", "POST:/Items/abc", "DELETE:/Other/abc"):
+    for request in (
+        "GET:/Items/abc", "POST:/Items/abc", "DELETE:/Other/abc",
+        "DELETE:/Collections/abc/Items",
+        "DELETE:/Collections/abc/Items/",
+        "DELETE:/jellyfin/Collections/abc/Items",
+        "DELETE:/nested/jellyfin/collections/abc/items",
+        "DELETE:/Playlists/abc/Items",
+        "DELETE:/jellyfin/Playlists/abc/Items",
+    ):
         assert not matcher.search(request), request
 
 

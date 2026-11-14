@@ -1,8 +1,16 @@
 import httpx
 
+from homeserver_common.jellyfin_auth import jellyfin_headers
+from homeserver_common.seerr_csrf import SeerrClient
+
 from .arr import bootstrap_arr_account, reconcile_arr
 from .bazarr import bootstrap_bazarr_account, reconcile_bazarr
-from .media_servers import bootstrap_jellyfin, bootstrap_seerr, reconcile_media_server
+from .media_servers import (
+    bootstrap_jellyfin,
+    bootstrap_seerr,
+    jellyfin_admin_password,
+    reconcile_media_server,
+)
 from .native_config import NativeConfigurationError, ServiceOutcome, environment, plan_settings
 from .prowlarr import reconcile_prowlarr
 from .qbittorrent import (
@@ -11,6 +19,7 @@ from .qbittorrent import (
     read_qbit_settings,
     reconcile_qbit_categories,
 )
+from .service_paths import reconcile_service_path, select_native_base_url
 
 PORTS = {
     "qbit": 8080,
@@ -41,7 +50,7 @@ async def discover_native_credentials(settings, *, transport=None):
         ) as client:
             token = env.get("HOMESERVER_JELLYFIN_API_KEY")
             if token:
-                response = await client.get("/System/Info", headers={"X-Emby-Token": token})
+                response = await client.get("/System/Info", headers=jellyfin_headers(token))
                 if response.status_code in (401, 403):
                     token = None
                 else:
@@ -57,7 +66,7 @@ async def discover_native_credentials(settings, *, transport=None):
                     },
                     json={
                         "Username": env.get("HOMESERVER_ADMIN_USERNAME", "admin"),
-                        "Pw": env.get("HOMESERVER_ADMIN_PASSWORD", ""),
+                        "Pw": jellyfin_admin_password(env),
                     },
                 )
                 response.raise_for_status()
@@ -69,6 +78,7 @@ async def discover_native_credentials(settings, *, transport=None):
             transport=transport,
             trust_env=False,
         ) as client:
+            client = SeerrClient(client)
             key = env.get("HOMESERVER_SEERR_API_KEY")
             if key:
                 response = await client.get("/api/v1/settings/main", headers={"X-Api-Key": key})
@@ -81,7 +91,7 @@ async def discover_native_credentials(settings, *, transport=None):
                     "/api/v1/auth/jellyfin",
                     json={
                         "username": env.get("HOMESERVER_ADMIN_USERNAME", "admin"),
-                        "password": env.get("HOMESERVER_ADMIN_PASSWORD", ""),
+                        "password": jellyfin_admin_password(env),
                         "serverType": 2,
                     },
                 )
@@ -99,14 +109,54 @@ async def discover_native_credentials(settings, *, transport=None):
 
 async def reconcile_native_settings(settings, mode, *, transport=None):
     env = environment(settings)
+    # Migrate native routes before validating any cross-service connection. The
+    # old URL remains live until restart; a second apply finishes the connections.
+    path_outcomes = []
+    for name in ("radarr", "sonarr", "prowlarr", "bazarr", "jellyfin"):
+        prefix = "HOMESERVER_" + name.upper()
+        url = env.get(prefix + "_URL", "")
+        if not url or httpx.URL(url).path in ("", "/"):
+            continue
+        try:
+            key = env.get(prefix + "_API_KEY", "")
+            headers = (jellyfin_headers(key) if key else {}) if name == "jellyfin" else {
+                "X-Api-Key": key,
+            }
+            async with httpx.AsyncClient(
+                base_url=url, headers=headers, transport=transport,
+                timeout=float(env.get("HOMESERVER_HTTP_TIMEOUT_SECONDS", "15")),
+                trust_env=False,
+            ) as client:
+                await select_native_base_url(name, client)
+                if client.base_url.path in ("", "/"):
+                    changes = await reconcile_service_path(name, settings, client, mode)
+                    # Even saved settings require the restart if the new route is absent.
+                    path_outcomes.append(ServiceOutcome(
+                        name, "planned" if mode in ("apply", "plan") else "drift", changes,
+                        "Restart native services, then run config apply again",
+                    ))
+        except (httpx.HTTPError, ValueError, RuntimeError, KeyError, TypeError):
+            # The normal reconciler below reports sanitized per-service errors.
+            continue
+    if path_outcomes:
+        affected = {item.service: item for item in path_outcomes}
+        return [
+            affected.get(name) or ServiceOutcome(
+                "qbittorrent" if name == "qbit" else name,
+                "planned" if mode in ("apply", "plan") else "drift",
+                message="Connections deferred until native base path restart",
+            )
+            for name in PORTS
+        ]
     outcomes = []
     for name, port in PORTS.items():
         prefix = "HOMESERVER_" + name.upper()
         url = env.get(prefix + "_URL", f"http://{'qbittorrent' if name == 'qbit' else name}:{port}")
-        headers = {"X-Api-Key": env.get(prefix + "_API_KEY", "")}
-        if name == "jellyfin":
-            headers = {"X-Emby-Token": env.get(prefix + "_API_KEY", "")}
         try:
+            key = env.get(prefix + "_API_KEY", "")
+            headers = (jellyfin_headers(key) if key else {}) if name == "jellyfin" else {
+                "X-Api-Key": key,
+            }
             async with httpx.AsyncClient(
                 base_url=url,
                 headers=headers,
@@ -114,6 +164,7 @@ async def reconcile_native_settings(settings, mode, *, transport=None):
                 transport=transport,
                 trust_env=False,
             ) as client:
+                await select_native_base_url(name, client)
                 if name == "qbit":
                     changes = (
                         await apply_qbit_settings(settings, client)
@@ -162,6 +213,11 @@ async def reconcile_native_settings(settings, mode, *, transport=None):
                     outcome = early or await reconcile_media_server(
                         name, settings, client, mode, transport=transport
                     )
+                path_changes = await reconcile_service_path(name, settings, client, mode)
+                outcome.changes += path_changes
+                if path_changes:
+                    outcome.message = "Native base path changed; restart this service"
+                    outcome.status = "planned" if mode in ("apply", "plan") else "drift"
             outcomes.append(outcome)
         except (httpx.HTTPError, ValueError, RuntimeError, KeyError, TypeError) as error:
             # Never stringify upstream errors: URLs and response bodies can carry secrets.

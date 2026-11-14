@@ -7,17 +7,27 @@ import re
 import sqlite3
 import stat
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
 
+from homeserver_common.jellyfin_auth import jellyfin_headers as native_auth_headers
 from homeserver_common.storage import StorageRegistry, StorageUnavailable
 from homeserver_control.persistence.deletion_jobs import DeletionJobStore
 from homeserver_control.storage_paths import captured_identity, physical_paths, source_logical_path
 
 _ITEM_ID = re.compile(r"^[0-9a-fA-F]{32}$")
+# Native BaseItemKind values; malformed DTOs must never select a deletion branch.
+_JELLYFIN_ITEM_TYPES = frozenset({
+    "AggregateFolder", "Audio", "AudioBook", "BasePluginFolder", "Book", "BoxSet", "Channel",
+    "ChannelFolderItem", "CollectionFolder", "Episode", "Folder", "Genre",
+    "ManualPlaylistsFolder", "Movie", "LiveTvChannel", "LiveTvProgram", "MusicAlbum",
+    "MusicArtist", "MusicGenre", "MusicVideo", "Person", "Photo", "PhotoAlbum", "Playlist",
+    "PlaylistsFolder", "Program", "Recording", "Season", "Series", "Studio", "Trailer",
+    "TvChannel", "TvProgram", "UserRootFolder", "UserView", "Video", "Year",
+})
 _SEASON_METADATA = re.compile(
     r"^(?:season\.nfo|(?:folder|poster|banner|fanart|thumb|landscape)\.(?:jpg|jpeg|png|webp))$",
     re.IGNORECASE,
@@ -206,29 +216,64 @@ class DeletionAdmission:
                     found[str(local)] = {'file_path': str(local), 'file_identity': captured}
         return list(found.values())
 
-    async def capture(self, item_id: str, user_token: str) -> dict[str, object]:
+    def _require_media_deletion(self, policy: dict, enabled: bool) -> None:
+        if policy.get("EnableContentDeletion") is not True:
+            raise DeletionCaptureError(403, "Jellyfin administrator deletion permission required")
+        if not enabled:
+            raise DeletionCaptureError(503, "coordinated deletion unavailable")
+        self._check_mount()
+
+    async def capture(
+        self, item_id: str, user_token: str, *, media_deletion_enabled: bool = True
+    ) -> dict[str, object]:
         if not _ITEM_ID.fullmatch(item_id) or not user_token:
             raise DeletionCaptureError(401, "valid Jellyfin session required")
-        jellyfin_headers = {"X-Emby-Token": user_token}
+        try:
+            jellyfin_headers = native_auth_headers(user_token)
+        except ValueError:
+            raise DeletionCaptureError(401, "valid Jellyfin session required") from None
         user = await self._get_json(
             f"{self.jellyfin_url}/Users/Me", headers=jellyfin_headers
         )
         if not isinstance(user, dict) or not isinstance(user.get("Id"), str):
             raise DeletionCaptureError(403, "Jellyfin session is not authorized")
         policy = user.get("Policy") or {}
-        if not (policy.get("IsAdministrator") and policy.get("EnableContentDeletion")):
+        if not isinstance(policy, dict) or policy.get("IsAdministrator") is not True:
             raise DeletionCaptureError(403, "Jellyfin administrator deletion permission required")
-        self._check_mount()
-        existing = self.jobs.get(item_id)
-        if existing is not None:
+        try:
+            item = await self._get_json(
+                f"{self.jellyfin_url}/Users/{user['Id']}/Items/{item_id}",
+                headers=jellyfin_headers,
+            )
+        except DeletionCaptureError as error:
+            if error.status_code != 404:
+                raise
+            # A completed native catalog deletion must not break a durable media retry.
+            try:
+                existing = self.jobs.get(item_id)
+            except sqlite3.Error:
+                raise error from None
+            if existing is None or existing["item_type"] not in {"Movie", "Episode", "Season"}:
+                raise
+            self._require_media_deletion(policy, media_deletion_enabled)
             return existing
-        item = await self._get_json(
-            f"{self.jellyfin_url}/Users/{user['Id']}/Items/{item_id}",
-            headers=jellyfin_headers,
-        )
         if not isinstance(item, dict) or str(item.get("Id", "")).lower() != item_id.lower():
             raise DeletionCaptureError(409, "Jellyfin item identity changed")
         item_type = item.get("Type")
+        if not isinstance(item_type, str) or item_type not in _JELLYFIN_ITEM_TYPES:
+            raise DeletionCaptureError(409, "Jellyfin item type is unavailable or invalid")
+        if item_type == "BoxSet":
+            return await self._delete_collection(item, jellyfin_headers)
+        if policy.get("EnableContentDeletion") is not True:
+            raise DeletionCaptureError(403, "Jellyfin administrator deletion permission required")
+        if item_type not in {"Movie", "Episode", "Season"}:
+            return await self._delete_native_item(item, jellyfin_headers)
+        self._require_media_deletion(policy, media_deletion_enabled)
+        existing = self.jobs.get(item_id)
+        if existing is not None:
+            if existing["item_type"] != item_type:
+                raise DeletionCaptureError(409, "Jellyfin item type changed after capture")
+            return existing
         if item_type == "Movie":
             payload = await self._capture_movie(item)
         elif item_type == "Episode":
@@ -239,9 +284,61 @@ class DeletionAdmission:
                 return self.jobs.enqueue_season(item_id, payload)
             except ValueError as error:
                 raise DeletionCaptureError(409, str(error)) from error
-        else:
-            raise DeletionCaptureError(422, "delete movies, episodes or a season")
         return self.jobs.enqueue(item_id, item_type, payload)
+
+    async def _delete_collection(
+        self, item: dict[str, Any], jellyfin_headers: dict[str, str]
+    ) -> dict[str, object]:
+        """Delete a modern collection's metadata, never a legacy media directory."""
+        system = await self._get_json(
+            f"{self.jellyfin_url}/System/Info", headers=jellyfin_headers
+        )
+        program_data_path = system.get("ProgramDataPath") if isinstance(system, dict) else None
+        if (
+            not isinstance(program_data_path, str) or not program_data_path
+            or not PurePosixPath(program_data_path).is_absolute()
+            or ".." in PurePosixPath(program_data_path).parts
+        ):
+            raise DeletionCaptureError(503, "Jellyfin collection storage identity unavailable")
+        raw_path = item.get("Path")
+        if not isinstance(raw_path, str) or not raw_path:
+            raise DeletionCaptureError(409, "collection has no metadata directory")
+        path = PurePosixPath(raw_path)
+        if (
+            not path.is_absolute() or ".." in path.parts
+            # BaseApplicationPaths derives DataPath as ProgramDataPath/data.
+            or path.parent != PurePosixPath(program_data_path) / "data" / "collections"
+            or not path.name.endswith("[boxset]")
+        ):
+            raise DeletionCaptureError(409, "collection is outside Jellyfin collection metadata")
+        return await self._delete_native_item(item, jellyfin_headers)
+
+    async def _delete_native_item(
+        self, item: dict[str, Any], jellyfin_headers: dict[str, str]
+    ) -> dict[str, object]:
+        """Forward an explicit, authenticated admin deletion of a verified native item."""
+        async def request(client: httpx.AsyncClient) -> None:
+            try:
+                response = await client.delete(
+                    f"{self.jellyfin_url}/Items/{item['Id']}", headers=jellyfin_headers
+                )
+            except httpx.HTTPError as error:
+                raise DeletionCaptureError(
+                    503, "Jellyfin native deletion unavailable"
+                ) from error
+            if response.status_code in (401, 403):
+                raise DeletionCaptureError(403, "Jellyfin session is not authorized")
+            if response.status_code == 404:
+                raise DeletionCaptureError(404, "Jellyfin item was not found")
+            if response.status_code != 204:
+                raise DeletionCaptureError(503, "Jellyfin native deletion failed")
+
+        if self.client is not None:
+            await request(self.client)
+        else:
+            async with httpx.AsyncClient(timeout=self.http_timeout_seconds) as client:
+                await request(client)
+        return {"item_id": item["Id"], "item_type": item["Type"], "stage": "completed"}
 
     async def _capture_movie(self, item: dict[str, Any]) -> dict[str, Any]:
         path, identity = self._file_identity(item.get("Path"), "movies")

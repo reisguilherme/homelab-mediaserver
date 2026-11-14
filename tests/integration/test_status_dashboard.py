@@ -319,7 +319,7 @@ def test_status_pool_queue_requires_fresh_matching_identity(tmp_path):
 
 
 def _queue_pool_status(tmp_path, *, queue_age=1, capacity_age=1, free=60_000,
-                       pending=20_000, available=40_000, queue_uuid='uuid-ssd'):
+                       pending=20_000, available=40_000, queue_uuid='uuid-ssd', breakdown=None):
     from homeserver_telemetry.status import StatusProvider
 
     now = time.time()
@@ -332,10 +332,55 @@ def _queue_pool_status(tmp_path, *, queue_age=1, capacity_age=1, free=60_000,
         'measured_at': now - queue_age, 'pools': [dict(
             pool_id='ssd', filesystem_id=queue_uuid,
             pending_bytes=pending, available_bytes=available,
+            **(breakdown or {}),
         )],
     }))
     provider = StatusProvider(host_path=host, capacity_path=capacity, media_root=tmp_path)
     return provider()['pools'][0]
+
+
+@pytest.mark.parametrize('active,stopped', [(1500, 18500), (0, 20000), (20000, 0)])
+def test_pool_queue_separates_active_and_stopped_without_releasing_capacity(
+    tmp_path, active, stopped,
+):
+    status = _queue_pool_status(tmp_path, breakdown={
+        'active_pending_bytes': active, 'stopped_pending_bytes': stopped,
+    })
+    assert status['active_queue_remaining_bytes'] == active
+    assert status['stopped_queue_remaining_bytes'] == stopped
+    assert status['queue_remaining_bytes'] == 20000
+    assert status['admissible_bytes'] == 40000
+
+
+@pytest.mark.parametrize('breakdown', [
+    None, {'active_pending_bytes': 1500}, {'stopped_pending_bytes': 18500},
+    {'active_pending_bytes': True, 'stopped_pending_bytes': 19999},
+    {'active_pending_bytes': 1500.0, 'stopped_pending_bytes': 18500},
+    {'active_pending_bytes': 1500, 'stopped_pending_bytes': False},
+    {'active_pending_bytes': 1500, 'stopped_pending_bytes': 18500.0},
+    {'active_pending_bytes': -1, 'stopped_pending_bytes': 20001},
+    {'active_pending_bytes': 20001, 'stopped_pending_bytes': -1},
+    {'active_pending_bytes': 1500, 'stopped_pending_bytes': 18499},
+])
+def test_invalid_queue_breakdown_keeps_aggregate_and_admissible_bytes(tmp_path, breakdown):
+    status = _queue_pool_status(tmp_path, breakdown=breakdown)
+    assert status['active_queue_remaining_bytes'] is None
+    assert status['stopped_queue_remaining_bytes'] is None
+    assert status['queue_remaining_bytes'] == 20000
+    assert status['admissible_bytes'] == 40000
+
+
+@pytest.mark.parametrize('overrides', [
+    {'queue_age': 90}, {'capacity_age': 90}, {'queue_uuid': 'foreign-disk'},
+])
+def test_queue_breakdown_requires_fresh_matching_pool_identity(tmp_path, overrides):
+    status = _queue_pool_status(tmp_path, **overrides, breakdown={
+        'active_pending_bytes': 1500, 'stopped_pending_bytes': 18500,
+    })
+    assert status['active_queue_remaining_bytes'] is None
+    assert status['stopped_queue_remaining_bytes'] is None
+    assert status['queue_remaining_bytes'] is None
+    assert status['admissible_bytes'] is None
 
 
 @pytest.mark.parametrize('queue_age,capacity_age', [(1, 2), (2, 1)])
@@ -374,3 +419,19 @@ def test_pool_queue_keeps_overcommitted_pending_with_zero_available(tmp_path):
     status = _queue_pool_status(tmp_path, pending=120_000, available=0)
     assert status['queue_remaining_bytes'] == 120_000
     assert status['admissible_bytes'] == 0
+
+
+def test_admissible_space_deducts_headroom_from_newer_physical_measurement(tmp_path):
+    status = _queue_pool_status(tmp_path, available=50_000,
+                                breakdown={'min_free_bytes': 10_000})
+    assert status['free_bytes'] == 60_000
+    assert status['used_bytes'] == 30_000
+    assert status['min_free_bytes'] == 10_000
+    assert status['admissible_bytes'] == 30_000
+
+
+@pytest.mark.parametrize('value', [-1, True, 1.5])
+def test_invalid_headroom_keeps_pending_but_cannot_overstate_available(tmp_path, value):
+    status = _queue_pool_status(tmp_path, breakdown={'min_free_bytes': value})
+    assert status['queue_remaining_bytes'] == 20_000
+    assert status['admissible_bytes'] is None

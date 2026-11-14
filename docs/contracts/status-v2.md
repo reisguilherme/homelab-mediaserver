@@ -7,7 +7,8 @@ o formato legado e o card único permanecem disponíveis.
 
 Cada pool contém `pool_id` (`ssd` ou `hdd`), `label`, `filesystem_id`, `state`,
 `reason`, `measured_at`, `total_bytes`, `used_bytes`, `free_bytes`,
-`queue_remaining_bytes`, `admissible_bytes` e `storage`.
+`queue_remaining_bytes`, `active_queue_remaining_bytes`,
+`stopped_queue_remaining_bytes`, `min_free_bytes`, `admissible_bytes` e `storage`.
 
 `ready` permite números físicos atuais. `unavailable` e `stale` apresentam os
 três números físicos como `null`; a idade pode continuar sendo exibida.
@@ -41,7 +42,10 @@ controlador. Seu DTO é:
       "pool_id": "ssd",
       "filesystem_id": "fixture-ssd",
       "pending_bytes": 20000,
-      "available_bytes": 40000
+      "active_pending_bytes": 15000,
+      "stopped_pending_bytes": 5000,
+      "min_free_bytes": 10000,
+      "available_bytes": 30000
     }
   ]
 }
@@ -51,13 +55,27 @@ O status combina esse DTO somente quando o pool físico está `ready`, a identid
 é a mesma, a amostra está dentro de `capacity_max_age_seconds`, os valores são
 inteiros não negativos e `available_bytes <= max(0, total_bytes - pending_bytes)`.
 Como as amostras de fila e espaço são independentes, o valor exibido de
-disponibilidade é `min(available_bytes, max(0, free_bytes - pending_bytes))`.
+disponibilidade é
+`min(available_bytes, max(0, free_bytes - pending_bytes - min_free_bytes))`.
+`min_free_bytes` é a margem de downloads por disco, independente da reserva do
+filesystem, e deve ser inteiro não negativo. O default de produção é 10 GiB,
+configurável por `HOMESERVER_STORAGE_MIN_FREE_GIB`. O snapshot antigo sem esse
+campo é lido com margem zero para compatibilidade; margem inválida mantém a
+fila válida mas deixa a disponibilidade nula. Os números físicos não mudam.
 Assim, uma gravação entre coletas não apaga uma fila válida nem aumenta o espaço
 apresentado. O controlador atualiza a fila em tarefa independente a cada cinco
 segundos; uma falha de leitura não renova o timestamp anterior.
 Sem prova válida ambos os campos de fila ficam nulos. `pending_bytes` inclui
 compromissos restantes, inclusive fila pausada e permissões pendentes; o painel
 apenas apresenta a contabilização do controlador, sem estimar ou admitir pedidos.
+Os campos adicionais de fila são inteiros não negativos e sua soma deve ser
+igual a `pending_bytes`. O status mantém `queue_remaining_bytes` como agregado
+para compatibilidade; o painel mostra `active_queue_remaining_bytes` em
+**Restante da fila**. `stopped_queue_remaining_bytes` permanece no DTO, sem campo
+próprio nos cards dos discos.
+Snapshots antigos ou com composição inválida mantêm somente o agregado válido;
+os novos campos ficam nulos, sem inventar fila vazia. A disponibilidade continua
+usando todos os compromissos até o descarte comprovado das fontes antigas.
 
 Categorias usam blocos físicos e uma única tabela de `(st_dev, st_ino)` por pool,
 na ordem filmes, séries e torrents; outros é o restante do usado físico. Symlinks

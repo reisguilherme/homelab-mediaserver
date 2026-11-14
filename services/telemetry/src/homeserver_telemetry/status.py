@@ -194,7 +194,10 @@ class StatusProvider:
         self.queue_path = queue_path or capacity_path.with_name("storage-queue.json")
 
     def _pools(self, host: dict, capacity: dict, *, now: float, host_state: str) -> list[dict]:
+        from homeserver_common.storage import POOL_IDS, POOL_LABELS, REQUIRED_POOL_IDS
+
         expected = {}
+        pool_ids = REQUIRED_POOL_IDS
         registry_error = False
         if self.storage_registry_path.exists():
             from homeserver_common.storage import StorageRegistryError, load_storage_registry
@@ -203,6 +206,7 @@ class StatusProvider:
                 registry = load_storage_registry(self.storage_registry_path)
                 if registry is not None:
                     expected = {key: pool.filesystem_id for key, pool in registry.pools.items()}
+                    pool_ids = registry.pool_ids
             except (StorageRegistryError, OSError):
                 registry_error = True
         if self.expected_filesystem_id is not None:
@@ -214,7 +218,7 @@ class StatusProvider:
                 return {}
             result = {}
             for entry in entries:
-                if isinstance(entry, dict) and entry.get("pool_id") in ("ssd", "hdd"):
+                if isinstance(entry, dict) and entry.get("pool_id") in POOL_IDS:
                     key = entry["pool_id"]
                     # A duplicate physical sample is ambiguous, never last-writer-wins.
                     result[key] = None if key in result else entry
@@ -232,7 +236,8 @@ class StatusProvider:
             == "ok"
         )
         result = []
-        for pool_id, label in (("ssd", "SSD"), ("hdd", "HD USB")):
+        for pool_id in pool_ids:
+            label = POOL_LABELS[pool_id]
             sample = capacity_pools.get(pool_id) or {}
             measured_at = _timestamp(sample.get("measured_at"))
             freshness = _state(measured_at, now=now, fresh_seconds=self.capacity_max_age_seconds)
@@ -300,7 +305,8 @@ class StatusProvider:
                             "measured_at": categories["measured_at"],
                             **values,
                         }
-            pending = available = None
+            pending = available = minimum_free = None
+            active = stopped = None
             queue_pool = queue_pools.get(pool_id) or {}
             if state == "ready" and queue_fresh and queue_pool.get("filesystem_id") == identity:
                 candidate_pending = _number(queue_pool.get("pending_bytes"))
@@ -313,7 +319,22 @@ class StatusProvider:
                     pending = candidate_pending
                     # These fresh snapshots are sampled independently while writes continue.
                     # Keep the queue and display the more conservative available-space bound.
-                    available = min(candidate_available, max(0, free - pending))
+                    candidate_minimum = queue_pool.get("min_free_bytes", 0)
+                    if type(candidate_minimum) is int and candidate_minimum >= 0:
+                        minimum_free = candidate_minimum
+                        available = min(
+                            candidate_available, max(0, free - pending - minimum_free),
+                        )
+                    candidate_active = queue_pool.get("active_pending_bytes")
+                    candidate_stopped = queue_pool.get("stopped_pending_bytes")
+                    if (
+                        type(candidate_active) is int
+                        and candidate_active >= 0
+                        and type(candidate_stopped) is int
+                        and candidate_stopped >= 0
+                        and candidate_active + candidate_stopped == pending
+                    ):
+                        active, stopped = candidate_active, candidate_stopped
             result.append(
                 {
                     "pool_id": pool_id,
@@ -326,7 +347,10 @@ class StatusProvider:
                     "free_bytes": free if state == "ready" else None,
                     "used_bytes": used if state == "ready" else None,
                     "queue_remaining_bytes": pending,
+                    "active_queue_remaining_bytes": active,
+                    "stopped_queue_remaining_bytes": stopped,
                     "admissible_bytes": available,
+                    "min_free_bytes": minimum_free,
                     "storage": storage,
                 }
             )

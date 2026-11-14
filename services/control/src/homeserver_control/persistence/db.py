@@ -211,6 +211,34 @@ class ReservationRepository:
             ).fetchone()
         return row["state"] if row is not None else None
 
+    def pending_movie_imports(self) -> list[dict[str, str]]:
+        """Owned accepted imports still needing confirmation or subtitle recovery."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT r.id AS reservation_id,r.media_key,q.source_id
+                FROM movie_imports i JOIN reservations r ON r.id=i.reservation_id
+                JOIN requests q ON q.id=r.request_id
+                WHERE i.state IN ('accepted','accepted_copy',
+                                  'subtitles_pending','subtitles_pending_copy')
+                AND r.state IN ('reserved','downloading')
+                AND r.media_key LIKE 'movie:tmdb:%'
+                AND q.state NOT IN ('cancel_requested','cancelled')
+                AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.media_key=r.media_key)
+                ORDER BY i.updated_at,r.id"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def verify_movie_import(self, reservation_id: str) -> None:
+        """The imported bytes are verified; subtitle retries need no import slot."""
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE movie_imports SET state=CASE state
+                    WHEN 'accepted_copy' THEN 'subtitles_pending_copy'
+                    ELSE 'subtitles_pending' END, updated_at=?
+                WHERE reservation_id=? AND state IN ('accepted','accepted_copy')""",
+                (_now(), reservation_id),
+            )
+
     @staticmethod
     def _import_pending(
         connection: sqlite3.Connection, *, copy_allowed: bool
@@ -221,10 +249,12 @@ class ReservationRepository:
         return bool(connection.execute(
             """SELECT EXISTS(
                 SELECT 1 FROM movie_imports
-                WHERE state != 'complete' AND (? OR state != 'accepted')
+                WHERE state NOT IN ('complete','subtitles_pending','subtitles_pending_copy')
+                AND (? OR state != 'accepted')
                 UNION ALL
                 SELECT 1 FROM episode_imports
-                WHERE state != 'complete' AND (? OR state != 'accepted')
+                WHERE state NOT IN ('complete','subtitles_pending','subtitles_pending_copy')
+                AND (? OR state != 'accepted')
             )""",
             (copy_allowed, copy_allowed),
         ).fetchone()[0])
@@ -290,6 +320,82 @@ class ReservationRepository:
             ).fetchone()
         return row["state"] if row is not None else None
 
+    def set_series_subtitle_publication(self, tmdb_id: int, *, enabled: bool) -> None:
+        """Persist the owner's explicit permission for one canonical TV identity."""
+        if type(tmdb_id) is not int or tmdb_id <= 0 or type(enabled) is not bool:
+            raise ValueError("series publication requires a positive TMDb ID and boolean")
+        with self._connect() as connection:
+            if enabled:
+                connection.execute(
+                    "INSERT OR IGNORE INTO series_subtitle_publication VALUES (?,?)",
+                    (tmdb_id, _now()),
+                )
+            else:
+                connection.execute(
+                    "DELETE FROM series_subtitle_publication WHERE tmdb_id=?", (tmdb_id,),
+                )
+
+    def series_subtitle_publication_allowed(self, tmdb_id: int) -> bool:
+        if type(tmdb_id) is not int or tmdb_id <= 0:
+            raise ValueError("series publication requires a positive TMDb ID")
+        with self._connect() as connection:
+            return connection.execute(
+                "SELECT 1 FROM series_subtitle_publication WHERE tmdb_id=?", (tmdb_id,),
+            ).fetchone() is not None
+
+    def verify_episode_import(self, permit_id: str) -> None:
+        """Native bytes were proved; keep subtitle work durable without an import slot."""
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE episode_imports SET state=CASE state
+                    WHEN 'accepted_copy' THEN 'subtitles_pending_copy'
+                    ELSE 'subtitles_pending' END, updated_at=?
+                WHERE permit_id=? AND state IN ('accepted','accepted_copy')""",
+                (_now(), permit_id),
+            )
+
+    def pending_series_imports(self) -> list[dict[str, str]]:
+        """Owned series confirmations/recovery, including immutable pack-child receipts."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT r.id AS reservation_id,r.media_key,q.source_id
+                FROM episode_imports i JOIN gateway_permits p ON i.permit_id=p.permit_id
+                    OR EXISTS (SELECT 1 FROM season_pack_episodes e
+                        WHERE e.parent_permit_id=p.permit_id
+                        AND i.permit_id=p.permit_id || ':' || e.scope_key)
+                JOIN reservations r ON r.id=p.reservation_id
+                JOIN requests q ON q.id=r.request_id
+                WHERE i.state IN ('accepted','accepted_copy',
+                                  'subtitles_pending','subtitles_pending_copy')
+                AND p.state='confirmed' AND r.state IN ('reserved','downloading')
+                AND r.media_key LIKE 'season:tmdb:%'
+                AND q.state NOT IN ('cancel_requested','cancelled')
+                AND NOT EXISTS (SELECT 1 FROM tombstones t WHERE t.media_key=r.media_key)
+                GROUP BY r.id ORDER BY MIN(i.updated_at),r.id"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def pending_episode_subtitles(self, reservation_id: str) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT i.permit_id FROM episode_imports i
+                JOIN gateway_permits p ON i.permit_id=p.permit_id OR EXISTS (
+                    SELECT 1 FROM season_pack_episodes e WHERE e.parent_permit_id=p.permit_id
+                    AND i.permit_id=p.permit_id || ':' || e.scope_key)
+                WHERE p.reservation_id=? AND p.state='confirmed'
+                AND i.state IN ('subtitles_pending','subtitles_pending_copy')
+                ORDER BY i.updated_at,i.permit_id""", (reservation_id,),
+            ).fetchall()
+        return [row["permit_id"] for row in rows]
+
+    def mark_episode_subtitle_retry(self, permit_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE episode_imports SET updated_at=? WHERE permit_id=?
+                AND state IN ('subtitles_pending','subtitles_pending_copy')""",
+                (_now(), permit_id),
+            )
+
     def claim_episode_import(self, permit_id: str, *, copy_allowed: bool = False) -> bool:
         connection = self._connect()
         try:
@@ -321,7 +427,8 @@ class ReservationRepository:
         with self._connect() as connection:
             connection.execute(
                 "UPDATE episode_imports SET state = 'complete', updated_at = ? "
-                "WHERE permit_id = ? AND state IN ('accepted', 'accepted_copy')",
+                "WHERE permit_id = ? AND state IN "
+                "('accepted','accepted_copy','subtitles_pending','subtitles_pending_copy')",
                 (_now(), permit_id),
             )
 

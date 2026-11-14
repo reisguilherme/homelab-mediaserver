@@ -1,0 +1,17 @@
+services:
+  host-metrics:
+    group_add:
+      - "65534"
+    command:
+      - python
+      - /app/scripts/host-metrics.py
+      - --loop
+      - --metrics-output-dir
+      - /run/homeserver-metrics
+    volumes:
+      - type: bind
+        source: ${HOMESERVER_OBSERVABILITY_DIR:-/srv/appdata/observability}/snapshots
+        target: /run/homeserver-metrics
+        read_only: false
+        bind:
+          create_host_path: false

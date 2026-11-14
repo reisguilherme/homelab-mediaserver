@@ -62,7 +62,7 @@ def fixture_trial(tmp_path):
         destination=probe.destination,
         effect=lambda _: {"accepted": True, "infohash": probe.infohash},
     )
-    health = SourceHealthStore(database)
+    health = SourceHealthStore(database, automatic_replacement_enabled=True)
     measured = time.time()
 
     def observation(torrent, left):

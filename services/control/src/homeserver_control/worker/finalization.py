@@ -6,25 +6,31 @@ import os
 import re
 import tempfile
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 import httpx
 
+from homeserver_common.jellyfin_auth import jellyfin_headers
 from homeserver_common.storage import StorageUnavailable
 from homeserver_control.domain.subtitle_content import valid_srt
 from homeserver_control.gateway.permits import Permit, PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.subtitle_artifacts import (
     MOVIE_FINALIZER_SOURCE,
+    OPENSUBTITLES_SERIES_FINALIZER_SOURCE,
     SubtitleArtifactStore,
 )
 from homeserver_control.storage_paths import physical_path, source_logical_path
 
+from .audio_audit import audit_download_audio
 from .capacity_evidence import CapacityEvidence
 from .imports import import_hardlink, probe_hardlink_as
+from .media_profiles import is_animation
 from .subdl import SubDLSource
 from .subtitle_language import (
     SubtitlePolicy,
+    has_embedded_brazilian_subtitle,
     has_embedded_english_subtitle,
     is_brazilian_portuguese_subtitle,
     is_english_subtitle,
@@ -120,6 +126,8 @@ class MovieFinalizer:
         capacity_provider: Callable[[], Awaitable[CapacityEvidence]] | None = None,
         import_uid: int | None = None,
         import_gid: int | None = None,
+        jellyfin_url: str | None = None,
+        jellyfin_api_key: str | None = None,
     ) -> None:
         if not arr_token or not radarr_api_key:
             raise ValueError("gateway and Radarr credentials are required")
@@ -139,6 +147,17 @@ class MovieFinalizer:
         self.capacity_provider = capacity_provider
         self.import_uid = import_uid
         self.import_gid = import_gid
+        self.jellyfin_url = jellyfin_url.rstrip('/') if jellyfin_url else None
+        self.jellyfin_api_key = jellyfin_api_key
+
+    async def _notify_jellyfin(self, video: Path) -> None:
+        if self.jellyfin_url and self.jellyfin_api_key:
+            response = await self.client.post(
+                f"{self.jellyfin_url}/Library/Media/Updated",
+                headers=jellyfin_headers(self.jellyfin_api_key),
+                json={"Updates": [{"Path": str(video), "UpdateType": "Modified"}]},
+            )
+            response.raise_for_status()
 
     async def _hardlink_import_enabled(self) -> bool:
         response = await self.client.get(
@@ -161,7 +180,7 @@ class MovieFinalizer:
         evidence = await self.capacity_provider()
         pending = self.permits.pending_bytes(evidence)
         copy_bytes = sum(path.stat().st_size for path in selected)
-        return copy_bytes <= max(0, evidence.free_bytes - pending)
+        return copy_bytes <= max(0, evidence.usable_free_bytes - pending)
 
     def _can_hardlink_video(
         self, video: Path, *, permit: Permit | None = None, directory: Path | None = None,
@@ -321,21 +340,112 @@ class MovieFinalizer:
             raise ValidationError("Radarr movie file is outside the library")
         return resolved
 
+    async def _resolve_subtitle_policy(self, media: dict[str, object]) -> SubtitlePolicy:
+        if (is_animation(media) or "qualityProfileId" not in media
+                or not self.subtitle_policy.skip_original_audio_languages):
+            return self._subtitle_policy_for(media)
+        profile_name = None
+        profile_id = media.get("qualityProfileId")
+        if isinstance(profile_id, int) and not isinstance(profile_id, bool) and profile_id > 0:
+            try:
+                response = await self.client.get(
+                    f"{self.radarr_url}/api/v3/qualityprofile", headers=self.radarr_headers,
+                )
+                response.raise_for_status()
+                profiles = response.json()
+                matches = [
+                    item for item in profiles
+                    if isinstance(item, dict) and type(item.get("id")) is int
+                    and item["id"] == profile_id
+                ] if isinstance(profiles, list) else []
+                if len(matches) == 1:
+                    profile_name = matches[0].get("name")
+            except (httpx.HTTPError, ValueError):
+                # An unresolved profile cannot authorize skipping subtitle recovery.
+                pass
+        return self._subtitle_policy_for(media, profile_name=profile_name)
+
+    def _subtitle_policy_for(
+        self, media: dict[str, object], *, profile_name: object = None,
+    ) -> SubtitlePolicy:
+        requires_subtitles = is_animation(media) or (
+            "qualityProfileId" in media and profile_name not in ("Standard", "Max Quality")
+        )
+        return (
+            replace(self.subtitle_policy, skip_original_audio_languages=())
+            if requires_subtitles else self.subtitle_policy
+        )
+
+    def _installed_bazarr_subtitle(
+        self, video: Path, permit: Permit, policy: SubtitlePolicy, preferred: str,
+    ) -> Path | None:
+        if "bazarr" not in policy.providers or preferred not in policy.languages:
+            return None
+        root = self.media_root.resolve(strict=True)
+        if (video.is_symlink() or not video.is_file()
+                or video.resolve(strict=True) != video or not video.is_relative_to(root)):
+            raise ValidationError("imported video escapes library")
+        self._physical(video, permit)
+        prefix = video.stem + "."
+        matches = (is_brazilian_portuguese_subtitle if preferred == "pt-BR"
+                   else is_english_subtitle)
+        for candidate in sorted(video.parent.iterdir()):
+            if (not candidate.name.startswith(prefix) or candidate.suffix.lower() not in _SUBTITLE
+                    or candidate.is_symlink() or not candidate.is_file()):
+                continue
+            # Inspect only the language/flags suffix, never markers in the film title.
+            tags = candidate.stem[len(prefix):]
+            if not re.fullmatch(
+                r"(?:pt[-_]?br|pob|(?:en|eng)(?:[-_]us)?|english)"
+                r"(?:\.(?:hi|sdh|cc|default))*", tags, flags=re.IGNORECASE,
+            ):
+                continue
+            label = tags + candidate.suffix
+            if not matches(label) or not policy.matches(label):
+                continue
+            resolved = candidate.resolve(strict=True)
+            if resolved != candidate or not resolved.is_relative_to(root):
+                continue
+            if (_subtitle_has_content(candidate)
+                    and (candidate.suffix.lower() != ".srt" or valid_srt(candidate.read_bytes()))):
+                self._physical(candidate, permit)
+                return candidate
+        return None
+
+    def _stored_subtitle(
+        self, permit: Permit, scope_key: str | None, *, language: str,
+    ) -> bytes | None:
+        sources = [MOVIE_FINALIZER_SOURCE if scope_key is None else "subdl"]
+        scope = re.fullmatch(r"S([0-9]{2,})E([0-9]{2,})", scope_key or "")
+        if (self.library == "tv" and getattr(permit, "category", None) == "sonarr"
+                and scope is not None
+                and int(scope[1]) > 0 and int(scope[2]) > 0):
+            sources.append(OPENSUBTITLES_SERIES_FINALIZER_SOURCE)
+        for source in sources:
+            content = self.subtitle_store.get(
+                permit.reservation_id, scope_key, permit.infohash, language=language, source=source,
+            )
+            if content is not None:
+                return content
+        return None
+
     def _ensure_subtitle_for_video(
-        self, video: Path, permit: Permit, scope_key: str | None
+        self, video: Path, permit: Permit, scope_key: str | None,
+        *, subtitle_policy: SubtitlePolicy | None = None,
     ) -> None:
+        policy = subtitle_policy or self.subtitle_policy
         handlers = {
             "pt-BR": ("BR_PT", "pt-BR", is_brazilian_portuguese_subtitle),
             "en-US": ("EN", "en", is_english_subtitle),
         }
-        for preferred in self.subtitle_policy.languages:
+        for preferred in policy.languages:
             language, label, matches = handlers[preferred]
             subtitles = [
                 self._source_path(permit, name)
                 for name in permit.selected_files
                 if PurePosixPath(name).suffix.lower() in _SUBTITLE
                 and matches(name)
-                and self.subtitle_policy.matches(name)
+                and policy.matches(name)
             ]
             source = next((path for path in subtitles if _subtitle_has_content(path)), None)
             if subtitles and source is None:
@@ -343,12 +453,13 @@ class MovieFinalizer:
             if source is not None:
                 self._install_subtitle_file(video, source, label, permit=permit)
                 return
-            content = self.subtitle_store.get(
-                permit.reservation_id,
-                scope_key,
-                permit.infohash,
+            if scope_key is None and self._installed_bazarr_subtitle(
+                video, permit, policy, preferred,
+            ) is not None:
+                return
+            content = self._stored_subtitle(
+                permit, scope_key,
                 language=language,
-                source=MOVIE_FINALIZER_SOURCE if scope_key is None else "subdl",
             )
             if content is not None:
                 if self.storage_registry is None:
@@ -366,10 +477,14 @@ class MovieFinalizer:
                 return
         validated = validate_media(video, maximum_bytes=permit.budget_bytes)
         if not (
-            self.subtitle_policy.waives_subtitles(validated.probe)
+            policy.waives_subtitles(validated.probe)
             or (
-                "en-US" in self.subtitle_policy.languages
-                and self.subtitle_policy.allow_generic_english
+                "pt-BR" in policy.languages
+                and has_embedded_brazilian_subtitle(validated.probe)
+            )
+            or (
+                "en-US" in policy.languages
+                and policy.allow_generic_english
                 and has_embedded_english_subtitle(validated.probe)
             )
         ):
@@ -403,8 +518,124 @@ class MovieFinalizer:
             raise ValidationError("subtitle target escapes library")
         import_hardlink(source, target)
 
-    def _ensure_subtitle(self, movie: dict[str, object], permit: Permit) -> None:
-        self._ensure_subtitle_for_video(self._movie_file(movie), permit, None)
+    def _ensure_subtitle(
+        self, movie: dict[str, object], permit: Permit,
+        *, subtitle_policy: SubtitlePolicy | None = None,
+    ) -> None:
+        self._ensure_subtitle_for_video(
+            self._movie_file(movie), permit, None,
+            subtitle_policy=subtitle_policy or self._subtitle_policy_for(movie),
+        )
+
+    async def _recover_imported_subtitle(
+        self, media_key: str, permit: Permit,
+        *, subtitle_policy: SubtitlePolicy | None = None, imported_video: Path | None = None,
+    ) -> bool:
+        policy = subtitle_policy or self.subtitle_policy
+        reservation_id = permit.reservation_id
+        videos = [self._source_path(permit, name) for name in permit.selected_files
+                  if PurePosixPath(name).suffix.lower() in _VIDEO]
+        if len(videos) != 1:
+            raise ValidationError("permit does not identify one video file")
+        validated = validate_media(videos[0], maximum_bytes=permit.budget_bytes)
+        subtitle_files = [self._source_path(permit, name) for name in permit.selected_files
+                          if PurePosixPath(name).suffix.lower() in _SUBTITLE]
+        brazilian_subtitles = [path for path in subtitle_files
+                               if is_brazilian_portuguese_subtitle(str(path))]
+        english_subtitles = [path for path in subtitle_files if is_english_subtitle(str(path))]
+        response = await self.client.get(
+            f"{self.gateway_url}/api/v2/torrents/info",
+            params={"hashes": permit.infohash}, headers=self.gateway_headers,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise ValidationError("gateway torrent response is invalid")
+        torrent = next((item for item in payload if isinstance(item, dict)
+                        and item.get("hash", "").lower() == permit.infohash), {})
+        content_path = torrent.get("content_path")
+        content = (self._content_path(permit, content_path)
+                   if isinstance(content_path, str) else videos[0].parent)
+        release_titles = list(
+            dict.fromkeys(
+                title
+                for title in (
+                    videos[0].stem,
+                    content.name if content.is_dir() else None,
+                    torrent.get("name"),
+                )
+                if isinstance(title, str) and title
+            )
+        )
+
+        async def fetch_subtitle(language: str, match_mode: str) -> bytes | None:
+            if self.subtitle_source is None:
+                return None
+            return await self.subtitle_source.fetch_movie(
+                tmdb_id=int(media_key.rsplit(":", 1)[-1]),
+                release_titles=release_titles,
+                language=language,
+                match_mode=match_mode,
+                movie_duration_seconds=validated.probe.duration_seconds,
+            )
+
+        original_ptbr = policy.waives_subtitles(validated.probe)
+        has_brazilian = (
+            bool(brazilian_subtitles)
+            or has_embedded_brazilian_subtitle(validated.probe)
+            or (imported_video is not None and self._installed_bazarr_subtitle(
+                imported_video, permit, policy, "pt-BR",
+            ) is not None)
+            or self.subtitle_store.get(
+                reservation_id,
+                None,
+                permit.infohash,
+                language="BR_PT",
+                source=MOVIE_FINALIZER_SOURCE,
+            )
+            is not None
+        )
+        has_english = (
+            bool(english_subtitles)
+            or (imported_video is not None and self._installed_bazarr_subtitle(
+                imported_video, permit, policy, "en-US",
+            ) is not None)
+            or self.subtitle_store.get(
+                reservation_id,
+                None,
+                permit.infohash,
+                language="EN",
+                source=MOVIE_FINALIZER_SOURCE,
+            )
+            is not None
+            or (
+                policy.allow_generic_english
+                and has_embedded_english_subtitle(validated.probe)
+            )
+        )
+        if not original_ptbr:
+            result = await recover_subtitle(
+                policy,
+                fetch_subtitle,
+                already_present=lambda language: (
+                    has_brazilian if language == "BR_PT" else has_english
+                ),
+            )
+            if result is None:
+                return False
+            if not self.permits.probe_reservation_active(permit):
+                return False
+            if result.content:
+                self.subtitle_store.put(
+                    reservation_id,
+                    None,
+                    permit.infohash,
+                    result.content,
+                    language=result.language,
+                    source=MOVIE_FINALIZER_SOURCE,
+                    replace_language=True,
+                )
+        return True
 
     async def finalize(self, media_key: str, reservation_id: str) -> str:
         reservation = self.repository.active_reservation(reservation_id)
@@ -413,23 +644,43 @@ class MovieFinalizer:
         permit = self.permits.get_for_reservation(reservation_id)
         if permit is None or permit.state != "confirmed":
             return "not_dispatched"
+        if not self.permits.probe_reservation_active(permit):
+            return "reservation_inactive"
         import_state = self.repository.import_state(reservation_id)
         if import_state == "complete":
             return "complete"
         if import_state is not None:
-            if import_state not in {"accepted", "accepted_copy"}:
+            if import_state not in {
+                "accepted", "accepted_copy", "subtitles_pending", "subtitles_pending_copy",
+            }:
                 return 'import_uncertain'
             movie = await self._radarr_movie(media_key)
             if movie is None or not movie.get("hasFile"):
                 return "import_pending"
+            imported_video = self._movie_file(movie)
             if not self._import_matches_source(
-                self._movie_file(movie),
+                imported_video,
                 permit,
-                copy_allowed=import_state == "accepted_copy",
+                copy_allowed=import_state in {"accepted_copy", "subtitles_pending_copy"},
             ):
                 return ('import_not_hardlinked' if self.storage_registry is not None
                         else 'import_uncertain')
-            self._ensure_subtitle(movie, permit)
+            if not self.permits.probe_reservation_active(permit):
+                return "reservation_inactive"
+            self.repository.verify_movie_import(reservation_id)
+            subtitle_policy = await self._resolve_subtitle_policy(movie)
+            if not await self._recover_imported_subtitle(
+                media_key, permit, subtitle_policy=subtitle_policy,
+                imported_video=imported_video,
+            ):
+                return ("waiting_subtitles" if self.permits.probe_reservation_active(permit)
+                        else "reservation_inactive")
+            if not self.permits.probe_reservation_active(permit):
+                return "reservation_inactive"
+            self._ensure_subtitle(movie, permit, subtitle_policy=subtitle_policy)
+            await self._notify_jellyfin(imported_video)
+            if not self.permits.probe_reservation_active(permit):
+                return "reservation_inactive"
             self.repository.complete_movie_import(reservation_id)
             return "complete"
 
@@ -488,87 +739,14 @@ class MovieFinalizer:
         subtitle_files = [path for path in selected if path.suffix.lower() in _SUBTITLE]
         if any(not self.subtitle_policy.matches(str(path)) for path in subtitle_files):
             raise ValidationError("selected subtitle is not Brazilian Portuguese or English")
-        brazilian_subtitles = [
-            path for path in subtitle_files if is_brazilian_portuguese_subtitle(str(path))
-        ]
-        english_subtitles = [path for path in subtitle_files if is_english_subtitle(str(path))]
         if len(videos) != 1:
             raise ValidationError("movie video or Brazilian Portuguese subtitle is missing")
         validated = validate_media(videos[0], maximum_bytes=permit.budget_bytes)
         if not validated.probe.audio_languages:
             raise ValidationError("movie has no audio stream")
+        audit_download_audio(self.repository, permit, validated.probe)
         if subtitle_files and any(not _subtitle_has_content(path) for path in subtitle_files):
             raise ValidationError("selected subtitle content is not valid")
-        release_titles = list(
-            dict.fromkeys(
-                title
-                for title in (
-                    videos[0].stem,
-                    content.name if content.is_dir() else None,
-                    torrent.get("name"),
-                )
-                if isinstance(title, str) and title
-            )
-        )
-
-        async def fetch_subtitle(language: str, match_mode: str) -> bytes | None:
-            if self.subtitle_source is None:
-                return None
-            return await self.subtitle_source.fetch_movie(
-                tmdb_id=int(media_key.rsplit(":", 1)[-1]),
-                release_titles=release_titles,
-                language=language,
-                match_mode=match_mode,
-                movie_duration_seconds=validated.probe.duration_seconds,
-            )
-
-        original_ptbr = self.subtitle_policy.waives_subtitles(validated.probe)
-        has_brazilian = (
-            bool(brazilian_subtitles)
-            or self.subtitle_store.get(
-                reservation_id,
-                None,
-                permit.infohash,
-                language="BR_PT",
-                source=MOVIE_FINALIZER_SOURCE,
-            )
-            is not None
-        )
-        has_english = (
-            bool(english_subtitles)
-            or self.subtitle_store.get(
-                reservation_id,
-                None,
-                permit.infohash,
-                language="EN",
-                source=MOVIE_FINALIZER_SOURCE,
-            )
-            is not None
-            or (
-                self.subtitle_policy.allow_generic_english
-                and has_embedded_english_subtitle(validated.probe)
-            )
-        )
-        if not original_ptbr:
-            result = await recover_subtitle(
-                self.subtitle_policy,
-                fetch_subtitle,
-                already_present=lambda language: (
-                    has_brazilian if language == "BR_PT" else has_english
-                ),
-            )
-            if result is None:
-                return "waiting_subtitles"
-            if result.content:
-                self.subtitle_store.put(
-                    reservation_id,
-                    None,
-                    permit.infohash,
-                    result.content,
-                    language=result.language,
-                    source=MOVIE_FINALIZER_SOURCE,
-                    replace_language=True,
-                )
         if not await self._hardlink_import_enabled():
             return "import_guard"
         directory = None
@@ -578,6 +756,8 @@ class MovieFinalizer:
         hardlink_ready = self._can_hardlink_video(videos[0], permit=permit, directory=directory)
         if not hardlink_ready and not await self._copy_fallback_fits(selected):
             return 'import_guard' if self.storage_registry is not None else 'waiting_space'
+        if not self.permits.probe_reservation_active(permit):
+            return "reservation_inactive"
         if not self.repository.claim_movie_import(reservation_id, copy_allowed=not hardlink_ready):
             return "import_pending"
         response = await self.client.post(

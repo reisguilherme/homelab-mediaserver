@@ -6,6 +6,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from series_metadata_fixtures import ongoing_transport
 
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.db import ReservationRepository
@@ -73,7 +74,7 @@ async def test_deleted_season_never_starts_worker_network_operations(tmp_path, k
             return httpx.Response(200, json=[])
         raise AssertionError(f"unexpected request {request.method} {request.url}")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=ongoing_transport(handler)) as client:
         worker = _worker(kind, repo, permits, jobs, client, tmp_path)
         assert await _run(worker, kind, 1, reservation) == "reservation_inactive"
     assert requests == []
@@ -128,7 +129,7 @@ async def test_deleted_earlier_season_does_not_block_subsequent_season(
             return httpx.Response(200, json=[])
         raise AssertionError(f"unexpected request {request.method} {request.url}")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=ongoing_transport(handler)) as client:
         worker = _worker(kind, repo, permits, jobs, client, tmp_path, download_window=1) if (
             kind == "acquirer"
         ) else _worker(kind, repo, permits, jobs, client, tmp_path)
@@ -178,7 +179,7 @@ async def test_season_deleted_during_catalog_lookup_stops_processing(tmp_path, k
             return httpx.Response(200, json=[])
         raise AssertionError(f"unexpected request {request.method} {request.url}")
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=ongoing_transport(handler)) as client:
         worker = _worker(kind, repo, permits, jobs, client, tmp_path)
         assert await _run(worker, kind, 1, reservation) == "reservation_inactive"
 
@@ -239,7 +240,7 @@ async def test_season_deleted_during_import_guard_cannot_be_imported(tmp_path, m
     async def capacity():
         return CapacityEvidence(free_bytes=100_000, remaining_by_hash={permit.infohash: 0})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+    async with httpx.AsyncClient(transport=ongoing_transport(handler)) as client:
         worker = _worker(
             "finalizer", repo, permits, jobs, client, tmp_path,
             media_root=media_root, capacity_provider=capacity,

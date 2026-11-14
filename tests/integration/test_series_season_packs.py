@@ -30,18 +30,19 @@ def _bencode(value):
     ) + b"e"
 
 
-def _torrent(entries):
+def _torrent(entries, *, root_name="Series.S02.1080p.WEB-GROUP"):
     total = sum(size for _, size in entries)
     piece_length = 16 * 1024 * 1024
     return _bencode({b"info": {
-        b"name": b"Series.S02.1080p.WEB-GROUP",
-        b"files": [{b"length": size, b"path": [name.encode()]} for name, size in entries],
+        b"name": root_name.encode(),
+        b"files": [{b"length": size, b"path": [part.encode() for part in name.split("/")]}
+                   for name, size in entries],
         b"piece length": piece_length,
         b"pieces": b"a" * (((total + piece_length - 1) // piece_length) * 20),
     }})
 
 
-def _manifest(entries, **overrides):
+def _manifest(entries, *, root_name="Series.S02.1080p.WEB-GROUP", **overrides):
     from homeserver_control.worker.season_packs import inspect_season_pack
 
     kwargs = {
@@ -51,10 +52,10 @@ def _manifest(entries, **overrides):
             "title": "Series S02 1080p WEB-GROUP", "size": 2_000_000_000,
             "quality": {"quality": {"source": "web", "resolution": 1080}},
         },
-        "release_policy": ReleasePolicy(resolutions=(1080,)),
+        "release_policy": ReleasePolicy(resolutions=(1080,), minimum_mib_per_min=((1080, 20),)),
         "allow_external_subtitle": True,
     }
-    return inspect_season_pack(_torrent(entries), **(kwargs | overrides))
+    return inspect_season_pack(_torrent(entries, root_name=root_name), **(kwargs | overrides))
 
 
 def test_complete_pack_maps_each_episode_but_claims_every_torrent_byte():
@@ -76,6 +77,61 @@ def test_complete_pack_maps_each_episode_but_claims_every_torrent_byte():
     assert manifest.budget_bytes == 1_850_000_260
     assert manifest.selected_files == tuple(prefix + name for name, _ in entries)
     assert manifest.infohash == inspect_torrent(_torrent(entries)).infohash
+
+
+@pytest.mark.parametrize("directory", ["Featurettes", "Extras", "fEaTuReTtEs", "Disc 1/eXtRaS"])
+def test_pack_excludes_explicit_bonus_directories_from_bindings_but_claims_all_bytes(directory):
+    root_name = "Series.S02 + Extras.1080p.BluRay-GROUP"
+    entries = [
+        ("Series.S02E01.1080p.mkv", 900_000_000),
+        ("Series.S02E02.1080p.mkv", 950_000_000),
+        (f"{directory}/Behind the Scenes.720p.mkv", 1000),
+        (f"{directory}/Series.S02E01.1080p.mkv", 2000),
+        (f"{directory}/Series.S02E01.pt-BR.srt", 200),
+    ]
+    manifest = _manifest(entries, root_name=root_name)
+    assert manifest is not None
+    assert manifest.episode_files == {
+        "S02E01": (root_name + "/Series.S02E01.1080p.mkv",),
+        "S02E02": (root_name + "/Series.S02E02.1080p.mkv",),
+    }
+    assert manifest.budget_bytes == 1_850_003_200
+    assert manifest.selected_files == tuple(root_name + "/" + name for name, _ in entries)
+
+
+@pytest.mark.parametrize("bonus_path", [
+    "Behind the Scenes.mkv", "Featurettes.mkv", "FeaturettesBackup/interview.mkv",
+    "My Extras/interview.mkv", "Extra/interview.mkv",
+])
+def test_pack_rejects_ambiguous_video_outside_exact_bonus_directories(bonus_path):
+    assert _manifest([
+        ("Series.S02E01.1080p.mkv", 900_000_000),
+        ("Series.S02E02.1080p.mkv", 950_000_000),
+        (bonus_path, 1000),
+    ], root_name="Series.S02 + Extras.1080p.BluRay-GROUP") is None
+
+
+@pytest.mark.parametrize("bad_episodes", [
+    [("Series.S02E01.1080p.mkv", 900_000_000)],
+    [("Series.S02E01.1080p.mkv", 900_000_000), ("Series.S02E03.1080p.mkv", 950_000_000)],
+    [("Series.S02E01.1080p.mkv", 900_000_000), ("Series.S02E02.1080p.mkv", 950_000_000),
+     ("Series.S02E02.Directors.Cut.1080p.mkv", 900_000_000)],
+    [("Series.S02E01.1080p.mkv", 900_000_000), ("Series.S02E02.720p.mkv", 950_000_000)],
+])
+def test_bonus_directory_does_not_relax_episode_completeness_or_quality(bad_episodes):
+    assert _manifest([
+        *bad_episodes,
+        ("Extras/Series.S02E02.1080p.mkv", 950_000_000),
+    ]) is None
+
+
+def test_bonus_subtitle_does_not_satisfy_required_episode_subtitles():
+    assert _manifest([
+        ("Series.S02E01.1080p.mkv", 900_000_000),
+        ("Series.S02E02.1080p.mkv", 950_000_000),
+        ("Featurettes/Series.S02E01.pt-BR.srt", 100),
+        ("Extras/Series.S02E02.pt-BR.srt", 100),
+    ], allow_external_subtitle=False) is None
 
 
 @pytest.mark.parametrize("entries", [
@@ -103,6 +159,31 @@ def test_pack_checks_each_episode_runtime_and_subtitle_availability():
     entries = [("Series.S02E01.mkv", 900_000_000), ("Series.S02E02.mkv", 900_000_000)]
     assert _manifest(entries, episode_runtimes={1: 40, 2: 55}) is None
     assert _manifest(entries, allow_external_subtitle=False) is None
+
+
+@pytest.mark.parametrize("names", [
+    ["Series.SE02.EP01.mkv", "Series.SE02.EP02.mkv"],
+    ["Series.EP01.mkv", "Series.EP02.mkv"],
+    ["[Group] Series - 013 [1080p].mkv", "[Group] Series - 014 [1080p].mkv"],
+])
+def test_pack_resolves_ep_se_and_unique_canonical_anime_numbers(names):
+    catalog = [
+        {"seasonNumber": 1, "episodeNumber": 1, "absoluteEpisodeNumber": 1},
+        {"seasonNumber": 2, "episodeNumber": 1, "absoluteEpisodeNumber": 13},
+        {"seasonNumber": 2, "episodeNumber": 2, "absoluteEpisodeNumber": 14},
+    ]
+    assert _manifest([(name, 900_000_000) for name in names],
+                     episode_catalog=catalog, animation=True) is not None
+    assert _manifest([(name, 900_000_000) for name in names],
+                     episode_catalog=catalog + [catalog[-1]], animation=True) is None
+
+
+def test_pack_never_guesses_ep_only_season_or_absolute_metadata():
+    assert _manifest([("Series.EP01.mkv", 900_000_000), ("Series.EP02.mkv", 900_000_000)],
+                     release={"title": "Series Complete", "quality": {
+                         "quality": {"source": "web", "resolution": 1080}}}) is None
+    assert _manifest([("Series - 013.mkv", 900_000_000),
+                      ("Series - 014.mkv", 900_000_000)], animation=True) is None
 
 
 def _registry(tmp_path, *, selected_files=None):
@@ -426,7 +507,15 @@ async def test_pack_imports_exact_episode_file_then_waits_for_native_confirmatio
         if request.url.path == "/api/v3/config/mediamanagement":
             return httpx.Response(200, json={"copyUsingHardlinks": True})
         if request.url.path == "/api/v3/command" and request.method == "POST":
-            commands.append(json.loads(request.content))
+            command = json.loads(request.content)
+            commands.append(command)
+            # A gateway-added pack can be tracked without Sonarr's RemoteEpisode.
+            # Supplying its hash selects that broken native import context.
+            if command.get("downloadClientId"):
+                return httpx.Response(500, json={"message": "Tracked pack has no RemoteEpisode"})
+            assert command["path"] == (
+                f"/data/torrents/pack/Series.S02E{len(commands):02d}.mkv"
+            )
             return httpx.Response(201, json={"id": len(commands), "status": "queued"})
         raise AssertionError(f"Unexpected {request.method} {request.url}")
 
@@ -441,7 +530,7 @@ async def test_pack_imports_exact_episode_file_then_waits_for_native_confirmatio
         )
         assert commands == [{
             "name": "DownloadedEpisodesScan", "path": "/data/torrents/pack/Series.S02E01.mkv",
-            "downloadClientId": parent.infohash.upper(), "importMode": "Copy",
+            "importMode": "Copy",
         }]
         assert await finalizer.finalize("season:tmdb:97546:2", parent.reservation_id) == (
             "import_pending"
@@ -452,7 +541,10 @@ async def test_pack_imports_exact_episode_file_then_waits_for_native_confirmatio
         assert await finalizer.finalize("season:tmdb:97546:2", parent.reservation_id) == (
             "import_requested"
         )
-        assert commands[1]["path"] == "/data/torrents/pack/Series.S02E02.mkv"
+        assert commands[1] == {
+            "name": "DownloadedEpisodesScan", "path": "/data/torrents/pack/Series.S02E02.mkv",
+            "importMode": "Copy",
+        }
     assert (root / paths[0]).stat().st_ino == (library / "Series.S02E01.mkv").stat().st_ino
     assert (root / paths[2]).is_file()
 

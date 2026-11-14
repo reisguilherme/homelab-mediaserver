@@ -32,8 +32,8 @@ async def native_tags(client):
     return rows
 
 
-async def bind_byparr_tag(client, endpoint, desired, tag_id):
-    """Add only the managed linkage; leave existing and explicitly supplied tags intact."""
+async def bind_byparr_tag(client, endpoint, desired, tag_id, *, bind=True):
+    """Manage the proxy linkage while preserving all other native tags."""
     response = await client.get(endpoint)
     if response.status_code in (404, 405, 501):
         return None
@@ -62,7 +62,12 @@ async def bind_byparr_tag(client, endpoint, desired, tag_id):
         for tags in tag_lists
     ):
         return None
-    desired["tags"] = sorted({tag_id, *(value for tags in tag_lists for value in tags)})
+    tags = {value for values in tag_lists for value in values}
+    if bind:
+        tags.add(tag_id)
+    else:
+        tags.discard(tag_id)
+    desired["tags"] = sorted(tags)
     return desired
 
 
@@ -112,6 +117,10 @@ async def reconcile_prowlarr(settings, client, mode):
         for field in app["fields"]:
             if field["name"] in values:
                 field["value"] = values[field["name"]]
+            elif field["name"] == "syncCategories":
+                categories = field.get("value", [])
+                if isinstance(categories, list) and all(type(x) is int for x in categories):
+                    field["value"] = sorted(set(categories) | {5070, 8000})
         changes += await collection(
             "prowlarr", client, "/api/v1/applications", app, "name", mode, settings=settings
         )
@@ -262,7 +271,10 @@ async def reconcile_prowlarr(settings, client, mode):
             return ServiceOutcome("prowlarr", "drift", changes, "Managed app profile missing")
         item.update(enable=True, appProfileId=matches[0]["id"])
         if byparr_tag_id is not None:
-            item = await bind_byparr_tag(client, "/api/v1/indexer", item, byparr_tag_id)
+            item = await bind_byparr_tag(
+                client, "/api/v1/indexer", item, byparr_tag_id,
+                bind=item.get("definitionName") != "amigosshare",
+            )
             if item is None:
                 return ServiceOutcome(
                     "prowlarr", "unsupported", changes, "Native indexer tag schema unsupported"

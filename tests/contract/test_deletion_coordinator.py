@@ -562,7 +562,8 @@ async def test_movie_cascade_removes_captured_source_and_completes(tmp_path: Pat
             return httpx.Response(204)
         if request.url.host == "jellyfin":
             assert not video.exists()
-            assert request.headers["X-Emby-Token"] == "jellyfin-key"
+            assert 'Token="jellyfin-key"' in request.headers["Authorization"]
+            assert "X-Emby-Token" not in request.headers
             assert request.method == "GET" and request.url.path == "/Items"
             return httpx.Response(200, json={"Items": []})
         raise AssertionError(request)

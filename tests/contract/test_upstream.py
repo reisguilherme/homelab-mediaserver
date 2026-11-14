@@ -39,7 +39,10 @@ async def test_seerr_tv_request_maps_each_approved_season_with_tmdb_identity() -
         assert request.url.path == "/api/v1/request"
         return httpx.Response(200, json={"results": [{
             "id": 3, "status": 2,
-            "media": {"tmdbId": 97546, "tvdbId": 383203, "mediaType": "tv"},
+            "media": {
+                "tmdbId": 97546, "tvdbId": 383203, "externalServiceId": 124,
+                "mediaType": "tv",
+            },
             "seasons": [{"seasonNumber": 3, "status": 2},
                         {"seasonNumber": 4, "status": 2}],
         }]})
@@ -49,9 +52,96 @@ async def test_seerr_tv_request_maps_each_approved_season_with_tmdb_identity() -
             base_url="http://seerr", api_key="secret", client=client
         ).list_approved(page=1)
     assert page == [
-        {"source_id": "3:3", "media_key": "season:tmdb:97546:3", "kind": "season"},
-        {"source_id": "3:4", "media_key": "season:tmdb:97546:4", "kind": "season"},
+        {"source_id": "3:3", "media_key": "season:tmdb:97546:3", "kind": "season",
+         "tvdb_id": 383203, "external_service_id": 124},
+        {"source_id": "3:4", "media_key": "season:tmdb:97546:4", "kind": "season",
+         "tvdb_id": 383203, "external_service_id": 124},
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["tmdbId", "tvdbId", "externalServiceId"])
+@pytest.mark.parametrize("invalid", [True, False, 0, -1, "6", 6.0])
+async def test_seerr_tv_rejects_malformed_positive_identity(field, invalid):
+    media = {"tmdbId": 97546, "tvdbId": 383203, "externalServiceId": 6, "mediaType": "tv"}
+    media[field] = invalid
+
+    def handler(request):
+        return httpx.Response(200, json={"results": [{
+            "id": 3, "status": 2, "media": media,
+            "seasons": [{"seasonNumber": 1, "status": 2}],
+        }]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = SeerrAdapter(base_url="http://seerr", api_key="fixture", client=client)
+        with pytest.raises(ContractError):
+            await adapter.list_approved(1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_id", [7, "7", "007"])
+@pytest.mark.parametrize("media_type", ["movie", "tv"])
+async def test_seerr_approved_request_accepts_positive_ascii_decimal_identity(
+    request_id, media_type,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET" and request.url.path == "/api/v1/request"
+        return httpx.Response(200, json={"results": [{
+            "id": request_id, "status": 2,
+            "media": {"tmdbId": 123, "mediaType": media_type},
+            "seasons": [{"seasonNumber": 3, "status": 2}],
+        }]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        page = await SeerrAdapter(
+            base_url="http://seerr", api_key="fixture", client=client,
+        ).list_approved(1)
+    if media_type == "movie":
+        assert page == [{"source_id": str(request_id), "media_key": "movie:tmdb:123",
+                         "kind": "movie"}]
+    else:
+        assert page == [{"source_id": f"{request_id}:3", "media_key": "season:tmdb:123:3",
+                         "kind": "season"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("request_id", [
+    pytest.param(True, id="true"),
+    pytest.param(False, id="false"),
+    pytest.param(0, id="zero"),
+    pytest.param(-7, id="negative"),
+    pytest.param(7.0, id="float"),
+    pytest.param(None, id="null"),
+    pytest.param("", id="empty"),
+    pytest.param("0", id="zero-string"),
+    pytest.param("000", id="zero-padded"),
+    pytest.param("-7", id="negative-string"),
+    pytest.param("+7", id="signed"),
+    pytest.param(" 7", id="leading-space"),
+    pytest.param("7 ", id="trailing-space"),
+    pytest.param("7:3", id="season-suffix"),
+    pytest.param("7\n", id="newline"),
+    pytest.param("\u0667", id="arabic-decimal"),
+    pytest.param("\uff17", id="full-width-decimal"),
+    pytest.param("https://fixture.invalid/?token=upstream-body-private", id="private-url"),
+    pytest.param("upstream-body-private", id="private-token"),
+])
+async def test_seerr_approved_request_rejects_invalid_identity_without_response_details(
+    request_id,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET" and request.url.path == "/api/v1/request"
+        return httpx.Response(200, json={"results": [{
+            "id": request_id, "status": 2,
+            "media": {"tmdbId": 123, "mediaType": "movie"},
+            "upstream_detail": "upstream-body-private",
+        }]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = SeerrAdapter(base_url="http://seerr", api_key="fixture", client=client)
+        with pytest.raises(ContractError) as failure:
+            await adapter.list_approved(1)
+    assert "upstream-body-private" not in str(failure.value)
 
 
 @pytest.mark.asyncio

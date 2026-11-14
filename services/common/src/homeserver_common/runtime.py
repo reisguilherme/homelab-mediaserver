@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from .env import load_settings
+from .service_environment import ENV_FILE_ROLES, environment_for_service
 from .settings import FIELDS
 
 
@@ -13,20 +14,25 @@ def apply_runtime_configuration(
     path: Path | str, mode: str, environment: Mapping[str, str]
 ) -> dict[str, str]:
     """Apply preferences while retaining the container's fixed paths and service wiring."""
+    # The default retains the private worker CLI contract. Compose sets a role for
+    # every runtime process; public roles cannot cause this loader to open .env.
+    role = environment.get('HOMESERVER_SERVICE_ROLE', 'control-worker')
+    result = environment_for_service(role, environment)
+    if role not in ENV_FILE_ROLES:
+        return result
     settings = load_settings(Path(path), mode=mode)
     configured = settings.as_environment()
-    result = dict(environment)
     for name, field in FIELDS.items():
         if field.editable:
             key = "HOMESERVER_" + name.upper()
             result[key] = configured[key]
     result["HOMESERVER_WORKER_INTERVAL"] = configured["HOMESERVER_WORKER_INTERVAL"]
-    return result
+    return environment_for_service(role, result)
 
 
 def _configured_command(arguments: list[str], environment: Mapping[str, str]) -> list[str]:
     command = list(arguments)
-    level = environment["HOMESERVER_LOG_LEVEL"].lower()
+    level = environment.get("HOMESERVER_LOG_LEVEL", "INFO").lower()
     for index, argument in enumerate(command):
         if argument == "--log-level":
             if index + 1 == len(command):

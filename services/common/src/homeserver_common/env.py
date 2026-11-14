@@ -28,6 +28,13 @@ INTERNAL = {
     "WORKER_ONCE",
     "COLLECTOR_TOKEN",
 }
+# These inputs belong only to the optional Compose stack. They are deliberately
+# absent from FIELDS, Settings, the editable catalog, and application environments.
+COMPOSE_ONLY = frozenset({
+    "HOMESERVER_GRAFANA_ADMIN_USER",
+    "HOMESERVER_GRAFANA_ADMIN_PASSWORD",
+    "HOMESERVER_OBSERVABILITY_DIR",
+})
 
 
 def parse_env(text):
@@ -136,7 +143,7 @@ def load_settings(path: Path, *, mode="dev") -> Settings:
                 raise ValueError(f"{new}: conflicting legacy alias {old}")
             raw[new] = raw.pop(old)
     for key in raw:
-        if not key.startswith("HOMESERVER_"):
+        if not key.startswith("HOMESERVER_") or key in COMPOSE_ONLY:
             continue
         name = key[11:].lower()
         if name.upper() in INTERNAL:

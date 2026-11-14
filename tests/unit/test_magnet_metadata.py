@@ -144,6 +144,29 @@ async def test_oversized_stdout_is_rejected_and_child_reaped(monkeypatch):
     assert processes[0].returncode is not None
 
 
+@pytest.mark.asyncio
+async def test_oversized_paused_stdout_is_drained_before_reaping(monkeypatch):
+    monkeypatch.setattr(resolver, "_MAX_METADATA_BYTES", 100)
+    child_script(monkeypatch,
+                 "import sys, time; sys.stdout.buffer.write(b'x'*1000000); "
+                 "sys.stdout.flush(); time.sleep(60)")
+    spawn = asyncio.create_subprocess_exec
+    processes = []
+
+    async def paused_before_reading(*args, **kwargs):
+        process = await spawn(*args, **kwargs)
+        processes.append(process)
+        # Make pipe backpressure deterministic before the bounded reader starts.
+        async with asyncio.timeout(2):
+            while not process.stdout._paused:
+                await asyncio.sleep(0.001)
+        return process
+
+    monkeypatch.setattr(resolver.asyncio, "create_subprocess_exec", paused_before_reading)
+    assert await asyncio.wait_for(resolver.resolve_magnet_metadata(MAGNET), 3) is None
+    assert processes[0].returncode is not None
+
+
 def record_processes(monkeypatch):
     processes = []
     spawn = asyncio.create_subprocess_exec

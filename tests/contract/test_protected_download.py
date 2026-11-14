@@ -87,7 +87,7 @@ def _fixture(tmp_path, *, protect=True):
     )
     _confirm(registry, source)
     registry.set_quality(source.token, (1, 1080))
-    health = SourceHealthStore(database)
+    health = SourceHealthStore(database, automatic_replacement_enabled=True)
     if protect:
         health.protect_source(source.infohash)
     return registry, source, health, TorrentServer(source)
@@ -137,6 +137,15 @@ def test_protected_episode_cannot_be_started_or_stopped(tmp_path, endpoint, acti
 def test_unprotected_episode_can_still_start(tmp_path, endpoint):
     registry, source, health, upstream = _fixture(tmp_path, protect=False)
     with _client(registry, upstream, health.is_protected) as client:
+        if endpoint == "series-queue-state":
+            # Queue policy resumes its own pauses; an operator pause stays stopped.
+            upstream.entries[source.infohash]["state"] = "downloading"
+            stopped = client.post(
+                "/internal/series-queue-state",
+                headers=HEADERS,
+                json={"permit_token": source.token, "action": "stop"},
+            )
+            assert stopped.status_code == 200
         response = client.post(
             "/internal/" + endpoint,
             headers=HEADERS,

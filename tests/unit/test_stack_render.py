@@ -30,6 +30,10 @@ def test_cpu_stack_preserves_shared_data_and_persistent_appdata(tmp_path: Path) 
     assert services["sonarr"]["environment"]["PUID"] == "1234"
     assert services["sonarr"]["environment"]["PGID"] == "2345"
     assert any(
+        volume["target"] == "/data/media" and volume["read_only"] is False
+        for volume in services["jellyfin"]["volumes"]
+    )
+    assert any(
         volume["target"] == "/data"
         and volume["source"] == str(Path(settings.media_root))
         and volume["read_only"] is True
@@ -60,6 +64,20 @@ def test_qbit_publishes_peers_and_never_native_api(tmp_path: Path) -> None:
     assert set(services["download-gateway"]["networks"]) == {"apps", "transfer"}
     assert not services["download-gateway"].get("ports")
     assert "egress" in services["prowlarr"]["networks"]
+
+
+def test_service_paths_proxy_never_gets_data_mounts_or_transfer_network(tmp_path):
+    services = render_stack(settings_at(tmp_path))["services"]
+    router = services["service-proxy"]
+    assert router["networks"] == ["edge_control"]
+    assert router["ports"] == [{
+        "host_ip": "127.0.0.1", "published": "80", "target": 80, "protocol": "tcp",
+    }]
+    assert len(router["volumes"]) == 1
+    assert router["volumes"][0]["target"] == "/etc/caddy/Caddyfile"
+    assert router["volumes"][0]["read_only"] is True
+    assert "qbit-monitor" in router["depends_on"]
+    assert "jellyfin-proxy" in router["depends_on"]
 
 
 def test_generated_stack_treats_dollars_as_literal_and_is_private(tmp_path: Path) -> None:
@@ -95,6 +113,7 @@ def test_http_processes_use_the_selected_log_level(tmp_path: Path) -> None:
     for name in ("control-api", "download-gateway", "telemetry"):
         command = services[name]["command"]
         assert command[command.index("--log-level") + 1] == "warning"
+    assert '--no-proxy-headers' in services['control-api']['command']
 
 
 def test_telemetry_uses_the_configured_capacity_identity_and_age(tmp_path: Path) -> None:

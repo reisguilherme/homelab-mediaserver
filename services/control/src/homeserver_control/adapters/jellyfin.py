@@ -4,6 +4,8 @@ from typing import Any
 
 import httpx
 
+from homeserver_common.jellyfin_auth import jellyfin_headers
+
 from .http import ContractError, endpoint, request_json
 
 
@@ -18,7 +20,7 @@ class JellyfinAdapter:
         if not api_key:
             raise ValueError("Jellyfin API key is required")
         self.base_url = base_url.rstrip("/")
-        self.headers = {"X-Emby-Token": api_key, "Accept": "application/json"}
+        self.headers = jellyfin_headers(api_key) | {"Accept": "application/json"}
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(10.0))
 
     async def sessions(self) -> list[dict[str, Any]]:

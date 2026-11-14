@@ -15,7 +15,7 @@ CYD, MQTT exclusivo, CI/CD, releases próprias e backup do serviço foram retira
 flowchart LR
   S[Pedido no Seerr] --> W[Worker]
   W --> G[Gateway e capacidade] --> Q[qBittorrent]
-  Q --> I[Validação, legenda e importação] --> J[Jellyfin]
+  Q --> I[Validação e importação] --> J[Jellyfin]
   E[.env] --> W
   E --> O[Configuração dos serviços]
   M[Métricas do host] --> P[Painel web]
@@ -45,41 +45,77 @@ inteiro, com preferência pelo SSD; o painel mostra cada pool separadamente.
 
 ## Acessar
 
-Use `http://IP_DO_SERVIDOR:PORTA` na rede doméstica ou o IP Tailscale do servidor.
-Os cards do painel em `8081` abrem os aplicativos.
+Abra `http://IP_DO_SERVIDOR/` na rede doméstica ou use o IP Tailscale/MagicDNS,
+por exemplo `http://NOME_MAGICDNS/jellyfin/`. A raiz abre o painel; os cards
+usam o mesmo nome ou IP do navegador. O proxy `service-proxy` recebe esses
+caminhos na porta HTTP 80, sem encaminhamento de portas no roteador.
 
-| Serviço | Porta | Função |
-|---|---|---|
-| Painel HomeServer | 8081 | CPU, memória, rede, armazenamento e serviços |
-| Jellyfin | 8096 | Biblioteca e reprodução |
-| Seerr | 5055 | Catálogo e pedidos |
-| Sonarr | 8989 | Séries, fontes e importações |
-| Radarr | 7878 | Filmes, fontes e importações |
-| Prowlarr | 9696 | Indexadores |
-| Bazarr | 6767 | Provedores de legendas |
-| Controle HomeServer | 8080 | API autenticada de controle |
-| Monitor qBittorrent | 18080 | Progresso, velocidade e peers; somente leitura |
+| Serviço | Caminho | Porta anterior | Função |
+|---|---|---|---|
+| Painel HomeServer | `/status/` ou `/` | 8081 | CPU, memória, rede, armazenamento e serviços |
+| Jellyfin | `/jellyfin/` | 8096 | Biblioteca e reprodução |
+| Seerr | `/seer` | 5055 | Catálogo e pedidos |
+| Sonarr | `/sonarr/` | 8989 | Séries, fontes e importações |
+| Radarr | `/radarr/` | 7878 | Filmes, fontes e importações |
+| Prowlarr | `/prowlarr/` | 9696 | Indexadores |
+| Bazarr | `/bazarr/` | 6767 | Provedores de legendas |
+| qBittorrent | `/qbittorrent/` | 18080, loopback/TS | Fila, arquivos, peers e preferências |
 
-O monitor qBit fica em loopback. Publique-o dentro da tailnet com
-[encaminhamento TCP Tailscale Serve](docs/installation.md#acesso-pelo-tailscale)
-e abra `http://IP_TAILSCALE:18080`. A API nativa qBit
-é interna ao Compose.
+Seerr não oferece suporte nativo a subpastas: `/seer` e `/seerr` são atalhos
+que redirecionam para `http://MESMO_HOST:5055/`. Os demais painéis permanecem
+em seus caminhos. As portas anteriores continuam disponíveis; Arr e Bazarr
+também usam o prefixo, por exemplo `:7878/radarr/`. Clientes Jellyfin antigos
+em `:8096` continuam passando pelo proxy de exclusão coordenada.
+
+O caminho `/qbittorrent/` passa pelo proxy administrativo `qbit-monitor`, com
+login e proteção de origem nativos. Sua porta nativa permanece interna ao
+Compose. A porta anterior `18080` continua em loopback e pode usar o
+[encaminhamento Tailscale Serve](docs/installation.md#acesso-pelo-tailscale).
+Downloads automatizados continuam sujeitos ao gateway e à capacidade real.
+A API de controle permanece separada em `8080`, com autenticação; o proxy de
+nomes não publica suas rotas.
 
 ## Preferências
 
-O `.env` permite ajustar downloads simultâneos, banda, conexões,
-resoluções, fontes, Dolby Vision/Atmos, idiomas, legendas, indexadores e busca
-de alternativas. O padrão permite 10 downloads e seeding sem limite de arquivos,
-com upload limitado a 20 Mbit/s. A seleção usa UIndex primeiro e 1337x como
-alternativa para fontes ausentes ou com poucos seeds. Filmes preferem 4K,
-com fallback em 1080p; séries usam 1080p com piso de tamanho por duração.
-Temporadas completas e a mesma família de releases são preferidas quando elegíveis.
+Filmes e séries oferecem os mesmos três perfis no Seerr, Radarr e Sonarr:
+
+| Perfil | Ordem de preferência |
+|---|---|
+| `Max Quality` | UHD Remux → UHD Blu-ray → UHD WEB-DL/BDRip/BRRip → FHD Remux → FHD Blu-ray → FHD WEB-DL/BDRip/BRRip; original → dual PT-BR + original |
+| `Standard` (padrão) | FHD Blu-ray → FHD WEB-DL/BDRip/BRRip; original → dual PT-BR + original |
+| `Dublado` | Mesmas qualidades de Standard; dual PT-BR + original → original |
+
+UHD significa 2160p e FHD, 1080p. Escolha o perfil nas opções do pedido do
+Seerr ou no cadastro do filme/série no Arr. Cada série tem um único perfil,
+compartilhado por todas as temporadas. Animações também respeitam essa escolha.
+`HOMESERVER_DOWNLOAD_DEFAULT_PROFILE` define o padrão para novos pedidos;
+`HOMESERVER_DUBBED_AUDIO_PREFERENCES="dual,original"` mantém o Dublado alinhado
+com essa regra. No Dublado, áudio precede qualidade visual e seeds. Os outros
+perfis comparam qualidade, áudio e seeds, nessa ordem. WEB-DL, BDRip e BRRip
+empatam no mesmo nível visual. Dublagem sem o áudio original fica excluída;
+filmes originalmente brasileiros continuam elegíveis como original.
+Candidatas precisam declarar pelo menos
+`HOMESERVER_RELEASE_MIN_SEEDERS=5` seeds; zero, desconhecido ou abaixo do mínimo
+são recusados. UIndex, 1337x e ASC (quando configurado) são comparados antes
+da escolha; no Dublado, ASC recebe prioridade entre fontes da mesma categoria.
+
+O `.env` também ajusta downloads simultâneos, banda, conexões, Dolby Vision/Atmos,
+idiomas, legendas, indexadores e busca de alternativas. O padrão permite 10
+downloads e seeding sem limite de arquivos, com upload limitado a 20 Mbit/s.
+Todos os perfis mantêm o piso de tamanho por duração e a verificação de capacidade.
+Alterar um perfil orienta buscas futuras, sem iniciar upgrades ou trocas
+automáticas dos downloads e arquivos existentes.
+Nos três perfis, um pack elegível mantém preferência quando empata com os avulsos
+na categoria de qualidade e na prioridade de áudio. Um avulso viável dentro da
+janela pode superar um pack inferior conforme a ordem do perfil: qualidade antes
+de áudio em Max Quality e Standard; áudio antes de qualidade no Dublado.
 A quantidade de seeds precede a afinidade de família. A busca da temporada também
-alimenta a seleção de episódios, e um pack com disponibilidade verificada pode
-recuperar episódios parados sem peers, preservando fontes concluídas ou em progresso.
+alimenta a seleção de episódios. Um pack com disponibilidade verificada pode
+ser escolhido em uma troca manual, preservando fontes concluídas ou em progresso.
 Episódios podem baixar em paralelo, com janela configurável; a importação
 no Jellyfin mantém a sequência de temporada e episódio. Capacidade usa bytes reais
-pendentes, sem reserva fixa por filme nem teto de tamanho.
+pendentes e margem configurável por disco, sem reserva fixa por filme nem teto
+de tamanho. O default `HOMESERVER_STORAGE_MIN_FREE_GIB=10` mantém 10 GiB em cada disco.
 
 Se o cache de um magnet falhar, o worker tenta recuperar somente os metadados
 dos peers, com prazo limitado e validação do hash. A mídia continua dependendo
@@ -87,14 +123,35 @@ do gateway e da capacidade real. Consulte o [diagnóstico de fontes](docs/runboo
 
 Legendas priorizam pt-BR da mesma release, pt-BR de edição compatível, inglês
 da mesma release e inglês de edição compatível. Áudio original brasileiro
-comprovado pode dispensar legenda. Veja [as regras e unidades](docs/configuration.md).
+comprovado pode dispensar legenda nas demais mídias. Dublado e animações sempre
+seguem a busca de legendas, inclusive com áudio dual, dublado ou original brasileiro.
+Veja [as regras e unidades](docs/configuration.md).
+
+Cada filme concluído e validado pode ser importado e aparecer no Jellyfin enquanto
+o worker continua buscando sua legenda, sem esperar os demais filmes do lote.
+A prioridade dos idiomas permanece a mesma. A conexão nativa `HomeServer Jellyfin`
+no Radarr atualiza a biblioteca após importações, upgrades e renomeações; mantenha-a
+configurada pelo operator, inclusive com mergerfs, onde o monitor de arquivos
+pode não observar gravações nos discos físicos.
 
 No Jellyfin Web, o menu `…` permite excluir um episódio ou uma temporada
 inteira com a conta administradora autorizada. O controlador coordena a limpeza
 no Sonarr, qBit e Seerr, preservando outras temporadas. Marcar como assistido
 não remove arquivos. Veja [como excluir e acompanhar](docs/operator-guide.md#remover-mídia-assistida).
 
+O administrador também pode editar metadados, imagens, legendas e coleções.
+`HOMESERVER_JELLYFIN_AUTO_COLLECTIONS="true"` ativa coleções automáticas na
+biblioteca de filmes gerenciada. O Jellyfin agrupa franquias identificadas pelo
+TMDb com pelo menos dois filmes locais durante a varredura da biblioteca.
+Coleções vinculam os filmes sem duplicar seus arquivos; excluir uma coleção
+ou remover um vínculo preserva as mídias.
+
 ## Desenvolver
+
+O [desenho de evolução do homelab](docs/architecture/homelab-2026/README.md)
+separa a arquitetura proposta da implantação atual. A
+[observabilidade opcional](docs/observability.md) prepara Grafana/Prometheus
+em projeto independente, com métricas sanitizadas e ativação explícita.
 
 Use Linux/WSL2, Python 3.12 e `uv sync --frozen`.
 

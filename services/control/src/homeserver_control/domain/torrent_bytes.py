@@ -1,4 +1,4 @@
-"""Inspect v1 BitTorrent metadata without fetching any payload."""
+"""Inspect v1 and compatible hybrid BitTorrent metadata without payloads."""
 
 from __future__ import annotations
 
@@ -20,10 +20,21 @@ class InspectedTorrent:
     infohash: str
     metadata_sha256: str
     files: tuple[ManifestFile, ...]
+    hybrid: bool = False
+    v2_piece_layers_verified: bool | None = None
+    padding_files: tuple[ManifestFile, ...] = ()
 
     @property
     def total_bytes(self) -> int:
-        return sum(item.length for item in self.files)
+        return sum(item.length for item in (*self.files, *self.padding_files))
+
+    @property
+    def padding_bytes(self) -> int:
+        return sum(item.length for item in self.padding_files)
+
+    @property
+    def content_bytes(self) -> int:
+        return self.total_bytes - self.padding_bytes
 
 
 class _Decoder:
@@ -124,45 +135,136 @@ def inspect_torrent(data: bytes) -> InspectedTorrent:
     if decoder.offset != len(data) or info_start is None or info_end is None:
         raise TorrentBytesError("invalid torrent root")
     info = root[b"info"]
-    if not isinstance(info, dict) or b"meta version" in info or b"file tree" in info:
-        raise TorrentBytesError("only v1 torrent metadata is supported")
+    if not isinstance(info, dict):
+        raise TorrentBytesError("invalid info dictionary")
+    hybrid = b"meta version" in info or b"file tree" in info
+    if hybrid and (
+        info.get(b"meta version") != 2
+        or not isinstance(info.get(b"file tree"), dict)
+        or not isinstance(info.get(b"files"), list)
+        or not isinstance(info.get(b"pieces"), bytes)
+    ):
+        raise TorrentBytesError("only v1 and compatible hybrid metadata is supported")
     name = _safe_component(info.get(b"name"))
     piece_length = info.get(b"piece length")
     pieces = info.get(b"pieces")
     if not isinstance(piece_length, int) or piece_length <= 0 or not isinstance(pieces, bytes):
         raise TorrentBytesError("missing v1 pieces")
+    if hybrid and (piece_length < 16384 or piece_length & (piece_length - 1)):
+        raise TorrentBytesError("invalid hybrid piece length")
     files: list[ManifestFile] = []
     if b"files" in info:
         raw_files = info[b"files"]
         if not isinstance(raw_files, list) or not 1 <= len(raw_files) <= 4096:
             raise TorrentBytesError("invalid torrent file list")
         for raw in raw_files:
-            if not isinstance(raw, dict) or b"attr" in raw:
+            if not isinstance(raw, dict) or raw.get(b"attr") not in (None, b"p"):
                 raise TorrentBytesError("unsupported torrent file")
             components = raw.get(b"path")
             length = raw.get(b"length")
             if not isinstance(components, list) or not components:
                 raise TorrentBytesError("invalid torrent path")
-            if not isinstance(length, int) or length <= 0:
+            if not isinstance(length, int) or length < 0:
                 raise TorrentBytesError("invalid torrent file length")
             path = "/".join([name, *(_safe_component(part) for part in components)])
-            files.append(ManifestFile(path, length))
+            padding = raw.get(b"attr") == b"p"
+            if padding and (
+                length <= 0
+                or components != [b".pad", str(length).encode()]
+                or not files or files[-1].padding
+                or length != (-sum(item.length for item in files)) % piece_length
+            ):
+                raise TorrentBytesError("invalid torrent padding")
+            files.append(ManifestFile(path, length, padding))
     else:
         length = info.get(b"length")
         if not isinstance(length, int) or length <= 0:
             raise TorrentBytesError("invalid torrent file length")
         files.append(ManifestFile(name, length))
-    paths = [entry.path for entry in files]
+    # Padding is virtual and may repeat the same .pad/<length> name.
+    paths = [entry.path for entry in files if not entry.padding]
     if len(paths) != len(set(paths)):
         raise TorrentBytesError("duplicate torrent file path")
     total = sum(entry.length for entry in files)
-    if len(pieces) != ((total + piece_length - 1) // piece_length) * 20:
+    if total <= 0 or len(pieces) != ((total + piece_length - 1) // piece_length) * 20:
         raise TorrentBytesError("invalid torrent size or piece hashes")
+    layers_verified = (
+        _validate_hybrid_tree(info[b"file tree"], files, name, piece_length, root)
+        if hybrid else None
+    )
     return InspectedTorrent(
         infohash=sha1(data[info_start:info_end]).hexdigest(),
         metadata_sha256=sha256(data).hexdigest(),
-        files=tuple(files),
+        # qBit's public file index omits libtorrent padding entries. Keep
+        # virtual padding in accounting without expecting physical .pad files.
+        files=tuple(item for item in files if not item.padding),
+        hybrid=hybrid,
+        v2_piece_layers_verified=layers_verified,
+        padding_files=tuple(item for item in files if item.padding),
     )
+
+
+def _validate_hybrid_tree(tree, files, name, piece_length, root) -> bool:
+    """Require the two formats to describe the same ordered content files."""
+    described = []
+    layers = root.get(b"piece layers", {})
+    if not isinstance(layers, dict):
+        raise TorrentBytesError("invalid hybrid piece layers")
+    used_layers = set()
+    missing_layers = False
+
+    def visit(node, components):
+        nonlocal missing_layers
+        if not isinstance(node, dict) or not node:
+            raise TorrentBytesError("invalid hybrid file tree")
+        if b"" in node:
+            leaf = node[b""]
+            if len(node) != 1 or not components or not isinstance(leaf, dict):
+                raise TorrentBytesError("invalid hybrid file leaf")
+            length = leaf.get(b"length")
+            pieces_root = leaf.get(b"pieces root")
+            if (
+                type(length) is not int or length < 0
+                or b"attr" in leaf or b"symlink path" in leaf
+            ):
+                raise TorrentBytesError("unsupported hybrid file")
+            if length == 0:
+                if b"pieces root" in leaf:
+                    raise TorrentBytesError("unsupported hybrid file")
+            elif not isinstance(pieces_root, bytes) or len(pieces_root) != 32:
+                raise TorrentBytesError("unsupported hybrid file")
+            described.append(("/".join([name, *components]), length))
+            if length > piece_length:
+                if b"piece layers" not in root:
+                    missing_layers = True
+                    return
+                layer = layers.get(pieces_root)
+                count = (length + piece_length - 1) // piece_length
+                if not isinstance(layer, bytes) or len(layer) != count * 32:
+                    raise TorrentBytesError("missing or invalid hybrid piece layer")
+                hashes = [layer[i:i + 32] for i in range(0, len(layer), 32)]
+                zero = b"\0" * 32
+                height = piece_length // 16384
+                while height > 1:
+                    zero = sha256(zero + zero).digest()
+                    height //= 2
+                hashes += [zero] * ((1 << (count - 1).bit_length()) - count)
+                while len(hashes) > 1:
+                    hashes = [sha256(hashes[i] + hashes[i + 1]).digest()
+                              for i in range(0, len(hashes), 2)]
+                if hashes[0] != pieces_root:
+                    raise TorrentBytesError("hybrid piece layer root mismatch")
+                used_layers.add(pieces_root)
+            return
+        for component, child in node.items():
+            visit(child, [*components, _safe_component(component)])
+
+    visit(tree, [])
+    if described != [(item.path, item.length) for item in files if not item.padding]:
+        raise TorrentBytesError("hybrid file trees disagree")
+    if set(layers) != used_layers:
+        raise TorrentBytesError("unexpected hybrid piece layers")
+    return not missing_layers
 
 
 def _magnet_tracker(value: str) -> bytes | None:

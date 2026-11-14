@@ -198,6 +198,123 @@ def test_two_registry_starts_migrate_legacy_seed_column_once(tmp_path, monkeypat
     assert alter_count == 1
 
 
+@pytest.mark.parametrize("code", [sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED])
+def test_registry_retries_transient_wal_switch_and_closes_failed_connections(
+    tmp_path, monkeypatch, code,
+) -> None:
+    real_connect = sqlite3.connect
+    connections = []
+    attempts = 0
+
+    class BusyConnection(sqlite3.Connection):
+        closed = False
+
+        def execute(self, sql, parameters=()):
+            nonlocal attempts
+            if sql == "PRAGMA journal_mode = WAL":
+                attempts += 1
+                if attempts <= 2:
+                    error = sqlite3.OperationalError("database is locked")
+                    error.sqlite_errorcode = code
+                    raise error
+            return super().execute(sql, parameters)
+
+        def close(self):
+            self.closed = True
+            return super().close()
+
+    def connect(*args, **kwargs):
+        connection = real_connect(*args, factory=BusyConnection, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    registry = PermitRegistry(tmp_path / "control.sqlite")
+    assert attempts == 3
+    assert all(connection.closed for connection in connections)
+    with real_connect(registry._db_path) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+
+def test_registry_does_not_retry_non_lock_wal_failure_and_closes_connection(
+    tmp_path, monkeypatch,
+) -> None:
+    real_connect = sqlite3.connect
+    connections = []
+
+    class CorruptConnection(sqlite3.Connection):
+        closed = False
+
+        def execute(self, sql, parameters=()):
+            if sql == "PRAGMA journal_mode = WAL":
+                error = sqlite3.OperationalError("fixture database corruption")
+                error.sqlite_errorcode = sqlite3.SQLITE_CORRUPT
+                raise error
+            return super().execute(sql, parameters)
+
+        def close(self):
+            self.closed = True
+            return super().close()
+
+    def connect(*args, **kwargs):
+        connection = real_connect(*args, factory=CorruptConnection, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    with pytest.raises(sqlite3.OperationalError, match="fixture database corruption"):
+        PermitRegistry(tmp_path / "control.sqlite")
+    assert len(connections) == 1
+    assert connections[0].closed
+
+
+def test_registry_wal_retry_uses_one_bounded_budget_and_closes_every_attempt(
+    tmp_path, monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from homeserver_control.gateway import permits as permit_module
+
+    real_connect = sqlite3.connect
+    now = [0.0]
+    connections = []
+    timeouts = []
+
+    class AlwaysBusyConnection(sqlite3.Connection):
+        closed = False
+
+        def execute(self, sql, parameters=()):
+            if sql == "PRAGMA journal_mode = WAL":
+                error = sqlite3.OperationalError("database is locked")
+                error.sqlite_errorcode = sqlite3.SQLITE_BUSY_SNAPSHOT
+                raise error
+            return super().execute(sql, parameters)
+
+        def close(self):
+            self.closed = True
+            return super().close()
+
+    def sleep_for_retry(seconds):
+        now[0] += seconds
+
+    def connect(*args, **kwargs):
+        timeouts.append(kwargs['timeout'])
+        connection = real_connect(*args, factory=AlwaysBusyConnection, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(permit_module, '_SQLITE_LOCK_TIMEOUT_SECONDS', 0.05)
+    monkeypatch.setattr(permit_module, 'time', SimpleNamespace(
+        monotonic=lambda: now[0], sleep=sleep_for_retry,
+    ))
+    monkeypatch.setattr(sqlite3, 'connect', connect)
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        PermitRegistry(tmp_path / 'control.sqlite')
+    assert now[0] == pytest.approx(0.05)
+    assert timeouts == pytest.approx([0.05, 0.025, 0.0])
+    assert all(connection.closed for connection in connections)
+
+
 @pytest.mark.parametrize("invalid", [True, -1, 1.5, "10"])
 def test_issue_rejects_invalid_reported_seeders(invalid) -> None:
     with pytest.raises(ValueError, match="seed"):

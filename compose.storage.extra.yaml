@@ -1,0 +1,58 @@
+# Optional second USB HD. Use after compose.storage.yaml; prepare its registry first.
+services:
+  control-worker:
+    volumes:
+    - type: bind
+      source: /srv/external2
+      target: /storage/hdd2
+      read_only: false
+      bind:
+        create_host_path: false
+  control-api:
+    volumes:
+    - type: bind
+      source: /srv/external2
+      target: /storage/hdd2
+      read_only: true
+      bind:
+        create_host_path: false
+  download-gateway:
+    volumes:
+    - type: bind
+      source: /srv/external2
+      target: /storage/hdd2
+      read_only: true
+      bind:
+        create_host_path: false
+  telemetry:
+    volumes:
+    - type: bind
+      source: /srv/external2
+      target: /storage/hdd2
+      read_only: true
+      bind:
+        create_host_path: false
+  host-metrics:
+    volumes:
+    - type: bind
+      source: /srv/external2
+      target: /storage/hdd2
+      read_only: true
+      bind:
+        create_host_path: false
+  init:
+    volumes:
+    - type: bind
+      source: /srv/external2
+      target: /storage/hdd2
+      read_only: true
+      bind:
+        create_host_path: false
+  operator:
+    volumes:
+    - type: bind
+      source: /srv/external2
+      target: /storage/hdd2
+      read_only: true
+      bind:
+        create_host_path: false

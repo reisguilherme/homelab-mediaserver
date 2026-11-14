@@ -770,8 +770,9 @@ async def test_acquirer_rejects_redirecting_torrent_cache(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("previous_failover", [False, True])
+@pytest.mark.parametrize("manual", [False, True])
 async def test_movie_replaces_persistently_stalled_source_with_verified_seeded_release(
-    tmp_path, previous_failover,
+    tmp_path, previous_failover, manual,
 ):
     repo, permits, reservation_id = _reserve(tmp_path, budget=0)
     old_torrent = _torrent(subtitle=True)
@@ -825,7 +826,7 @@ async def test_movie_replaces_persistently_stalled_source_with_verified_seeded_r
             metadata_sha256=old.metadata_sha256, effect=lambda _: {"accepted": True},
         )
         old_metadata = middle_metadata
-    SourceHealthStore(tmp_path / "control.sqlite").observe(
+    SourceHealthStore(tmp_path / "control.sqlite", automatic_replacement_enabled=True).observe(
         old.permit_id,
         TorrentHealth(
             infohash=old.infohash, downloaded=0,
@@ -919,7 +920,7 @@ async def test_movie_replaces_persistently_stalled_source_with_verified_seeded_r
     async def capacity():
         events.append("capacity")
         return CapacityEvidence(
-            free_bytes=2_000_000_000,
+            free_bytes=10_000_000_000 if manual else 2_000_000_000,
             remaining_by_hash={old.infohash: old_metadata.total_bytes},
             paused_hashes=frozenset(stopped_hashes),
         )
@@ -935,11 +936,23 @@ async def test_movie_replaces_persistently_stalled_source_with_verified_seeded_r
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
             client=client, capacity_provider=capacity,
             gateway_url="http://download-gateway:8081", arr_token="worker-secret",
-            health_store=SourceHealthStore(tmp_path / "control.sqlite"),
+            health_store=SourceHealthStore(
+                tmp_path / "control.sqlite",
+                automatic_replacement_enabled=not manual,
+            ),
             torrent_store=torrents,
             availability_probe=availability_probe,
         )
-        assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "replaced"
+        if manual:
+            acquirer._next_search[reservation_id] = time.monotonic() + 900
+            assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == (
+                "already_permitted"
+            )
+            assert await acquirer.manual_replace(
+                "movie:tmdb:1101383", reservation_id, old.permit_id,
+            ) == "replaced"
+        else:
+            assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "replaced"
         assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == (
             "already_permitted"
         )
@@ -959,7 +972,10 @@ async def test_movie_replaces_persistently_stalled_source_with_verified_seeded_r
         **{original.infohash: "superseded", old.infohash: "superseded"},
         new_metadata.infohash: "confirmed",
     }
-    assert events.index("stop") < events.index("capacity") < events.index("add")
+    if manual:
+        assert events.index("capacity") < events.index("stop") < events.index("add")
+    else:
+        assert events.index("stop") < events.index("capacity") < events.index("add")
 
 
 @pytest.mark.asyncio
@@ -982,7 +998,7 @@ async def test_movie_keeps_stalled_source_when_alternatives_have_no_seeders(tmp_
     )
     torrents = TorrentArtifactStore(repo.path)
     torrents.put(old, old_torrent)
-    SourceHealthStore(tmp_path / "control.sqlite").observe(
+    SourceHealthStore(tmp_path / "control.sqlite", automatic_replacement_enabled=True).observe(
         old.permit_id,
         TorrentHealth(
             infohash=old.infohash, downloaded=0,
@@ -1044,7 +1060,10 @@ async def test_movie_keeps_stalled_source_when_alternatives_have_no_seeders(tmp_
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
             client=client, capacity_provider=lambda: None,
             gateway_url="http://download-gateway:8081", arr_token="worker-secret",
-            health_store=SourceHealthStore(tmp_path / "control.sqlite"),
+            health_store=SourceHealthStore(
+                tmp_path / "control.sqlite",
+                automatic_replacement_enabled=True,
+            ),
             torrent_store=torrents,
         )
         await acquirer.acquire("movie:tmdb:1101383", reservation_id)
@@ -1100,7 +1119,7 @@ async def test_movie_does_not_replace_with_torrent_writing_an_existing_path(
     )
     torrents = TorrentArtifactStore(repo.path)
     torrents.put(old, old_torrent)
-    SourceHealthStore(tmp_path / "control.sqlite").observe(
+    SourceHealthStore(tmp_path / "control.sqlite", automatic_replacement_enabled=True).observe(
         old.permit_id,
         TorrentHealth(
             infohash=old.infohash, downloaded=0,
@@ -1163,7 +1182,10 @@ async def test_movie_does_not_replace_with_torrent_writing_an_existing_path(
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
             client=client, capacity_provider=capacity,
             gateway_url="http://download-gateway:8081", arr_token="worker-secret",
-            health_store=SourceHealthStore(tmp_path / "control.sqlite"),
+            health_store=SourceHealthStore(
+                tmp_path / "control.sqlite",
+                automatic_replacement_enabled=True,
+            ),
             torrent_store=torrents,
         )
         await acquirer.acquire("movie:tmdb:1101383", reservation_id)
@@ -1199,7 +1221,7 @@ async def test_movie_retains_source_when_original_torrent_metadata_is_missing(tm
         metadata_sha256=old.metadata_sha256,
         effect=lambda _: {"accepted": True},
     )
-    SourceHealthStore(repo.path).observe(
+    SourceHealthStore(repo.path, automatic_replacement_enabled=True).observe(
         old.permit_id,
         TorrentHealth(
             infohash=old.infohash, downloaded=0,
@@ -1253,7 +1275,7 @@ async def test_movie_retains_source_when_original_torrent_metadata_is_missing(tm
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
             client=client, capacity_provider=capacity,
             gateway_url="http://download-gateway:8081", arr_token="worker-secret",
-            health_store=SourceHealthStore(repo.path),
+            health_store=SourceHealthStore(repo.path, automatic_replacement_enabled=True),
             torrent_store=TorrentArtifactStore(repo.path),
         )
         await acquirer.acquire("movie:tmdb:1101383", reservation_id)
@@ -1351,7 +1373,10 @@ async def test_movie_reconciles_uncertain_replacement_without_duplicate_add(
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
             client=client, capacity_provider=capacity_provider,
             gateway_url="http://download-gateway:8081", arr_token="worker-secret",
-            health_store=SourceHealthStore(repo.path), torrent_store=torrents,
+            health_store=SourceHealthStore(
+                repo.path,
+                automatic_replacement_enabled=True,
+            ), torrent_store=torrents,
         )
         assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "replaced"
         assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == (
@@ -1406,7 +1431,7 @@ async def test_movie_unexpired_retry_rechecks_that_retained_source_is_stopped(tm
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
             client=client, torrent_store=torrents, capacity_provider=capacity_provider,
             gateway_url="http://download-gateway:8081", arr_token="worker-secret",
-            health_store=SourceHealthStore(repo.path),
+            health_store=SourceHealthStore(repo.path, automatic_replacement_enabled=True),
         )
         with pytest.raises(PermissionError, match="source_not_stopped"):
             await acquirer.acquire("movie:tmdb:1101383", reservation_id)
@@ -1442,7 +1467,10 @@ async def test_movie_missing_uncertain_replacement_requires_manual_reconciliatio
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
             client=client, capacity_provider=capacity_provider,
             gateway_url="http://download-gateway:8081", arr_token="worker-secret",
-            health_store=SourceHealthStore(repo.path), torrent_store=torrents,
+            health_store=SourceHealthStore(
+                repo.path,
+                automatic_replacement_enabled=True,
+            ), torrent_store=torrents,
         )
         assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == (
             "replacement_uncertain"
@@ -1507,7 +1535,10 @@ async def test_movie_renews_expired_authorized_replacement_before_gateway_add(tm
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
             client=client, capacity_provider=capacity_provider,
             gateway_url="http://download-gateway:8081", arr_token="worker-secret",
-            health_store=SourceHealthStore(repo.path), torrent_store=torrents,
+            health_store=SourceHealthStore(
+                repo.path,
+                automatic_replacement_enabled=True,
+            ), torrent_store=torrents,
         )
         assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == "replaced"
         assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == (
@@ -1576,7 +1607,10 @@ async def test_movie_reconciles_initial_unknown_permit_without_new_grab(tmp_path
             radarr_api_key="secret", prowlarr_url="http://prowlarr:9696",
             client=client, capacity_provider=capacity_provider,
             gateway_url="http://download-gateway:8081", arr_token="worker-secret",
-            health_store=SourceHealthStore(repo.path), torrent_store=torrents,
+            health_store=SourceHealthStore(
+                repo.path,
+                automatic_replacement_enabled=True,
+            ), torrent_store=torrents,
         )
         assert await acquirer.acquire("movie:tmdb:1101383", reservation_id) == (
             "reconciled"
@@ -1585,3 +1619,40 @@ async def test_movie_reconciles_initial_unknown_permit_without_new_grab(tmp_path
     assert reconciled == [permit.token]
     assert permits.get_for_reservation(reservation_id).state == "confirmed"
     assert permits.is_admitted(metadata.infohash)
+
+
+@pytest.mark.parametrize("directory", [b"ANTES DO FILME", b"DEPOIS DO FILME"])
+def test_manifest_excludes_explicit_portuguese_before_after_film_extras(directory):
+    torrent = _torrent(subtitle=False, extra_video_path=[directory, b"Shrek.short.mkv"])
+    manifest = MovieAcquirer._eligible_manifest(torrent, allow_external_subtitle=True)
+    assert manifest is not None
+    assert manifest[2] == ("Film/movie.mkv",)
+
+
+def test_manifest_does_not_treat_lower_resolution_second_movie_as_extra():
+    torrent = _torrent(subtitle=False, extra_video_path=[b"Another.Movie.480p.mkv"])
+    assert MovieAcquirer._eligible_manifest(torrent, allow_external_subtitle=True) is None
+
+
+@pytest.mark.parametrize("directory", [b"ANTES DO FILME", b"DEPOIS DO FILME"])
+@pytest.mark.parametrize("language", [b"pt-BR", b"en-US"])
+@pytest.mark.parametrize("external", [False, True])
+def test_movie_extra_subtitle_cannot_satisfy_feature_policy(directory, language, external):
+    files = [
+        {b"length": 1_500_000_000, b"path": [b"movie.mkv"]},
+        {b"length": 79_000_000, b"path": [directory, b"Short.mkv"]},
+        {b"length": 1000, b"path": [directory, b"Short." + language + b".srt"]},
+    ]
+    total = sum(item[b"length"] for item in files)
+    torrent = _bencode({b"info": {
+        b"files": files, b"name": b"Film", b"piece length": 16_777_216,
+        b"pieces": b"a" * (20 * ((total + 16_777_215) // 16_777_216)),
+    }})
+    manifest = MovieAcquirer._eligible_manifest(
+        torrent, allow_external_subtitle=external,
+    )
+    if external:
+        assert manifest is not None
+        assert manifest[2] == ("Film/movie.mkv",)
+    else:
+        assert manifest is None

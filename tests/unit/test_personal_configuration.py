@@ -10,10 +10,12 @@ def test_personal_example_contains_behavior_and_credentials_without_host_wiring(
         "DOWNLOAD_MAX_ACTIVE",
         "SERIES_DOWNLOAD_WINDOW",
         "SEED_MAX_ACTIVE",
-        "MOVIE_RESOLUTIONS",
-        "SERIES_RESOLUTIONS",
+        "DOWNLOAD_DEFAULT_PROFILE",
+        "RELEASE_MIN_SEEDERS",
+        "DUBBED_AUDIO_PREFERENCES",
         "RELEASE_INDEXER_PRIORITY",
         "SOURCE_SLOW_REPLACEMENT_ENABLED",
+        "SOURCE_AUTOMATIC_REPLACEMENT_ENABLED",
         "SUBTITLE_LANGUAGES",
         "SOURCE_SLOW_WINDOW_SECONDS",
         "ADMIN_PASSWORD",
@@ -34,9 +36,31 @@ def test_personal_example_contains_behavior_and_credentials_without_host_wiring(
         "INTEL_RENDER_DEVICE",
         "BACKUP_ENABLED",
         "RELEASE_KEEP_COUNT",
+        "MOVIE_RESOLUTIONS",
+        "SERIES_RESOLUTIONS",
+        "MEDIA_SOURCES",
+        "ANIMATION_AUDIO_PREFERENCES",
     ):
         assert "HOMESERVER_" + key not in values
     assert {row["key"] for row in catalog()} == set(values)
+
+
+def test_automatic_replacement_defaults_off_and_remains_an_explicit_preference(tmp_path):
+    from homeserver_common.runtime import apply_runtime_configuration
+
+    path = tmp_path / '.env'
+    path.write_text('')
+    assert load_settings(path).source_automatic_replacement_enabled is False
+    assert parse_env(example_env())['HOMESERVER_SOURCE_AUTOMATIC_REPLACEMENT_ENABLED'] == 'false'
+    previous = {'HOMESERVER_SOURCE_AUTOMATIC_REPLACEMENT_ENABLED': 'true'}
+    assert apply_runtime_configuration(path, 'dev', previous)[
+        'HOMESERVER_SOURCE_AUTOMATIC_REPLACEMENT_ENABLED'
+    ] == 'false'
+    path.write_text('HOMESERVER_SOURCE_AUTOMATIC_REPLACEMENT_ENABLED=true\n')
+    assert load_settings(path).source_automatic_replacement_enabled is True
+    assert apply_runtime_configuration(path, 'dev', {})[
+        'HOMESERVER_SOURCE_AUTOMATIC_REPLACEMENT_ENABLED'
+    ] == 'true'
 
 
 def test_production_settings_need_no_machine_identity_or_first_use_library_keys(tmp_path):
@@ -59,7 +83,7 @@ def test_production_settings_need_no_machine_identity_or_first_use_library_keys(
     settings = load_settings(path, mode="prod")
     assert settings.media_root == "/srv/data"
     assert settings.run_root == "/run/homeserver"
-    assert settings.sonarr_url == "http://sonarr:8989"
+    assert settings.sonarr_url == "http://sonarr:8989/sonarr"
     assert settings.jellyfin_api_key == settings.seerr_api_key == ""
 
 

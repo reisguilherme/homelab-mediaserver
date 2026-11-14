@@ -42,6 +42,290 @@ def _snapshot(path: Path) -> Path:
     return snapshot
 
 
+class CollectionDeleteFixture:
+    def __init__(self, tmp_path: Path) -> None:
+        self.item_id = "e" * 32
+        self.user = {"Id": "admin", "Policy": {
+            "IsAdministrator": True, "EnableContentDeletion": False,
+        }}
+        self.item = {
+            "Id": self.item_id, "Type": "BoxSet",
+            "Path": "/config/data/collections/James Bond [boxset]",
+        }
+        self.system = {
+            "ProgramDataPath": "/config", "WebPath": "/jellyfin/jellyfin-web",
+            "ItemsByNamePath": "/config/metadata", "CachePath": "/cache",
+            "LogPath": "/config/log", "InternalMetadataPath": "/config/metadata",
+            "TranscodingTempPath": "/cache/transcodes",
+        }
+        self.delete_status = 204
+        self.seen: list[tuple[str, str]] = []
+        self.movie = tmp_path / "media" / "movies" / "Bond.mkv"
+        self.movie.parent.mkdir(parents=True)
+        self.movie.write_bytes(b"preserved movie")
+        self.jobs = DeletionJobStore(tmp_path / "control.sqlite")
+        self.jobs.initialize()
+        self.snapshot = tmp_path / "missing-capacity.json"
+
+    def response(self, request: httpx.Request) -> httpx.Response:
+        assert 'Token="admin-session"' in request.headers["Authorization"]
+        assert "X-Emby-Token" not in request.headers
+        self.seen.append((request.method, request.url.path))
+        if request.method == "GET" and request.url.path == "/Users/Me":
+            return httpx.Response(200, json=self.user)
+        if request.method == "GET" and request.url.path == f"/Users/admin/Items/{self.item_id}":
+            return httpx.Response(200, json=self.item)
+        if request.method == "GET" and request.url.path == "/System/Info":
+            return httpx.Response(200, json=self.system)
+        if request.method == "DELETE" and request.url.path == f"/Items/{self.item_id}":
+            assert not request.url.query and not request.content
+            return httpx.Response(self.delete_status)
+        raise AssertionError(f"unexpected upstream call {request.method} {request.url.path}")
+
+    def admission(self, client: httpx.AsyncClient) -> DeletionAdmission:
+        return DeletionAdmission(
+            jobs=self.jobs, media_root=self.movie.parents[1], snapshot_path=self.snapshot,
+            filesystem_id="test-media-uuid", jellyfin_url="http://jellyfin:8096",
+            radarr_url="http://radarr:7878", radarr_api_key="radarr-test",
+            sonarr_url="http://sonarr:8989", sonarr_api_key="sonarr-test", client=client,
+        )
+
+
+@pytest.mark.asyncio
+async def test_collection_delete_removes_only_verified_metadata_without_media_job(tmp_path):
+    fixture = CollectionDeleteFixture(tmp_path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as client:
+        result = await fixture.admission(client).capture(fixture.item_id, "admin-session")
+    assert result["stage"] == "completed"
+    assert fixture.jobs.list() == []
+    assert fixture.movie.read_bytes() == b"preserved movie"
+    assert fixture.seen == [
+        ("GET", "/Users/Me"),
+        ("GET", f"/Users/admin/Items/{fixture.item_id}"),
+        ("GET", "/System/Info"),
+        ("DELETE", f"/Items/{fixture.item_id}"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_collection_delete_from_prefixed_ui_route_preserves_member_files(tmp_path):
+    fixture = CollectionDeleteFixture(tmp_path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as upstream:
+        state = ControlState(deletion_admission=fixture.admission(upstream))
+        with TestClient(create_app(state=state)) as client:
+            response = client.delete(
+                f"/jellyfin/Items/{fixture.item_id}", headers={
+                    "X-Emby-Authorization": 'MediaBrowser Client="Web", Token="admin-session"',
+                },
+            )
+    assert response.status_code == 204
+    assert fixture.movie.read_bytes() == b"preserved movie"
+    assert fixture.jobs.list() == []
+    assert fixture.seen[-1] == ("DELETE", f"/Items/{fixture.item_id}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("item_type", ["BoxSet", "Series"])
+async def test_native_admin_delete_does_not_depend_on_worker_admission(tmp_path, item_type):
+    fixture = CollectionDeleteFixture(tmp_path)
+    fixture.item["Type"] = item_type
+    fixture.user["Policy"]["EnableContentDeletion"] = True
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as upstream:
+        state = ControlState(
+            deletion_admission=fixture.admission(upstream), admission_enabled=False,
+        )
+        with TestClient(create_app(state=state)) as client:
+            response = client.delete(
+                f"/Items/{fixture.item_id}", headers={"X-Emby-Token": "admin-session"},
+            )
+    assert response.status_code == 204
+    assert fixture.seen[-1] == ("DELETE", f"/Items/{fixture.item_id}")
+    assert fixture.jobs.list() == []
+
+
+@pytest.mark.asyncio
+async def test_collection_delete_does_not_read_coordinated_deletion_jobs(tmp_path, monkeypatch):
+    fixture = CollectionDeleteFixture(tmp_path)
+
+    def unavailable_jobs(item_id):
+        raise AssertionError("native metadata deletion must not depend on the job database")
+
+    monkeypatch.setattr(fixture.jobs, "get", unavailable_jobs)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as client:
+        result = await fixture.admission(client).capture(fixture.item_id, "admin-session")
+    assert result["stage"] == "completed"
+    assert fixture.movie.exists()
+
+
+@pytest.mark.asyncio
+async def test_worker_admission_still_blocks_coordinated_movie_deletion(tmp_path):
+    fixture = CollectionDeleteFixture(tmp_path)
+    fixture.item["Type"] = "Movie"
+    fixture.user["Policy"]["EnableContentDeletion"] = True
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as upstream:
+        state = ControlState(
+            deletion_admission=fixture.admission(upstream), admission_enabled=False,
+        )
+        with TestClient(create_app(state=state)) as client:
+            response = client.delete(
+                f"/Items/{fixture.item_id}", headers={"X-Emby-Token": "admin-session"},
+            )
+    assert response.status_code == 503
+    assert not any(method == "DELETE" for method, _ in fixture.seen)
+    assert fixture.jobs.list() == []
+
+
+@pytest.mark.asyncio
+async def test_media_delete_retry_preserves_job_when_jellyfin_item_is_already_gone(tmp_path):
+    fixture = CollectionDeleteFixture(tmp_path)
+    fixture.user["Policy"]["EnableContentDeletion"] = True
+    fixture.snapshot = _snapshot(tmp_path)
+    job = fixture.jobs.enqueue(fixture.item_id, "Movie", {"media_key": "movie:tmdb:123"})
+
+    def upstream(request):
+        if request.method == "GET" and request.url.path == f"/Users/admin/Items/{fixture.item_id}":
+            return httpx.Response(404)
+        return fixture.response(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+        repeated = await fixture.admission(client).capture(fixture.item_id, "admin-session")
+    assert repeated == job
+    assert not any(method == "DELETE" for method, _ in fixture.seen)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", [
+    "/data/media/movies/Bond [boxset]",
+    "/config/data/collections",
+    "/config/data/collections/../movies/Bond [boxset]",
+    "/config/data/collections/Bond [boxset]/nested",
+    "/config/data/collections/Bond",
+    None,
+])
+async def test_collection_delete_rejects_legacy_or_unproven_media_directory(tmp_path, path):
+    fixture = CollectionDeleteFixture(tmp_path)
+    fixture.item["Path"] = path
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as client:
+        with pytest.raises(DeletionCaptureError) as error:
+            await fixture.admission(client).capture(fixture.item_id, "admin-session")
+    assert error.value.status_code == 409
+    assert not any(method == "DELETE" for method, _ in fixture.seen)
+    assert fixture.jobs.list() == []
+    assert fixture.movie.exists()
+
+
+@pytest.mark.asyncio
+async def test_collection_delete_requires_administrator_before_catalog_lookup(tmp_path):
+    fixture = CollectionDeleteFixture(tmp_path)
+    fixture.user["Policy"]["IsAdministrator"] = False
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as client:
+        with pytest.raises(DeletionCaptureError) as error:
+            await fixture.admission(client).capture(fixture.item_id, "admin-session")
+    assert error.value.status_code == 403
+    assert fixture.seen == [("GET", "/Users/Me")]
+    assert fixture.jobs.list() == []
+
+
+@pytest.mark.asyncio
+async def test_collection_delete_rejects_changed_item_identity_before_mutation(tmp_path):
+    fixture = CollectionDeleteFixture(tmp_path)
+    fixture.item["Id"] = "f" * 32
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as client:
+        with pytest.raises(DeletionCaptureError) as error:
+            await fixture.admission(client).capture(fixture.item_id, "admin-session")
+    assert error.value.status_code == 409
+    assert not any(method == "DELETE" for method, _ in fixture.seen)
+    assert fixture.jobs.list() == []
+
+
+@pytest.mark.asyncio
+async def test_collection_delete_requires_server_collection_storage_identity(tmp_path):
+    fixture = CollectionDeleteFixture(tmp_path)
+    fixture.system = {}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as client:
+        with pytest.raises(DeletionCaptureError) as error:
+            await fixture.admission(client).capture(fixture.item_id, "admin-session")
+    assert error.value.status_code == 503
+    assert not any(method == "DELETE" for method, _ in fixture.seen)
+    assert fixture.jobs.list() == []
+
+
+@pytest.mark.asyncio
+async def test_collection_permission_does_not_enable_native_movie_deletion(tmp_path):
+    fixture = CollectionDeleteFixture(tmp_path)
+    fixture.item["Type"] = "Movie"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as client:
+        with pytest.raises(DeletionCaptureError) as error:
+            await fixture.admission(client).capture(fixture.item_id, "admin-session")
+    assert error.value.status_code == 403
+    assert not any(method == "DELETE" for method, _ in fixture.seen)
+    assert fixture.jobs.list() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("item_type,path", [
+    ("Series", "/data/media/tv/Example"),
+    ("Playlist", "/config/data/playlists/Favourites"),
+    ("Folder", "/data/media/photos/Holidays"),
+    ("Audio", "/data/media/music/Track.flac"),
+    ("Photo", "/data/media/photos/Picture.jpg"),
+    ("Book", "/data/media/books/Example.epub"),
+])
+async def test_administrator_can_delete_other_verified_types_natively(tmp_path, item_type, path):
+    fixture = CollectionDeleteFixture(tmp_path)
+    fixture.user["Policy"]["EnableContentDeletion"] = True
+    fixture.item.update(Type=item_type, Path=path)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as client:
+        result = await fixture.admission(client).capture(fixture.item_id, "admin-session")
+    assert result["stage"] == "completed"
+    assert result["item_type"] == item_type
+    assert fixture.jobs.list() == []
+    assert fixture.seen == [
+        ("GET", "/Users/Me"),
+        ("GET", f"/Users/admin/Items/{fixture.item_id}"),
+        ("DELETE", f"/Items/{fixture.item_id}"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("item_type", [None, "", [], "invented-type"])
+async def test_native_admin_deletion_rejects_unproven_item_type(tmp_path, item_type):
+    fixture = CollectionDeleteFixture(tmp_path)
+    fixture.user["Policy"]["EnableContentDeletion"] = True
+    fixture.item["Type"] = item_type
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as client:
+        with pytest.raises(DeletionCaptureError) as error:
+            await fixture.admission(client).capture(fixture.item_id, "admin-session")
+    assert error.value.status_code == 409
+    assert not any(method == "DELETE" for method, _ in fixture.seen)
+    assert fixture.jobs.list() == []
+
+
+@pytest.mark.asyncio
+async def test_native_admin_deletion_requires_content_deletion_permission(tmp_path):
+    fixture = CollectionDeleteFixture(tmp_path)
+    fixture.item["Type"] = "Series"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as client:
+        with pytest.raises(DeletionCaptureError) as error:
+            await fixture.admission(client).capture(fixture.item_id, "admin-session")
+    assert error.value.status_code == 403
+    assert not any(method == "DELETE" for method, _ in fixture.seen)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native_status,expected_status", [(403, 403), (404, 404), (500, 503)])
+async def test_collection_delete_reports_native_failure_without_queueing(tmp_path, native_status,
+                                                                       expected_status):
+    fixture = CollectionDeleteFixture(tmp_path)
+    fixture.delete_status = native_status
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fixture.response)) as client:
+        with pytest.raises(DeletionCaptureError) as error:
+            await fixture.admission(client).capture(fixture.item_id, "admin-session")
+    assert error.value.status_code == expected_status
+    assert fixture.jobs.list() == []
+    assert fixture.movie.exists()
+
+
 @pytest.mark.asyncio
 async def test_movie_delete_captures_exact_file_before_mutation(tmp_path: Path) -> None:
     media_root = tmp_path / "media"
@@ -176,7 +460,11 @@ async def test_episode_capture_requires_unique_sonarr_file(tmp_path: Path) -> No
     assert video.exists()
 
 
-def test_jellyfin_delete_route_extracts_ui_token_and_queues_only() -> None:
+@pytest.mark.parametrize('authorization', [
+    'MediaBrowser Client="Web", Token="user-token"',
+    'MediaBrowser Token="user-token"',
+])
+def test_jellyfin_delete_route_extracts_ui_token_and_queues_only(authorization) -> None:
     class Capturer:
         calls: list[tuple[str, str]] = []
 
@@ -190,7 +478,7 @@ def test_jellyfin_delete_route_extracts_ui_token_and_queues_only() -> None:
     item_id = "d" * 32
     response = client.delete(
         f"/Items/{item_id}",
-        headers={"Authorization": 'MediaBrowser Client="Web", Token="user-token"'},
+        headers={"Authorization": authorization},
     )
     assert response.status_code == 204
     assert capturer.calls == [(item_id, "user-token")]
@@ -204,6 +492,61 @@ def test_jellyfin_delete_route_extracts_ui_token_and_queues_only() -> None:
 def test_jellyfin_delete_route_fails_closed_without_admission() -> None:
     client = TestClient(create_app(state=ControlState()))
     assert client.delete(f"/Items/{'d' * 32}").status_code == 503
+
+
+@pytest.mark.parametrize("prefix", ["", "/jellyfin", "/nested/jellyfin"])
+def test_bulk_jellyfin_delete_uses_the_same_capture_for_each_item(prefix):
+    class Capturer:
+        def __init__(self):
+            self.calls = []
+
+        async def capture(self, item_id, token):
+            self.calls.append((item_id, token))
+            return {"stage": "queued"}
+
+    capturer = Capturer()
+    client = TestClient(create_app(state=ControlState(deletion_admission=capturer)))
+    response = client.delete(
+        f"{prefix}/Items", params={"ids": f"{'a' * 32},{'b' * 32}"},
+        headers={"X-Emby-Token": "admin-session"},
+    )
+    assert response.status_code == 204
+    assert capturer.calls == [("a" * 32, "admin-session"), ("b" * 32, "admin-session")]
+
+
+@pytest.mark.parametrize("ids", [None, "", f"{'a' * 32},invalid", f"{'a' * 32},"])
+def test_bulk_jellyfin_delete_validates_all_ids_before_mutations(ids):
+    class Capturer:
+        async def capture(self, item_id, token):
+            raise AssertionError("invalid bulk IDs must not reach capture")
+
+    client = TestClient(create_app(state=ControlState(deletion_admission=Capturer())))
+    response = client.delete(
+        "/Items", params={} if ids is None else {"ids": ids},
+        headers={"X-Emby-Token": "admin-session"},
+    )
+    assert response.status_code == 400
+
+
+def test_bulk_jellyfin_delete_reports_failure_instead_of_hiding_partial_progress():
+    class Capturer:
+        def __init__(self):
+            self.calls = []
+
+        async def capture(self, item_id, token):
+            self.calls.append(item_id)
+            if item_id == "b" * 32:
+                raise DeletionCaptureError(503, "upstream unavailable")
+            return {"stage": "queued"}
+
+    capturer = Capturer()
+    client = TestClient(create_app(state=ControlState(deletion_admission=capturer)))
+    response = client.delete(
+        "/Items", params={"ids": f"{'a' * 32},{'b' * 32},{'c' * 32}"},
+        headers={"X-Emby-Token": "admin-session"},
+    )
+    assert response.status_code == 503
+    assert capturer.calls == ["a" * 32, "b" * 32]
 
 
 def test_deletion_job_status_requires_admin_and_omits_capture_paths(tmp_path: Path) -> None:
@@ -320,7 +663,11 @@ async def test_season_capture_atomically_queues_only_selected_season(tmp_path: P
         before_repeat = len(fixture.calls)
         repeated = await fixture.admission(client).capture(fixture.item_id, "admin-token")
     assert job == repeated
-    assert len(fixture.calls) == before_repeat + 1  # Session rechecked; no second snapshot.
+    # Recheck the session and item type without recapturing children or Arr files.
+    assert fixture.calls[before_repeat:] == [
+        ("GET", "/Users/Me"),
+        ("GET", f"/Users/admin/Items/{fixture.item_id}"),
+    ]
     assert job["item_type"] == "Season"
     assert job["payload"]["media_key"] == "season:tmdb:123:2"
     assert job["payload"]["series_tmdb_id"] == 123

@@ -1,9 +1,13 @@
-def available_bytes(free: int, total: int, commitments: list[int]) -> int:
+def available_bytes(
+    free: int, total: int, commitments: list[int], *, min_free_bytes: int = 0,
+) -> int:
     """Return free bytes after the remaining commitments supplied by the caller."""
     if not isinstance(free, int) or isinstance(free, bool):
         raise TypeError("free must be an integer")
     if not isinstance(total, int) or isinstance(total, bool):
         raise TypeError("total must be an integer")
+    if type(min_free_bytes) is not int or min_free_bytes < 0:
+        raise ValueError("invalid minimum free bytes")
     if total <= 0:
         return 0
     committed = sum(
@@ -11,7 +15,7 @@ def available_bytes(free: int, total: int, commitments: list[int]) -> int:
         for value in commitments
         if isinstance(value, int) and not isinstance(value, bool)
     )
-    return max(0, free - committed)
+    return max(0, free - committed - min_free_bytes)
 
 
 def remaining_commitment(budget: int, allocated: int) -> int:

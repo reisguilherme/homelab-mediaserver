@@ -135,7 +135,9 @@ async def resolve_magnet_metadata(magnet: str) -> bytes | None:
                     process.kill()
                 except ProcessLookupError:
                     pass
-            await asyncio.shield(process.wait())
+            # Drain residual stdout after killing the producer: wait() alone can
+            # deadlock when oversized metadata has paused the pipe transport.
+            await asyncio.shield(process.communicate())
 
 
 def _child() -> int:

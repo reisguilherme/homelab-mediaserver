@@ -8,6 +8,8 @@ from homeserver_common.render import render_storage_override
 
 def test_optional_override_keeps_one_logical_data_mount_and_no_shadowing():
     services = render_storage_override()['services']
+    assert any(v['target'] == '/data/media' and not v['read_only']
+               for v in services['jellyfin']['volumes'])
     for name in ('sonarr', 'radarr', 'qbittorrent', 'control-worker'):
         binds = services[name]['volumes']
         assert [(v['source'], v['target']) for v in binds if v['target'].startswith('/data')] == [

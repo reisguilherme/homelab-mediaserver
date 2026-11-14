@@ -9,6 +9,39 @@ import pytest
 from homeserver_control.persistence.db import ReservationRepository
 
 
+@pytest.mark.parametrize("state,included", [
+    ("accepted", True), ("accepted_copy", True), ("dispatching", False),
+    ("complete", False), ("unknown", False),
+    ("subtitles_pending", True), ("subtitles_pending_copy", True),
+])
+def test_pending_movie_imports_are_owned_accepted_active_and_not_cancelled(
+    tmp_path, state, included,
+):
+    repo = ReservationRepository(tmp_path / "control.sqlite")
+    repo.initialize()
+    reservation = repo.reserve(
+        request_id="seerr:42", source_id="42", media_key="movie:tmdb:10",
+        filesystem_id="fixture", budget_bytes=0, free_bytes=100, total_bytes=200,
+    )
+    assert repo.claim_movie_import(reservation.reservation_id)
+    with sqlite3.connect(repo.path) as connection:
+        connection.execute("UPDATE movie_imports SET state=?", (state,))
+    expected = [{"reservation_id": reservation.reservation_id,
+                 "media_key": "movie:tmdb:10", "source_id": "42"}] if included else []
+    assert repo.pending_movie_imports() == expected
+    with sqlite3.connect(repo.path) as connection:
+        connection.execute("UPDATE requests SET state='cancel_requested'")
+    assert repo.pending_movie_imports() == []
+    with sqlite3.connect(repo.path) as connection:
+        connection.execute("UPDATE requests SET state='reserved'")
+        connection.execute("INSERT INTO tombstones VALUES ('movie:tmdb:10','now','fixture')")
+    assert repo.pending_movie_imports() == []
+    with sqlite3.connect(repo.path) as connection:
+        connection.execute("DELETE FROM tombstones")
+        connection.execute("UPDATE reservations SET state='imported'")
+    assert repo.pending_movie_imports() == []
+
+
 def _try_reserve(db_path: str, request_id: str, output) -> None:
     repo = ReservationRepository(db_path)
     repo.initialize()
@@ -22,6 +55,26 @@ def _try_reserve(db_path: str, request_id: str, output) -> None:
         total_bytes=100_000_000_000,
     )
     output.put(result.accepted)
+
+
+@pytest.mark.parametrize("copied", [False, True])
+def test_verified_import_waiting_subtitle_releases_import_slot(tmp_path, copied):
+    repo = ReservationRepository(tmp_path / "control.sqlite")
+    repo.initialize()
+    reservations = [repo.reserve(
+        request_id=f"seerr:{n}", source_id=str(n), media_key=f"movie:tmdb:{n}",
+        filesystem_id="fixture", budget_bytes=0, free_bytes=1000, total_bytes=2000,
+    ).reservation_id for n in (1, 2)]
+    assert repo.claim_movie_import(reservations[0], copy_allowed=copied)
+    repo.record_movie_import(reservations[0], "42")
+    assert not repo.claim_movie_import(reservations[1], copy_allowed=True)
+    repo.verify_movie_import(reservations[0])
+    assert repo.import_state(reservations[0]) == (
+        "subtitles_pending_copy" if copied else "subtitles_pending"
+    )
+    assert repo.claim_movie_import(reservations[1], copy_allowed=True)
+    # A submitted copy still blocks every other import until its bytes are verified.
+    assert not repo.claim_episode_import("episode-permit")
 
 
 @pytest.fixture

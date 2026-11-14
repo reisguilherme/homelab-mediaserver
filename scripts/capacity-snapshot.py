@@ -36,8 +36,8 @@ def collect_pools(registry) -> dict[str, object]:
                 "free_bytes": None,
             }
         pools.append(sample)
-    ssd = next(pool for pool in pools if pool["pool_id"] == "ssd")
-    return {**ssd, "pools": pools}
+    primary = next(pool for pool in pools if pool["pool_id"] == registry.primary_pool_id)
+    return {**primary, "pools": pools}
 
 
 def collect(

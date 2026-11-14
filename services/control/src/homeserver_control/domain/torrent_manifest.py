@@ -11,6 +11,7 @@ class ManifestError(ValueError):
 class ManifestFile:
     path: str
     length: int
+    padding: bool = False
 
 
 @dataclass(frozen=True)

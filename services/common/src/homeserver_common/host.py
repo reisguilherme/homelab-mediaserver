@@ -14,6 +14,7 @@ import stat
 import subprocess
 import xml.etree.ElementTree as xml
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .env import load_settings, parse_env
 from .render import PROJECT_ROOT, atomic_write
@@ -97,6 +98,7 @@ def _native_seeds(settings):
                 "ApiKey": key,
                 "BindAddress": "*",
                 "Port": str(port),
+                "UrlBase": urlsplit(getattr(settings, name + "_url")).path.rstrip("/"),
                 "EnableSsl": "False",
                 "LaunchBrowser": "False",
                 "AuthenticationMethod": "Forms",
@@ -117,7 +119,15 @@ def _native_seeds(settings):
                     settings.admin_password.encode(), usedforsecurity=False
                 ).hexdigest(),
             )
-        seeds[bazarr] = json.dumps({"auth": auth}, indent=2) + "\n"
+        seeds[bazarr] = json.dumps({
+            "auth": auth,
+            "general": {"base_url": urlsplit(settings.bazarr_url).path.rstrip("/")},
+        }, indent=2) + "\n"
+    network = appdata / "jellyfin/config/network.xml"
+    if not network.exists():
+        config = xml.Element("NetworkConfiguration")
+        xml.SubElement(config, "BaseUrl").text = urlsplit(settings.jellyfin_url).path.rstrip("/")
+        seeds[network] = xml.tostring(config, encoding="unicode") + "\n"
     qbit = appdata / "qbittorrent/qBittorrent/qBittorrent.conf"
     if not qbit.exists() and settings.qbit_password:
         salt = os.urandom(16)
@@ -195,6 +205,7 @@ def prepare_runtime(settings: Settings):
             "qbittorrent",
             "bazarr",
             "control",
+            "public-security",
         )
     ]
     directories += [media / name for name in ("torrents", "media", "media/movies", "media/tv")]
@@ -202,7 +213,8 @@ def prepare_runtime(settings: Settings):
         if any(parent.is_symlink() for parent in (path, *path.parents)):
             raise ValueError("runtime directories must not contain a symlink")
         if not path.exists():
-            path.mkdir(parents=True, mode=0o750)
+            mode = 0o700 if path == appdata / 'public-security' else 0o750
+            path.mkdir(parents=True, mode=mode)
             if os.geteuid() == 0:
                 os.chown(path, int(settings.service_uid), int(settings.service_gid))
     if registered_storage:

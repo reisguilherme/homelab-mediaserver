@@ -6,14 +6,179 @@ from homeserver_control.configuration.bazarr import reconcile_bazarr
 from homeserver_control.configuration.media_servers import (
     bootstrap_jellyfin,
     bootstrap_seerr,
+    reconcile_jellyfin_collections,
     reconcile_media_server,
 )
+from homeserver_control.configuration.native_config import NativeConfigurationError
 from homeserver_control.configuration.prowlarr import reconcile_prowlarr
 from homeserver_control.configuration.reconcile import (
     apply_native_settings,
     discover_native_credentials,
     verify_native_settings,
 )
+
+JELLYFIN_ADMIN_POLICY = {
+    "IsAdministrator": True,
+    "EnableCollectionManagement": True,
+    "EnableSubtitleManagement": True,
+    "EnableLyricManagement": True,
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("supports_lyrics", [True, False, "broken-dto"])
+async def test_jellyfin_configured_admin_gains_management_without_changing_other_users(
+    supports_lyrics,
+):
+    import copy
+    import json
+
+    users = [
+        {
+            "Id": "root-id", "Name": "root",
+            "Policy": {
+                "IsAdministrator": False,
+                "EnableCollectionManagement": False,
+                "EnableSubtitleManagement": False,
+                "EnableLyricManagement": False,
+                "EnableContentDeletion": True,
+                "EnableContentDeletionFromFolders": ["existing-folder"],
+                "RemoteClientBitrateLimit": 17000,
+            },
+        },
+        {"Id": "guest-id", "Name": "guest", "Policy": {"IsAdministrator": False}},
+    ]
+    guest = copy.deepcopy(users[1])
+    if not supports_lyrics:
+        users[0]["Policy"].pop("EnableLyricManagement")
+    writes = []
+
+    def handler(request):
+        if request.url.path == "/Users":
+            observed = copy.deepcopy(users)
+            if supports_lyrics == "broken-dto":
+                observed[0]["Policy"]["EnableLyricManagement"] = False
+            return httpx.Response(200, json=observed)
+        if request.url.path == "/Users/root-id/Policy":
+            writes.append(json.loads(request.content))
+            users[0]["Policy"] = writes[-1]
+            return httpx.Response(204)
+        assert request.method == "GET"
+        return httpx.Response(200, json=[{"Locations": ["/data/media/movies", "/data/media/tv"]}])
+
+    async with httpx.AsyncClient(
+        base_url="http://jellyfin", transport=httpx.MockTransport(handler)
+    ) as client:
+        env = {"HOMESERVER_ADMIN_USERNAME": "root"}
+        assert (await reconcile_media_server("jellyfin", env, client, "plan")).status == "planned"
+        assert writes == []
+        assert (await reconcile_media_server("jellyfin", env, client, "apply")).status == "verified"
+        assert not (await reconcile_media_server("jellyfin", env, client, "apply")).changes
+    assert len(writes) == 1
+    expected = dict(JELLYFIN_ADMIN_POLICY)
+    if not supports_lyrics:
+        expected.pop("EnableLyricManagement")
+    assert users[0]["Policy"] == expected | {
+        "EnableContentDeletion": True,
+        "EnableContentDeletionFromFolders": ["existing-folder"],
+        "RemoteClientBitrateLimit": 17000,
+    }
+    assert users[1] == guest
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_jellyfin_auto_collections_preserve_options_and_only_manage_movie_library(enabled):
+    import copy
+    import json
+
+    libraries = [
+        {
+            "Name": "Filmes", "ItemId": "movies-id", "CollectionType": "movies",
+            "Locations": ["/data/media/movies"],
+            "LibraryOptions": {
+                "AutomaticallyAddToCollection": not enabled,
+                "PreferredMetadataLanguage": "pt",
+                "PathInfos": [{"Path": "/data/media/movies"}],
+                "TypeOptions": [{"Type": "Movie", "MetadataFetchers": ["Tmdb"]}],
+            },
+        },
+        {
+            "Name": "Series", "ItemId": "tv-id", "CollectionType": "tvshows",
+            "Locations": ["/data/media/tv"],
+            "LibraryOptions": {"AutomaticallyAddToCollection": False},
+        },
+        {
+            "Name": "Manual", "ItemId": "manual-id", "CollectionType": "movies",
+            "Locations": ["/manual/movies"],
+            "LibraryOptions": {"AutomaticallyAddToCollection": False},
+        },
+        {
+            "Name": "Colecoes", "ItemId": "boxsets-id", "CollectionType": "boxsets",
+            "Locations": ["/config/data/collections"],
+            "LibraryOptions": {"AutomaticallyAddToCollection": False},
+        },
+    ]
+    before = copy.deepcopy(libraries)
+    writes = []
+
+    def handler(request):
+        if request.url.path == "/Users":
+            return httpx.Response(200, json=[
+                {"Id": "root-id", "Name": "root", "Policy": JELLYFIN_ADMIN_POLICY},
+            ])
+        if request.url.path == "/Library/VirtualFolders/LibraryOptions":
+            writes.append(json.loads(request.content))
+            assert writes[-1]["Id"] == "movies-id"
+            libraries[0]["LibraryOptions"] = writes[-1]["LibraryOptions"]
+            return httpx.Response(204)
+        assert request.method == "GET"
+        assert request.url.path == "/Library/VirtualFolders"
+        return httpx.Response(200, json=libraries)
+
+    env = {"HOMESERVER_ADMIN_USERNAME": "root"}
+    if not enabled:
+        env["HOMESERVER_JELLYFIN_AUTO_COLLECTIONS"] = "false"
+    async with httpx.AsyncClient(
+        base_url="http://jellyfin", transport=httpx.MockTransport(handler)
+    ) as client:
+        assert (await reconcile_media_server("jellyfin", env, client, "verify")).status == "drift"
+        assert (await reconcile_media_server("jellyfin", env, client, "plan")).status == "planned"
+        assert writes == []
+        assert (await reconcile_media_server("jellyfin", env, client, "apply")).status == "verified"
+        assert not (await reconcile_media_server("jellyfin", env, client, "apply")).changes
+    assert len(writes) == 1
+    assert libraries[0]["LibraryOptions"] == before[0]["LibraryOptions"] | {
+        "AutomaticallyAddToCollection": enabled,
+    }
+    assert libraries[1:] == before[1:]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("persist_write", [True, False])
+async def test_jellyfin_collections_lost_response_requires_verified_native_state(persist_write):
+    import json
+
+    library = {
+        "ItemId": "movie-library",
+        "LibraryOptions": {"AutomaticallyAddToCollection": False, "EnableRealtimeMonitor": True},
+    }
+
+    def handler(request):
+        if request.method == "POST":
+            if persist_write:
+                library["LibraryOptions"] = json.loads(request.content)["LibraryOptions"]
+            raise httpx.ReadError("lost response", request=request)
+        return httpx.Response(200, json=[library])
+
+    async with httpx.AsyncClient(
+        base_url="http://jellyfin", transport=httpx.MockTransport(handler)
+    ) as client:
+        if persist_write:
+            assert await reconcile_jellyfin_collections({}, client, library, "apply")
+        else:
+            with pytest.raises(NativeConfigurationError, match="collections read-back drift"):
+                await reconcile_jellyfin_collections({}, client, library, "apply")
 
 
 @pytest.mark.asyncio
@@ -127,9 +292,9 @@ async def test_seerr_273_legacy_library_route_reads_without_disabling_and_preser
             return httpx.Response(
                 200,
                 json={
-                    "ip": "jellyfin",
-                    "port": 8096,
-                    "urlBase": "",
+                    "ip": "integration-proxy",
+                    "port": 8787,
+                    "urlBase": "/jellyfin",
                     "useSsl": False,
                     "libraries": libraries,
                 },
@@ -178,7 +343,8 @@ async def test_seerr_empty_library_readback_never_reports_verified_or_initialize
             return httpx.Response(200, json=[])
         return httpx.Response(
             200,
-            json={"ip": "jellyfin", "port": 8096, "urlBase": "", "useSsl": False, "libraries": []},
+            json={"ip": "integration-proxy", "port": 8787, "urlBase": "/jellyfin",
+                  "useSsl": False, "libraries": []},
         )
 
     async with httpx.AsyncClient(
@@ -260,7 +426,9 @@ async def test_jellyfin_encoding_threads_merge_readback_and_capability():
 
     def handler(request):
         if request.url.path == "/Users":
-            return httpx.Response(200, json=[{"Name": "admin", "Id": "stable-id"}])
+            return httpx.Response(200, json=[{
+                "Name": "admin", "Id": "stable-id", "Policy": JELLYFIN_ADMIN_POLICY,
+            }])
         if request.url.path == "/System/Configuration/encoding":
             if request.method == "POST":
                 writes.append(json.loads(request.content))
@@ -293,7 +461,7 @@ async def test_jellyfin_delete_policy_preserves_foreign_permissions_and_user_ids
             "Id": "root-id",
             "Name": "root",
             "Policy": {
-                "IsAdministrator": True,
+                **JELLYFIN_ADMIN_POLICY,
                 "EnableContentDeletion": False,
                 "EnableContentDeletionFromFolders": ["existing-folder"],
             },
@@ -499,8 +667,12 @@ async def test_bazarr_applies_native_form_provider_settings_and_preserves_profil
 async def test_jellyfin_library_adoption_and_missing_create_preserves_users():
     import json
 
-    libraries = [{"Name": "Existing Movies", "ItemId": "12", "Locations": ["/data/media/movies"]}]
-    users = [{"Id": "42", "Name": "admin"}]
+    libraries = [{
+        "Name": "Existing Movies", "ItemId": "12", "CollectionType": "movies",
+        "Locations": ["/data/media/movies"],
+        "LibraryOptions": {"AutomaticallyAddToCollection": True},
+    }]
+    users = [{"Id": "42", "Name": "admin", "Policy": JELLYFIN_ADMIN_POLICY}]
 
     def handler(request):
         if request.url.path == "/Users":
@@ -513,6 +685,8 @@ async def test_jellyfin_library_adoption_and_missing_create_preserves_users():
                     "Name": request.url.params["name"],
                     "ItemId": "15",
                     "Locations": [item["Path"] for item in body["LibraryOptions"]["PathInfos"]],
+                    "CollectionType": request.url.params["collectionType"],
+                    "LibraryOptions": body["LibraryOptions"],
                 }
             )
             return httpx.Response(204)
@@ -644,6 +818,19 @@ async def test_fresh_native_closed_loop_discovery_reapply_and_verify():
                             "cutoff": 7,
                         },
                     )
+                if endpoint == "notification":
+                    return httpx.Response(200, json=[{
+                        "implementation": "MediaBrowser",
+                        "configContract": "MediaBrowserSettings",
+                        "supportsOnDownload": True,
+                        "supportsOnUpgrade": True,
+                        "supportsOnRename": True,
+                        "onDownload": False, "onUpgrade": False, "onRename": False,
+                        "fields": [{"name": name, "value": ""} for name in (
+                            "host", "port", "useSsl", "urlBase", "apiKey", "notify",
+                            "updateLibrary", "mapFrom", "mapTo",
+                        )],
+                    }])
                 if endpoint == "downloadclient":
                     category = "movieCategory" if host == "radarr" else "tvCategory"
                     return httpx.Response(
@@ -693,8 +880,9 @@ async def test_fresh_native_closed_loop_discovery_reapply_and_verify():
                     200, json={"StartupWizardCompleted": state[host]["initialized"]}
                 )
             if path == "/System/Info":
+                authorized = 'Token="actual-jellyfin"' in request.headers.get("Authorization", "")
                 return httpx.Response(
-                    200 if request.headers.get("X-Emby-Token") == "actual-jellyfin" else 401,
+                    200 if authorized else 401,
                     json={},
                 )
             if path == "/Users/AuthenticateByName":
@@ -704,14 +892,22 @@ async def test_fresh_native_closed_loop_discovery_reapply_and_verify():
             if path.startswith("/Startup/"):
                 return httpx.Response(204)
             if path == "/Users":
-                return httpx.Response(200, json=[{"Id": "1", "Name": "admin"}])
+                return httpx.Response(200, json=[{
+                    "Id": "1", "Name": "admin", "Policy": JELLYFIN_ADMIN_POLICY,
+                }])
             if method == "POST":
                 assert request.url.params["refreshLibrary"] == "true"
+                if request.url.params["collectionType"] == "movies":
+                    assert body["LibraryOptions"]["AutomaticallyAddToCollection"] is True
+                else:
+                    assert "AutomaticallyAddToCollection" not in body["LibraryOptions"]
                 state[host]["libraries"].append(
                     {
                         "Name": request.url.params["name"],
                         "ItemId": str(len(state[host]["libraries"]) + 41),
                         "Locations": [item["Path"] for item in body["LibraryOptions"]["PathInfos"]],
+                        "CollectionType": request.url.params["collectionType"],
+                        "LibraryOptions": body["LibraryOptions"],
                     }
                 )
             return httpx.Response(200, json=state[host]["libraries"])
@@ -741,7 +937,7 @@ async def test_fresh_native_closed_loop_discovery_reapply_and_verify():
             if not state[host]["connection"]["ip"]:
                 if "hostname" not in body:
                     return httpx.Response(500)
-                assert body["hostname"] == "jellyfin"
+                assert body["hostname"] == "integration-proxy"
                 state[host]["connection"].update(
                     ip=body["hostname"],
                     port=body["port"],
@@ -792,9 +988,19 @@ async def test_fresh_native_closed_loop_discovery_reapply_and_verify():
     assert all(item.status == "verified" for item in first), first
     updates = await discover_native_credentials(env, transport=transport)
     env.update(updates)
-    count = len(mutations)
     second = await apply_native_settings(env, transport=transport)
-    assert all(item.status == "verified" and not item.changes for item in second), second
+    assert all(item.status == "verified" for item in second), second
+    # Discovery replaced the bootstrap token; both import notifications adopt it.
+    assert {item.service for item in second if item.changes} == {"radarr", "sonarr"}
+    for service in ("radarr", "sonarr"):
+        fields = {
+            field["name"]: field["value"]
+            for field in state[service]["notification"][0]["fields"]
+        }
+        assert fields["apiKey"] == "actual-jellyfin"
+    count = len(mutations)
+    third = await apply_native_settings(env, transport=transport)
+    assert all(item.status == "verified" and not item.changes for item in third), third
     assert len(mutations) == count
     verified = await verify_native_settings(env, transport=transport)
     assert all(item.status == "verified" for item in verified), verified
@@ -837,7 +1043,8 @@ async def test_credential_discovery_keeps_valid_keys_without_reauth():
     def handler(request):
         assert request.method == "GET"
         if request.url.host == "jellyfin":
-            assert request.headers["X-Emby-Token"] == "existing-token"
+            assert 'Token="existing-token"' in request.headers["Authorization"]
+            assert "X-Emby-Token" not in request.headers
             return httpx.Response(200, json={"Id": "server"})
         assert request.headers["X-Api-Key"] == "existing-key"
         return httpx.Response(200, json={"apiKey": "existing-key"})
@@ -872,9 +1079,9 @@ async def test_seerr_bootstrap_plan_no_mutation_and_sync_preserves_ids():
             payload = json.loads(request.content)
             if "hostname" not in payload:
                 return httpx.Response(500)
-            assert payload["hostname"] == "jellyfin"
-            assert payload["port"] == 8096
-            assert payload["urlBase"] == ""
+            assert payload["hostname"] == "integration-proxy"
+            assert payload["port"] == 8787
+            assert payload["urlBase"] == "/jellyfin"
             assert payload["useSsl"] is False
             return httpx.Response(
                 200, json={"id": 1}, headers={"set-cookie": "connect.sid=fixture; Path=/"}
@@ -1125,7 +1332,7 @@ async def test_jellyfin_interrupted_fresh_apply_authenticates_invalid_placeholde
             return httpx.Response(200, json={"StartupWizardCompleted": True})
         if request.url.path == "/System/Info":
             return httpx.Response(
-                200 if request.headers.get("X-Emby-Token") == "fixture-valid" else 401,
+                200 if 'Token="fixture-valid"' in request.headers.get("Authorization", "") else 401,
                 json={},
             )
         if request.url.path == "/Users/AuthenticateByName":
@@ -1138,12 +1345,13 @@ async def test_jellyfin_interrupted_fresh_apply_authenticates_invalid_placeholde
     }
     async with httpx.AsyncClient(
         base_url="http://jellyfin",
-        headers={"X-Emby-Token": "placeholder"},
+        headers={"Authorization": 'MediaBrowser Token="placeholder"'},
         transport=httpx.MockTransport(handler),
     ) as client:
         assert await bootstrap_jellyfin(settings, client, "apply") is None
         assert await bootstrap_jellyfin(settings, client, "apply") is None
-        assert client.headers["X-Emby-Token"] == "fixture-valid"
+        assert 'Token="fixture-valid"' in client.headers["Authorization"]
+        assert "X-Emby-Token" not in client.headers
     assert calls.count("/Users/AuthenticateByName") == 1
 
 
@@ -1181,7 +1389,8 @@ async def test_jellyfin_startup_only_sets_password_once_and_authenticates_existi
         assert writes == []
         assert await bootstrap_jellyfin(settings, client, "apply") is None
         assert await bootstrap_jellyfin(settings, client, "apply") is None
-        assert client.headers["X-Emby-Token"] == "fixture-private-token"
+        assert 'Token="fixture-private-token"' in client.headers["Authorization"]
+        assert "X-Emby-Token" not in client.headers
     assert writes.count("/Startup/User") == 1
     assert "fixture-private" not in repr(planned)
 
@@ -1195,7 +1404,7 @@ async def test_bazarr_language_profile_merges_all_ids_and_is_idempotent():
         {
             "profileId": 44,
             "name": "Manual",
-            "items": [],
+            "items": [{"id": 1, "language": "pb", "audio_exclude": "True"}],
             "cutoff": None,
             "mustContain": [],
             "mustNotContain": [],
@@ -1253,8 +1462,12 @@ async def test_bazarr_language_profile_merges_all_ids_and_is_idempotent():
     assert first.status == second.status == "verified"
     assert len(writes) == 1
     assert profiles[0]["profileId"] == 44
+    assert profiles[0]["items"] == [
+        {"id": 1, "language": "pb", "audio_exclude": "True"}
+    ]
     assert profiles[1]["profileId"] == 88
     assert profiles[1]["items"][0]["language"] == "pb"
+    assert all(item["audio_exclude"] == "False" for item in profiles[1]["items"])
     assert not second.changes
 
 
@@ -1282,9 +1495,9 @@ async def test_seerr_arr_connection_uses_adopted_quality_id_and_no_autonomous_se
         return httpx.Response(
             200,
             json={
-                "ip": "jellyfin",
-                "port": 8096,
-                "urlBase": "",
+                "ip": "integration-proxy",
+                "port": 8787,
+                "urlBase": "/jellyfin",
                 "useSsl": False,
                 "libraries": [{"id": "fixture-library", "name": "Movies", "enabled": True}],
             },

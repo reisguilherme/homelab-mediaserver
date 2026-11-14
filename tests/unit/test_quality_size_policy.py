@@ -12,13 +12,13 @@ def release(resolution=1080):
 
 
 def test_small_1080p_encode_is_rejected_for_full_length_episode():
-    policy = ReleasePolicy()
+    policy = ReleasePolicy(minimum_mib_per_min=((720, 10), (1080, 20), (2160, 50)))
     assert not policy.accepts_size(release(), video_bytes=400_000_000, runtime_minutes=45)
     assert policy.accepts_size(release(), video_bytes=1_800_000_000, runtime_minutes=45)
 
 
 def test_runtime_scales_floor_instead_of_fixed_episode_size():
-    policy = ReleasePolicy()
+    policy = ReleasePolicy(minimum_mib_per_min=((720, 10), (1080, 20), (2160, 50)))
     assert policy.accepts_size(release(), video_bytes=400_000_000, runtime_minutes=10)
     assert not policy.accepts_size(release(), video_bytes=400_000_000, runtime_minutes=45)
     assert policy.accepts_size(release(2160), video_bytes=100_000_000_000, runtime_minutes=120)
@@ -26,7 +26,7 @@ def test_runtime_scales_floor_instead_of_fixed_episode_size():
 
 @pytest.mark.parametrize("runtime", [None, 0, -1, True, "45", float("nan"), float("inf")])
 def test_unknown_duration_cannot_prove_quality_floor(runtime):
-    assert not ReleasePolicy().accepts_size(
+    assert not ReleasePolicy(minimum_mib_per_min=((1080, 20),)).accepts_size(
         release(), video_bytes=1_800_000_000, runtime_minutes=runtime
     )
 

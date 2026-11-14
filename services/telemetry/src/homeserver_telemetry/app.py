@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -9,22 +8,15 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from .downloads import DownloadsProxy, downloads_router, public_path
 from .status import StatusProvider
-
-_TAILSCALE_HOSTNAME_PATTERN = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){2,}ts\.net")
-
-
-def _service_hostname() -> str | None:
-    hostname = os.environ.get("HOMESERVER_TAILSCALE_HOSTNAME", "").strip().rstrip(".").lower()
-    if len(hostname) <= 253 and _TAILSCALE_HOSTNAME_PATTERN.fullmatch(hostname):
-        return hostname
-    return None
 
 
 def create_app(
     *,
     snapshot_provider: Callable[[], dict[str, Any]] | None = None,
     status_provider: Callable[[], dict[str, Any]] | None = None,
+    downloads_proxy: DownloadsProxy | None = None,
 ) -> FastAPI:
     if status_provider is None:
         status_provider = StatusProvider(
@@ -40,6 +32,14 @@ def create_app(
             ),
         )
     app = FastAPI(title="HomeServer telemetry", version="1")
+    if downloads_proxy is None:
+        downloads_proxy = DownloadsProxy(
+            username=os.environ.get("HOMESERVER_ADMIN_USERNAME", ""),
+            password=os.environ.get("HOMESERVER_ADMIN_PASSWORD", ""),
+            admin_token=os.environ.get("HOMESERVER_ADMIN_TOKEN", ""),
+            csrf_token=os.environ.get("HOMESERVER_CSRF_TOKEN", ""),
+        )
+    app.include_router(downloads_router(downloads_proxy))
 
     @app.get("/health/live")
     def live() -> dict[str, str]:
@@ -71,21 +71,22 @@ def create_app(
     def status_page(request: Request) -> HTMLResponse:
         template = Path(__file__).parent / "templates" / "status.html"
         page = template.read_text(encoding="utf-8")
-        hostname = _service_hostname() or request.url.hostname
+        page = page.replace("{{URL_BASE}}", public_path(request))
+        hostname = request.url.hostname
         if hostname and ":" in hostname:
             hostname = f"[{hostname}]"
         page = page.replace(
             "{{SERVICE_ACCESS_STATE}}",
             "Painéis dos serviços",
         )
-        for name, key, port in (
-            ("JELLYFIN", "JELLYFIN", 8096),
-            ("SEERR", "SEERR", 5055),
-            ("SONARR", "SONARR", 8989),
-            ("RADARR", "RADARR", 7878),
-            ("QBITTORRENT", "QBIT_MONITOR", 18080),
-            ("PROWLARR", "PROWLARR", 9696),
-            ("BAZARR", "BAZARR", 6767),
+        for name, key, path in (
+            ("JELLYFIN", "JELLYFIN", "/jellyfin/"),
+            ("SEERR", "SEERR", "/seer"),
+            ("SONARR", "SONARR", "/sonarr/"),
+            ("RADARR", "RADARR", "/radarr/"),
+            ("QBITTORRENT", "QBIT_MONITOR", "/qbittorrent/"),
+            ("PROWLARR", "PROWLARR", "/prowlarr/"),
+            ("BAZARR", "BAZARR", "/bazarr/"),
         ):
             from html import escape
             from urllib.parse import urlsplit
@@ -94,7 +95,7 @@ def create_app(
             parsed = urlsplit(url)
             if not (parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username):
                 url = (
-                    f"http://{hostname}:{os.environ.get(f'HOMESERVER_{key}_PORT', str(port))}/"
+                    f"{request.url.scheme}://{hostname}{path}"
                     if hostname
                     else ""
                 )

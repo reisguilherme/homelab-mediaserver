@@ -91,9 +91,10 @@ def test_status_dashboard_serves_read_only_page_and_live_snapshot() -> None:
     assert response.headers["cache-control"] == "no-store"
 
 
-def test_status_dashboard_links_native_services_through_tailscale(monkeypatch) -> None:
-    monkeypatch.setenv("HOMESERVER_TAILSCALE_HOSTNAME", "server.example.ts.net")
-    client = TestClient(create_app(snapshot_provider=lambda: _snapshot()))
+def test_status_dashboard_links_services_on_current_host_without_ports(monkeypatch) -> None:
+    monkeypatch.setenv("HOMESERVER_TAILSCALE_HOSTNAME", "unused.example.ts.net")
+    client = TestClient(create_app(snapshot_provider=lambda: _snapshot()),
+                        base_url="http://server.example.ts.net:8081")
 
     page = client.get("/ui/status")
     cards = _service_cards(page.text)
@@ -109,11 +110,11 @@ def test_status_dashboard_links_native_services_through_tailscale(monkeypatch) -
             "service-qbittorrent",
         )
     } == {
-        "service-jellyfin": "http://server.example.ts.net:8096/",
-        "service-seerr": "http://server.example.ts.net:5055/",
-        "service-sonarr": "http://server.example.ts.net:8989/",
-        "service-radarr": "http://server.example.ts.net:7878/",
-        "service-qbittorrent": "http://server.example.ts.net:18080/",
+        "service-jellyfin": "http://server.example.ts.net/jellyfin/",
+        "service-seerr": "http://server.example.ts.net/seer",
+        "service-sonarr": "http://server.example.ts.net/sonarr/",
+        "service-radarr": "http://server.example.ts.net/radarr/",
+        "service-qbittorrent": "http://server.example.ts.net/qbittorrent/",
     }
     for name in (
         "service-jellyfin",
@@ -145,8 +146,19 @@ def test_status_dashboard_uses_request_host_without_tailscale_configuration(monk
             "service-radarr",
             "service-qbittorrent",
         ):
-            assert cards[name]["href"].startswith("http://testserver:")
+            assert cards[name]["href"].startswith("http://testserver/")
             assert cards[name]["target"] == "_blank"
         assert "Painéis dos serviços" in page.text
         if hostname is not None:
             assert hostname not in page.text
+
+
+def test_status_served_under_prefix_keeps_fetch_and_download_links_under_prefix():
+    client = TestClient(create_app(status_provider=lambda: {}))
+    page = client.get("/", headers={"X-HomeServer-Path": "/status"})
+    assert page.status_code == 200
+    assert "fetch('/status/api/v1/status'" in page.text
+    assert 'href="/status/ui/downloads"' in page.text
+    assert "{{URL_BASE}}" not in page.text
+    injected = client.get("/", headers={"X-HomeServer-Path": "https://evil.example"})
+    assert "evil.example" not in injected.text

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 import time
 from collections.abc import Sequence
+from datetime import UTC
+from email.utils import parsedate_to_datetime
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -15,6 +18,10 @@ from homeserver_control.domain.subtitle_content import MAX_SRT_BYTES, normalize_
 
 from .subtitle_language import SubtitlePolicy
 
+LOGGER = logging.getLogger(__name__)
+# With no usable provider deadline, probe again after the existing search-cache
+# horizon rather than assuming when a daily quota resets.
+_QUOTA_RETRY_SECONDS = 900
 _DOWNLOAD_PATH = re.compile(r"/subtitle/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+")
 _EPISODE_TAG = re.compile(r"(?<![a-z0-9])s(\d{1,2})e(\d{1,3})(?![a-z0-9])", re.I)
 _MOVIE_EN_US_SUFFIX = re.compile(r"[._ -]+en[._ -]?us$", re.I)
@@ -161,6 +168,38 @@ class SubDLSource:
         self._search_cache: dict[
             tuple[int, int | None, int | None, str], tuple[float, list[object]]
         ] = {}
+        self._quota_retry_at = 0.0
+
+    def _defer_quota(self, response: httpx.Response, reason: str) -> None:
+        retry_after = response.headers.get("Retry-After", "")
+        try:
+            delay = float(retry_after)
+        except ValueError:
+            try:
+                deadline = parsedate_to_datetime(retry_after)
+                if deadline.tzinfo is None:
+                    deadline = deadline.replace(tzinfo=UTC)
+                delay = deadline.timestamp() - time.time()
+            except (ValueError, TypeError, OverflowError):
+                delay = _QUOTA_RETRY_SECONDS
+        if not math.isfinite(delay) or delay <= 0:
+            delay = _QUOTA_RETRY_SECONDS
+        self._quota_retry_at = max(self._quota_retry_at, time.monotonic() + delay)
+        LOGGER.warning(
+            "SubDL quota deferred (%s, HTTP %d); retry in %.0f seconds",
+            reason, response.status_code, delay,
+        )
+
+    def _search_payload(self, response: httpx.Response) -> object:
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        daily_limit = isinstance(payload, dict) and payload.get("error") == "daily_limit"
+        if response.status_code == 429 or daily_limit:
+            self._defer_quota(response, "daily_limit" if daily_limit else "http_429")
+            return None
+        return payload if response.status_code == 200 else None
 
     async def fetch_movie(
         self,
@@ -185,6 +224,8 @@ class SubDLSource:
             raise ValueError("invalid movie release titles")
         duration = _positive_finite(movie_duration_seconds)
         if match_mode == "same_duration" and duration is None:
+            return None
+        if self._quota_retry_at > time.monotonic():
             return None
         wanted = {_release_key(title) for title in release_titles if title}
         editions = frozenset().union(*(_movie_editions(title) for title in release_titles))
@@ -214,9 +255,7 @@ class SubDLSource:
                     },
                     follow_redirects=False,
                 )
-                if response.status_code != 200:
-                    return None
-                payload = response.json()
+                payload = self._search_payload(response)
             except (httpx.HTTPError, ValueError):
                 return None
             if not isinstance(payload, dict) or payload.get("status") is not True:
@@ -306,6 +345,9 @@ class SubDLSource:
                     "https://dl.subdl.com" + path,
                     follow_redirects=False,
                 ) as download:
+                    if download.status_code == 429:
+                        self._defer_quota(download, "http_429")
+                        return None
                     if download.status_code != 200:
                         continue
                     content_length = download.headers.get("content-length")
@@ -341,12 +383,16 @@ class SubDLSource:
         episode: int | None = None,
         language: str = "BR_PT",
         match_mode: str | None = None,
+        episode_duration_seconds: float | None = None,
     ) -> bytes | None:
         if language not in {"BR_PT", "EN"}:
             raise ValueError("unsupported SubDL language")
         if match_mode not in (None, "exact", "same_duration"):
             raise ValueError("unsupported episode subtitle match mode")
         is_tv = season is not None or episode is not None
+        duration = _positive_finite(episode_duration_seconds)
+        if episode_duration_seconds is not None and (not is_tv or duration is None):
+            return None
         if (
             tmdb_id <= 0
             or not release_title
@@ -354,6 +400,8 @@ class SubDLSource:
             and (season is None or episode is None or season < 0 or episode <= 0)
         ):
             raise ValueError("invalid SubDL media identity")
+        if self._quota_retry_at > time.monotonic():
+            return None
         params: dict[str, str | int] = {
             "api_key": self.api_key,
             "tmdb_id": tmdb_id,
@@ -376,9 +424,7 @@ class SubDLSource:
                     params=params,
                     follow_redirects=False,
                 )
-                if response.status_code != 200:
-                    return None
-                payload = response.json()
+                payload = self._search_payload(response)
             except (httpx.HTTPError, ValueError):
                 return None
             if not isinstance(payload, dict) or payload.get("status") is not True:
@@ -453,6 +499,9 @@ class SubDLSource:
                     "https://dl.subdl.com" + path,
                     follow_redirects=False,
                 ) as download:
+                    if download.status_code == 429:
+                        self._defer_quota(download, "http_429")
+                        return None
                     if download.status_code != 200:
                         continue
                     content_length = download.headers.get("content-length")
@@ -468,7 +517,11 @@ class SubDLSource:
                 content = b"".join(chunks)
                 if total == size:
                     normalized = normalize_srt(content)
-                    if normalized is not None:
+                    if normalized is not None and (
+                        duration is None or _movie_timing_plausible(
+                            normalized, duration, self.policy.credits_margin_seconds,
+                        )
+                    ):
                         return normalized
             except (httpx.HTTPError, ValueError):
                 continue

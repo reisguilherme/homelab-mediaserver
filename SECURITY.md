@@ -5,9 +5,11 @@ Não use senhas reais nos exemplos, fixtures, screenshots, issues ou logs.
 O `.gitignore` e o contexto Docker excluem estado privado; confira isso antes
 de publicar alterações.
 
-Os painéis são usados na rede doméstica ou pelo Tailscale. A API nativa do
-qBittorrent fica interna ao Docker; o monitor passa por proxy somente leitura
-e mantém login nativo. Downloads passam pelo gateway com capacidade real.
+Os painéis são usados na rede doméstica ou pelo Tailscale. A porta nativa do
+qBittorrent fica interna ao Docker; o proxy administrativo em loopback/Tailscale
+mantém login nativo e oferece controle completo ao proprietário. Downloads
+automatizados passam pelo gateway com capacidade real; comandos manuais no
+painel qBit são diretos.
 
 Se um segredo for publicado, revogue-o no serviço e troque o valor no `.env`.
 Excluir o arquivo do último commit não remove cópias antigas. Diagnósticos de

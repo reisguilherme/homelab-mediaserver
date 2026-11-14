@@ -18,6 +18,7 @@ from pathlib import Path
 from uuid import uuid4
 
 CAPABILITIES = ('hardlink', 'rename', 'unlink', 'ownership', 'exclusive_placement')
+POOL_IDS = ('ssd', 'hdd', 'hdd2', 'hdd3')
 
 
 def no_symlinks(path):
@@ -122,6 +123,9 @@ def probe_mmap(path):
 
 def probe(pool, other, view):
     """A child does real operations as downloader through the exact logical view."""
+    others = [other] if isinstance(other, Path) else list(other)
+    if pool in others or len(set(others)) != len(others):
+        raise ValueError('probe requires distinct counterpart roots')
     identity = 'storage-probe-' + uuid4().hex
     source_relative = Path('torrents/.placements') / identity
     media_relative = Path('media') / ('.' + identity)
@@ -146,8 +150,9 @@ def probe(pool, other, view):
                 first, second = physical_source.stat(), physical_link.stat()
                 if ((first.st_dev, first.st_ino) != (second.st_dev, second.st_ino)
                         or first.st_uid != 1000 or first.st_gid != 1000
-                        or first.st_nlink != 2 or (other / source_relative).exists()
-                        or (other / media_relative).exists()
+                        or first.st_nlink != 2
+                        or any((root / source_relative).exists()
+                               or (root / media_relative).exists() for root in others)
                         or physical_source.read_bytes() != mmap_payload
                         or link.read_bytes() != mmap_payload):
                     raise ValueError('hardlink/ownership/pool affinity probe failed')
@@ -157,12 +162,13 @@ def probe(pool, other, view):
                     raise ValueError('rename changed physical identity')
                 renamed.unlink()
                 source.unlink()
-                for parent in (pool / 'torrents/.placements', other / 'torrents/.placements',
-                               view / 'torrents/.placements'):
+                for parent in [root / 'torrents/.placements' for root in (pool, *others, view)]:
+                    forbidden = parent / ('forbidden-' + identity)
                     try:
-                        (parent / ('forbidden-' + identity)).mkdir()
+                        forbidden.mkdir()
                     except PermissionError:
                         continue
+                    forbidden.rmdir()
                     raise ValueError('downloader can recreate an unauthorized placement')
                 os._exit(0)
             except BaseException as exc:
@@ -179,25 +185,39 @@ def probe(pool, other, view):
 
 
 def publish_registry(output, identities, capabilities):
-    if any(capabilities[p].get(key) is not True for p in ('ssd', 'hdd') for key in CAPABILITIES):
+    if ((set(identities) != {'hdd3'} and not {'ssd', 'hdd'}.issubset(identities))
+            or set(identities) - set(POOL_IDS)
+            or len(set(identities.values())) != len(identities)):
+        raise ValueError('pools require distinct physical UUIDs and the fixed layout')
+    ordered = [name for name in POOL_IDS if name in identities]
+    if any(capabilities.get(p, {}).get(key) is not True
+           for p in ordered for key in CAPABILITIES):
         raise ValueError('filesystem capability probe incomplete')
+    document = {'version': 1, 'pools': [
+        {'pool_id': name, 'filesystem_id': identities[name], 'capabilities': capabilities[name]}
+        for name in ordered]}
+    publish_text(output, json.dumps(document, indent=2) + '\n', mode=0o600)
+
+
+def publish_text(output, content, *, mode):
     no_symlinks(output)
     if not output.parent.is_dir():
         raise ValueError('registry output parent must already exist')
-    document = {'version': 1, 'pools': [
-        {'pool_id': name, 'filesystem_id': identities[name], 'capabilities': capabilities[name]}
-        for name in ('ssd', 'hdd')]}
     descriptor, temporary = tempfile.mkstemp(prefix='.storage-', dir=output.parent)
     try:
-        with os.fdopen(descriptor, 'w') as stream:
-            json.dump(document, stream, indent=2)
-            stream.write('\n')
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+            stream.write(content)
             stream.flush()
-            os.fsync(stream.fileno())
             if os.geteuid() == 0:
                 os.fchown(stream.fileno(), 1000, 1000)
-        os.chmod(temporary, 0o600)
+            os.fchmod(stream.fileno(), mode)
+            os.fsync(stream.fileno())
         os.replace(temporary, output)
+        parent = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -205,40 +225,63 @@ def publish_registry(output, identities, capabilities):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--ssd-uuid', required=True)
-    parser.add_argument('--hdd-uuid', required=True)
+    parser.add_argument('--ssd-uuid',
+                        help='required with --hdd-uuid for a legacy multi-pool layout')
+    parser.add_argument('--hdd-uuid',
+                        help='required with --ssd-uuid for a legacy multi-pool layout')
+    parser.add_argument('--hdd2-uuid',
+                        help='optional second USB HD; requires the extra Compose override')
+    parser.add_argument('--hdd3-uuid',
+                        help='alone selects singleton hdd3; otherwise adds the third USB HD')
     parser.add_argument('--output', type=Path,
                         default=Path('/srv/appdata/control/storage.pending.json'))
     parser.add_argument('--check', action='store_true',
                         help='read-only mount and guard checks; no probes or registry')
     args = parser.parse_args(argv)
     try:
-        if args.ssd_uuid == args.hdd_uuid:
+        identities = {name: value for name, value in
+                      (('ssd', args.ssd_uuid), ('hdd', args.hdd_uuid)) if value is not None}
+        if args.hdd2_uuid:
+            identities['hdd2'] = args.hdd2_uuid
+        if args.hdd3_uuid:
+            identities['hdd3'] = args.hdd3_uuid
+        if set(identities) != {'hdd3'} and not {'ssd', 'hdd'}.issubset(identities):
+            raise ValueError('SSD and first HD, or singleton hdd3, are required')
+        if len(set(identities.values())) != len(identities):
             raise ValueError('pools require distinct physical UUIDs')
-        for value in (args.ssd_uuid, args.hdd_uuid):
+        for value in identities.values():
             if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', value):
                 raise ValueError('invalid filesystem UUID')
-        ssd, external, view = Path('/srv/data'), Path('/srv/external'), Path('/srv/media-view')
-        hdd = external / 'homeserver'
-        identities = {'ssd': args.ssd_uuid, 'hdd': args.hdd_uuid}
-        for target, name in ((ssd, 'ssd'), (external, 'hdd')):
+        view = Path('/srv/media-view')
+        mount_paths = {'ssd': '/srv/data', 'hdd': '/srv/external',
+                       'hdd2': '/srv/external2', 'hdd3': '/srv/external3'}
+        mounts_by_pool = {name: Path(mount_paths[name]) for name in POOL_IDS if name in identities}
+        roots = {name: mount if name == 'ssd' else mount / 'homeserver'
+                 for name, mount in mounts_by_pool.items()}
+        for name, target in mounts_by_pool.items():
             verify_physical(target, identities[name])
-        verify_view(view, (ssd, hdd))
+        verify_view(view, tuple(roots.values()))
         if args.check:
-            for root in (ssd, hdd):
+            for root in roots.values():
                 guard(root / 'torrents/.placements')
             print('storage mounts and guards verified; no capability probes or writes performed')
             return 0
         if os.geteuid() != 0:
             raise ValueError('installer probes require root to drop to UID/GID 1000')
-        for root in (ssd, hdd):
+        for root in roots.values():
             project_directories(root)
-        capabilities = {'ssd': probe(ssd, hdd, view), 'hdd': probe(hdd, ssd, view)}
+        capabilities = {
+            name: probe(root, [other for other in roots.values() if other != root], view)
+            for name, root in roots.items()
+        }
         # Revalidate mount identities after fixtures, before publishing evidence.
-        verify_physical(ssd, args.ssd_uuid)
-        verify_physical(external, args.hdd_uuid)
-        verify_view(view, (ssd, hdd))
+        for name, target in mounts_by_pool.items():
+            verify_physical(target, identities[name])
+        verify_view(view, tuple(roots.values()))
         publish_registry(args.output, identities, capabilities)
+        if set(identities) == {'hdd3'}:
+            publish_text(args.output.parent / 'storage-native.identity',
+                         f'homeserver-single-media-v1 hdd3 {identities["hdd3"]}\n', mode=0o644)
         print(f'storage capability probes passed; private registry staged at {args.output}')
         return 0
     except (OSError, ValueError) as exc:

@@ -16,6 +16,8 @@ from typing import Any
 
 import httpx
 
+from homeserver_common.jellyfin_auth import jellyfin_headers
+from homeserver_common.seerr_csrf import SeerrClient
 from homeserver_common.storage import StorageRegistry, StorageUnavailable
 from homeserver_control.gateway.permits import PermitRegistry
 from homeserver_control.persistence.deletion_jobs import DeletionJobStore
@@ -104,8 +106,10 @@ class DeletionCoordinator:
         self.sonarr_headers = {"X-Api-Key": sonarr_api_key}
         self.seerr_headers = {"X-Api-Key": seerr_api_key}
         self.gateway_headers = {"X-Arr-Token": arr_token}
-        self.jellyfin_headers = {"X-Emby-Token": jellyfin_api_key}
-        self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(15.0))
+        self.jellyfin_headers = jellyfin_headers(jellyfin_api_key)
+        self.client = SeerrClient(
+            client or httpx.AsyncClient(timeout=httpx.Timeout(15.0)), base_url=self.seerr_url,
+        )
         self.mount_check = mount_check or os.path.ismount
         self._jellyfin_notify_at: dict[str, float] = {}
         self._jellyfin_refresh_at: dict[str, float] = {}
@@ -173,12 +177,13 @@ class DeletionCoordinator:
         if self.storage_registry is None:
             return filesystem_id == self.filesystem_id
         # A season reservation predates (and does not choose) each episode pool.
-        # Accept its legacy SSD device only after verifying the registered SSD.
+        # Accept its primary device only after verifying the registered primary.
         try:
-            sample = self.storage_registry.inspect('ssd')
-            device = self.storage_registry.pools['ssd'].root.stat().st_dev
+            primary = self.storage_registry.primary_pool_id
+            sample = self.storage_registry.inspect(primary)
+            device = self.storage_registry.pools[primary].root.stat().st_dev
         except (StorageUnavailable, OSError) as error:
-            raise DeletionRetryable('reservation physical SSD identity unavailable') from error
+            raise DeletionRetryable('reservation physical primary identity unavailable') from error
         return filesystem_id in {sample.filesystem_id, f'device:{device}'}
 
     @staticmethod

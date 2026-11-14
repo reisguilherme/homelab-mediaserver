@@ -17,10 +17,12 @@ from pydantic import BaseModel, Field
 from homeserver_common.filesystem import filesystem_identity
 from homeserver_common.storage import load_storage_registry
 from homeserver_control.api.deletion_capture import DeletionAdmission, DeletionCaptureError
+from homeserver_control.api.downloads import DownloadControl
 from homeserver_control.domain.deletion_plan import DeletionPlanError, DeletionPlanner
 from homeserver_control.persistence.db import ReservationRepository
 from homeserver_control.persistence.deletion_jobs import DeletionJobStore
 from homeserver_control.persistence.heartbeat import WorkerHeartbeatStore
+from homeserver_control.persistence.source_requests import SourceReplacementRequests
 from homeserver_control.recovery import recovery_mode_blocks
 
 CapacityProvider = Callable[[], dict[str, Any]]
@@ -104,6 +106,7 @@ class ControlState:
     maintenance_path: str | Path | None = None
     expected_filesystem_id: str | None = None
     capacity_max_age_seconds: float = 30
+    downloads: DownloadControl | None = None
 
     def __post_init__(self) -> None:
         if self.media_roots:
@@ -122,6 +125,10 @@ class DeletionConfirmRequest(BaseModel):
     token: str = Field(min_length=1, max_length=200)
     version: str = Field(min_length=1, max_length=128)
     operation_id: str = Field(min_length=1, max_length=128)
+
+
+class ReplacementRequest(BaseModel):
+    permit_id: str = Field(min_length=1, max_length=100)
 
 
 def _configured(value: str) -> bool:
@@ -143,9 +150,11 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
                 "HOMESERVER_RECOVERY_MODE", "/var/lib/homeserver/RECOVERY_MODE"
             ),
             worker_health_required=True,
-            expected_filesystem_id=(storage_registry.pools['ssd'].filesystem_id
-                                    if storage_registry is not None else
-                                    os.environ.get("HOMESERVER_MEDIA_UUID") or None),
+            expected_filesystem_id=(
+                storage_registry.primary_pool.filesystem_id
+                if storage_registry is not None
+                else os.environ.get("HOMESERVER_MEDIA_UUID") or None
+            ),
             capacity_max_age_seconds=float(
                 os.environ.get("HOMESERVER_CAPACITY_SNAPSHOT_MAX_AGE_SECONDS", "30")
             ),
@@ -169,7 +178,7 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
             os.environ.get("HOMESERVER_MEDIA_UUID"),
         )
         if storage_registry is not None:
-            media_uuid = storage_registry.pools['ssd'].filesystem_id
+            media_uuid = storage_registry.primary_pool.filesystem_id
         if media_uuid and state.db_path is not None:
             deletion_jobs = DeletionJobStore(state.db_path)
             deletion_jobs.initialize()
@@ -190,6 +199,15 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
             )
 
     app = FastAPI(title="HomeServer control API", version="1")
+    if state.downloads is None and state.db_path and os.environ.get("HOMESERVER_ARR_TOKEN"):
+        state.downloads = DownloadControl(
+            db_path=state.db_path,
+            requests=SourceReplacementRequests(state.db_path),
+            gateway_url=os.environ.get(
+                "HOMESERVER_QBIT_GATEWAY_URL", "http://download-gateway:8081"
+            ),
+            arr_token=os.environ["HOMESERVER_ARR_TOKEN"],
+        )
 
     def worker_is_ready() -> bool:
         if not state.worker_health_required:
@@ -276,6 +294,33 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
         require_admin(x_admin_token)
         return {"items": state.queue[:limit], "next_cursor": None}
 
+    @app.get("/api/v1/downloads")
+    async def downloads(x_admin_token: str | None = Header(default=None)) -> dict[str, Any]:
+        require_admin(x_admin_token)
+        if state.downloads is None:
+            raise HTTPException(503, "download controls unavailable")
+        try:
+            return await state.downloads.list()
+        except Exception as error:
+            raise HTTPException(503, "download inventory unavailable") from error
+
+    @app.post("/api/v1/downloads/{infohash}/replace", status_code=202)
+    async def replace_source(
+        infohash: str,
+        payload: ReplacementRequest,
+        x_admin_token: str | None = Header(default=None),
+        x_csrf_token: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        require_admin(x_admin_token, csrf=x_csrf_token, mutation=True)
+        if state.downloads is None:
+            raise HTTPException(503, "download controls unavailable")
+        try:
+            return await state.downloads.request_replacement(infohash, payload.permit_id)
+        except HTTPException:
+            raise
+        except Exception as error:
+            raise HTTPException(503, "source replacement admission unavailable") from error
+
     @app.delete("/Items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
     @app.delete("/{prefix:path}/Items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
     async def jellyfin_delete(
@@ -287,15 +332,39 @@ def create_app(*, state: ControlState | None = None) -> FastAPI:
     ) -> Response:
         if prefix and any(part in {"", ".", ".."} for part in prefix.split("/")):
             raise HTTPException(status_code=404, detail="invalid Jellyfin base path")
-        if not admission_enabled() or state.deletion_admission is None:
+        if state.deletion_admission is None:
             raise HTTPException(status_code=503, detail="coordinated deletion unavailable")
         auth = authorization or x_emby_authorization or ""
+        auth = re.sub(r'^(?i:MediaBrowser)\s+', '', auth)
         match = re.search(r'(?:^|,)\s*Token="([^"]+)"', auth)
         user_token = x_emby_token or (match.group(1) if match else "")
         try:
-            await state.deletion_admission.capture(item_id, user_token)
+            if admission_enabled():
+                await state.deletion_admission.capture(item_id, user_token)
+            else:
+                await state.deletion_admission.capture(
+                    item_id, user_token, media_deletion_enabled=False
+                )
         except DeletionCaptureError as error:
             raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @app.delete("/Items", status_code=status.HTTP_204_NO_CONTENT)
+    @app.delete("/{prefix:path}/Items", status_code=status.HTTP_204_NO_CONTENT)
+    async def jellyfin_delete_many(
+        ids: str | None = Query(default=None),
+        prefix: str = "",
+        authorization: str | None = Header(default=None),
+        x_emby_token: str | None = Header(default=None),
+        x_emby_authorization: str | None = Header(default=None),
+    ) -> Response:
+        item_ids = [value.strip() for value in ids.split(",")] if ids else []
+        if not item_ids or any(not re.fullmatch(r"[0-9a-fA-F]{32}", item) for item in item_ids):
+            raise HTTPException(status_code=400, detail="valid Jellyfin item IDs required")
+        for item_id in item_ids:
+            await jellyfin_delete(
+                item_id, prefix, authorization, x_emby_token, x_emby_authorization
+            )
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @app.get("/api/v1/deletions/jobs")

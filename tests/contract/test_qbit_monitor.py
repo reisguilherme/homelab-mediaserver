@@ -1,7 +1,7 @@
-"""Exercise the deployed Caddy routes with a local authenticated upstream.
+"""Exercise the administrative Caddy proxy with a local authenticated upstream.
 
-Use HOMESERVER_TEST_CADDY or an installed caddy binary. No Docker, network,
-qBittorrent data, or production credentials are required by these tests.
+Use HOMESERVER_TEST_CADDY or an installed caddy binary. Only loopback sockets
+are used; no Docker, qBittorrent data or production credentials are required.
 """
 
 import http.client
@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -74,17 +75,32 @@ def monitor(tmp_path_factory):
             requests.append((self.command, self.path, headers, body))
             path = self.path.partition("?")[0]
             logged_in = headers.get("cookie") == SESSION
-            if path == "/api/v2/auth/login":
+            # Simulate native checks rather than having the proxy grant access.
+            cross_origin = any(
+                urlsplit(headers[name]).netloc != headers.get("host")
+                for name in ("origin", "referer")
+                if name in headers
+            )
+            location = None
+            if cross_origin:
+                status, response_body = 403, b"Invalid origin"
+            elif path == "/api/v2/auth/login":
                 status, response_body = (200, b"Ok.") if body == LOGIN_BODY else (403, b"Fails.")
             elif path.startswith("/api/") and not logged_in:
                 status, response_body = 403, b"Forbidden"
+            elif path in {"/api/v2/torrents/futureAction", "/api/v3/torrents/info"}:
+                status, response_body = 404, b"Native route not found"
+            elif path == "/redirect-fixture":
+                status, response_body = 302, b""
+                location = "/index.html?next=%2F"
             else:
-                # Unknown/mutation routes deliberately succeed if Caddy lets them through.
                 status, response_body = 200, self.path.encode()
             self.send_response(status)
             self.send_header("X-Qbit-Upstream", "fixture")
             self.send_header("Content-Security-Policy", "default-src 'self'")
             self.send_header("X-Frame-Options", "SAMEORIGIN")
+            if location is not None:
+                self.send_header("Location", location)
             if path == "/api/v2/auth/login" and status == 200:
                 self.send_header("Set-Cookie", f"{SESSION}; HttpOnly; Path=/; SameSite=Strict")
             elif path == "/api/v2/auth/logout" and status == 200:
@@ -144,7 +160,6 @@ def monitor(tmp_path_factory):
             upstream_thread.join(timeout=5)
 
 
-@pytest.mark.parametrize("method", ["GET", "POST"])
 @pytest.mark.parametrize(
     "path",
     [
@@ -162,16 +177,31 @@ def monitor(tmp_path_factory):
         "/api/v2/transfer/setUploadLimit",
         "/api/v2/search/start",
         "/api/v2/rss/addFeed",
-        "/api/v2/torrents/futureAction",
-        "/api/v3/torrents/info",
     ],
 )
-def test_mutations_and_unknown_api_never_reach_qbit(monitor, method, path):
-    before = len(monitor.requests)
-    status, headers, _ = monitor.request(method, path, headers={"Cookie": SESSION})
-    assert status in {403, 404}
-    assert "X-Qbit-Upstream" not in headers
-    assert len(monitor.requests) == before
+def test_authenticated_administrative_actions_reach_native_qbit_unchanged(monitor, path):
+    body = b"hashes=fixture%7Csecond&deleteFiles=false"
+    origin = f"http://127.0.0.1:{monitor.port}"
+    status, headers, response = monitor.request(
+        "POST",
+        path,
+        body=body,
+        headers={
+            "Cookie": SESSION,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Origin": origin,
+            "Referer": f"{origin}/",
+        },
+    )
+    assert status == 200
+    assert headers["X-Qbit-Upstream"] == "fixture"
+    assert response == path.encode()
+    method, target, upstream_headers, received = monitor.requests[-1]
+    assert (method, target, received) == ("POST", path, body)
+    assert upstream_headers["cookie"] == SESSION
+    assert upstream_headers["content-type"] == "application/x-www-form-urlencoded"
+    assert upstream_headers["origin"] == origin
+    assert upstream_headers["referer"] == f"{origin}/"
 
 
 @pytest.mark.parametrize(
@@ -266,58 +296,82 @@ def test_monitor_preserves_native_auth_session_and_security_headers(monitor):
     assert upstream_headers["host"] == f"127.0.0.1:{monitor.port}"
     assert "authorization" not in upstream_headers
 
-    status, headers, _ = monitor.request(
-        "POST", "/api/v2/auth/logout", headers={"Cookie": SESSION}
-    )
+    status, headers, _ = monitor.request("POST", "/api/v2/auth/logout", headers={"Cookie": SESSION})
     assert status == 200
     assert headers["Set-Cookie"] == "SID=; Max-Age=0; HttpOnly; Path=/"
 
 
 @pytest.mark.parametrize(
-    ("method", "path"),
-    [
-        ("GET", "/api/v2/auth/login"),
-        ("GET", "/api/v2/auth/logout"),
-        ("POST", "/api/v2/torrents/info"),
-        ("POST", "/scripts/client.js"),
-        ("HEAD", "/api/v2/torrents/info"),
-        ("PUT", "/api/v2/torrents/info"),
-        ("PATCH", "/api/v2/torrents/info"),
-        ("DELETE", "/api/v2/torrents/info"),
-        ("OPTIONS", "/api/v2/auth/login"),
-        ("GET", "/unlisted.html"),
-    ],
-)
-def test_only_explicit_methods_and_paths_are_forwarded(monitor, method, path):
-    before = len(monitor.requests)
-    status, _, _ = monitor.request(method, path, headers={"Cookie": SESSION})
-    assert status in {403, 404}
-    assert len(monitor.requests) == before
-
-
-@pytest.mark.parametrize("method", ["GET", "POST"])
-@pytest.mark.parametrize(
     "path",
-    [
-        "//api/v2/torrents/info",
-        "/api/v2/torrents/./info",
-        "/api/v2/torrents/delete/../info",
-        "/scripts/../api/v2/torrents/delete",
-        "/api/v2/auth/login/../logout",
-        "/api%2fv2%2ftorrents%2finfo",
-        "/%61pi/v2/torrents/info",
-        "/api/v2/torrents/%69nfo",
-        "/api/v2/torrents%2fdelete",
-        "/scripts/%2e%2e/api/v2/torrents/delete",
-        "/scripts/%252e%252e/api/v2/torrents/delete",
-        "/scripts/%2fapi/v2/torrents/delete",
-        "/api/v2/torrents/info%3f/../delete",
-        r"/api/v2/torrents\info",
-        "/api/v2/torrents/%5cinfo",
-    ],
+    ["/api/v2/torrents/futureAction", "/api/v3/torrents/info"],
 )
-def test_ambiguous_raw_paths_cannot_bypass_the_allowlist(monitor, method, path):
-    before = len(monitor.requests)
-    status, _, _ = monitor.request(method, path, headers={"Cookie": SESSION})
-    assert status in {403, 404}
-    assert len(monitor.requests) == before
+def test_unknown_api_routes_are_decided_by_native_qbit(monitor, path):
+    status, headers, response = monitor.request("POST", path, headers={"Cookie": SESSION})
+    assert (status, response) == (404, b"Native route not found")
+    assert headers["X-Qbit-Upstream"] == "fixture"
+    assert monitor.requests[-1][:2] == ("POST", path)
+
+
+@pytest.mark.parametrize("method", ["GET", "POST", "HEAD", "PUT", "PATCH", "DELETE", "OPTIONS"])
+def test_proxy_does_not_replace_native_method_validation(monitor, method):
+    path = "/api/v2/torrents/info?hashes=fixture%7Csecond"
+    status, headers, _ = monitor.request(method, path, headers={"Cookie": SESSION})
+    assert status == 200
+    assert headers["X-Qbit-Upstream"] == "fixture"
+    assert monitor.requests[-1][:2] == (method, path)
+
+
+@pytest.mark.parametrize("cookie", [None, "SID=invalid-fixture"])
+@pytest.mark.parametrize(
+    "path", ["/api/v2/torrents/add", "/api/v2/torrents/delete", "/api/v2/app/setPreferences"]
+)
+def test_native_authentication_still_rejects_unauthorized_actions(monitor, cookie, path):
+    headers = {} if cookie is None else {"Cookie": cookie}
+    status, response_headers, body = monitor.request("POST", path, body=b"fixture", headers=headers)
+    assert (status, body) == (403, b"Forbidden")
+    assert response_headers["X-Qbit-Upstream"] == "fixture"
+    assert "authorization" not in monitor.requests[-1][2]
+
+
+@pytest.mark.parametrize("header", ["Origin", "Referer"])
+def test_native_csrf_rejection_cannot_be_hidden_by_proxy(monitor, header):
+    status, headers, body = monitor.request(
+        "POST",
+        "/api/v2/torrents/delete",
+        body=b"hashes=fixture",
+        headers={"Cookie": SESSION, header: "https://foreign.example/"},
+    )
+    assert (status, body) == (403, b"Invalid origin")
+    assert headers["X-Qbit-Upstream"] == "fixture"
+    assert monitor.requests[-1][2][header.lower()] == "https://foreign.example/"
+
+
+def test_invalid_login_does_not_receive_authenticated_cookie(monitor):
+    status, headers, body = monitor.request("POST", "/api/v2/auth/login", body=b"invalid-fixture")
+    assert (status, body) == (403, b"Fails.")
+    assert "Set-Cookie" not in headers
+
+
+def test_torrent_file_upload_body_is_not_rewritten(monitor):
+    body = (
+        b"--fixture\r\nContent-Disposition: form-data; "
+        b'name="torrents"; filename="x.torrent"\r\n\r\n'
+        b"d4:info\x00\xff\r\n--fixture--\r\n"
+    )
+    status, headers, _ = monitor.request(
+        "POST",
+        "/api/v2/torrents/add",
+        body=body,
+        headers={"Cookie": SESSION, "Content-Type": "multipart/form-data; boundary=fixture"},
+    )
+    assert status == 200
+    assert headers["X-Qbit-Upstream"] == "fixture"
+    assert monitor.requests[-1][3] == body
+    assert monitor.requests[-1][2]["content-type"] == "multipart/form-data; boundary=fixture"
+
+
+def test_native_redirects_are_preserved(monitor):
+    status, headers, body = monitor.request("GET", "/redirect-fixture")
+    assert (status, body) == (302, b"")
+    assert headers["Location"] == "/index.html?next=%2F"
+    assert headers["X-Qbit-Upstream"] == "fixture"

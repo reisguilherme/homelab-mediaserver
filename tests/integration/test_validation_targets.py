@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import socket
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -42,12 +43,18 @@ def test_compose_check_fails_when_docker_is_unavailable(tmp_path: Path) -> None:
 
 def test_smoke_requires_reachable_ready_runtime(tmp_path: Path) -> None:
     config = tmp_path / "smoke.env"
-    config.write_text("\n", encoding="utf-8")
-    result = subprocess.run(
-        ["bash", "scripts/smoke.sh", "--config", str(config), "--environment", "dev"],
-        capture_output=True,
-        text=True,
-    )
+    # Reserve a non-listening loopback port. Never probe an actual running stack.
+    with socket.socket() as unavailable:
+        unavailable.bind(("127.0.0.1", 0))
+        config.write_text(
+            f"HOMESERVER_CONTROL_PORT={unavailable.getsockname()[1]}\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            ["bash", "scripts/smoke.sh", "--config", str(config), "--environment", "dev"],
+            capture_output=True,
+            text=True,
+        )
     assert result.returncode != 0
 
 

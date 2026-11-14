@@ -7,13 +7,26 @@ import os
 import tempfile
 from pathlib import Path
 
+from .service_environment import environment_for_service
 from .settings import Settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 IMAGES = {
-    "jellyfin": "jellyfin/jellyfin:10.10.7",
-    "jellyfin-proxy": "nginx:1.30.5-alpine",
-    "seerr": "fallenbagel/jellyseerr:2.7.3",
+    "jellyfin": "jellyfin/jellyfin@sha256:"
+    "357724bf0ae27a672c7cbaa899db2d9abeb13dbd8657ccce750258a4c059d037",
+    "jellyfin-proxy": "nginx@sha256:"
+    "0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94",
+    "public-proxy": "nginx@sha256:"
+    "0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94",
+    "seerr-proxy": "nginx@sha256:"
+    "0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94",
+    "integration-proxy": "homeserver-control:dev",
+    "jellyfin-relay": "homeserver-control:dev",
+    "public-security": "homeserver-control:dev",
+    "service-proxy": "caddy@sha256:"
+    "d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f",
+    "seerr": "ghcr.io/seerr-team/seerr@sha256:"
+    "27602401178d54f1964442287b9f23f67a3fa2252645ee8065839ea1c3f69e45",
     "sonarr": "linuxserver/sonarr:4.0.15",
     "radarr": (
         "lscr.io/linuxserver/radarr@sha256:"
@@ -21,8 +34,8 @@ IMAGES = {
     ),
     "prowlarr": "linuxserver/prowlarr:1.35.1",
     "qbittorrent": "linuxserver/qbittorrent:5.1.2",
-    "bazarr": "linuxserver/bazarr:1.5.1",
-    "qbit-monitor": "caddy:2.10.2-alpine",
+    "bazarr": "linuxserver/bazarr:1.6.2",
+    "qbit-monitor": "caddy@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f",
     "control-api": "homeserver-control:dev",
     "control-worker": "homeserver-control:dev",
     "download-gateway": "homeserver-control:dev",
@@ -45,6 +58,26 @@ def bind(source: Path | str, target: str, *, read_only: bool = False) -> dict:
     }
 
 
+def render_storage_extra_override() -> dict:
+    """Optional second USB bind; the standard two-pool override is unchanged."""
+    return {'services': {
+        name: {'volumes': [bind('/srv/external2', '/storage/hdd2',
+                                read_only=name != 'control-worker')]}
+        for name in ('control-worker', 'control-api', 'download-gateway', 'telemetry',
+                     'host-metrics', 'init', 'operator')
+    }}
+
+
+def render_storage_fourth_override() -> dict:
+    """Optional third USB bind; earlier two/three-pool overrides stay unchanged."""
+    return {'services': {
+        name: {'volumes': [bind('/srv/external3', '/storage/hdd3',
+                                read_only=name != 'control-worker')]}
+        for name in ('control-worker', 'control-api', 'download-gateway', 'telemetry',
+                     'host-metrics', 'init', 'operator')
+    }}
+
+
 def render_storage_override() -> dict:
     """Opt-in, fixed technical paths; never derive disk identities from .env."""
     services = {}
@@ -52,7 +85,7 @@ def render_storage_override() -> dict:
                  'download-gateway', 'telemetry', 'host-metrics', 'operator'):
         readonly = name in ('control-api', 'download-gateway', 'telemetry', 'host-metrics')
         services[name] = {'volumes': [bind('/srv/media-view', '/data', read_only=readonly)]}
-    for name, readonly in (('jellyfin', True), ('bazarr', False)):
+    for name, readonly in (('jellyfin', False), ('bazarr', False)):
         services[name] = {'volumes': [
             bind('/srv/media-view/media', '/data/media', read_only=readonly)]}
     services['init'] = {'volumes': [bind('/srv/media-view', '/srv/data', read_only=True)]}
@@ -78,6 +111,30 @@ def render_storage_override() -> dict:
             bind('./scripts/storage-entrypoint.sh', '/run/storage-entrypoint.sh', read_only=True))
         services[name]['entrypoint'] = ['/bin/sh', '/run/storage-entrypoint.sh', target, original]
     return {'services': services}
+
+
+def render_storage_single_override() -> dict:
+    """Independent large-disk layout; omit retired media pool bindings."""
+    result = render_storage_override()
+    services = result['services']
+    for name in ('control-worker', 'control-api', 'download-gateway', 'telemetry',
+                 'host-metrics', 'init', 'operator'):
+        services[name]['volumes'] = [
+            value for value in services[name]['volumes']
+            if value['target'] not in ('/storage/ssd', '/storage/hdd')
+        ]
+        services[name]['volumes'].append(
+            bind('/srv/external3', '/storage/hdd3', read_only=name != 'control-worker'))
+    for name in ('sonarr', 'radarr', 'qbittorrent', 'jellyfin', 'bazarr'):
+        services[name]['environment'] = {'HOMESERVER_STORAGE_SINGLE_GUARD': '1'}
+        services[name]['volumes'] += [
+            bind('/srv/external3', '/run/storage-physical', read_only=True),
+            bind('/srv/appdata/control/storage-native.identity',
+                 '/run/storage-native.identity', read_only=True),
+            bind('/proc/1/mountinfo', '/run/host-mountinfo', read_only=True),
+            bind('/dev/disk/by-uuid', '/run/host-uuids', read_only=True),
+        ]
+    return result
 
 
 def render_stack(
@@ -130,6 +187,27 @@ def render_stack(
             "start_period": "60s",
         }
 
+    def public_environment(role: str, **overrides: str) -> dict[str, str]:
+        return environment_for_service(role, env | {
+            'HOMESERVER_SERVICE_ROLE': role, **overrides,
+        })
+
+    hardened = {
+        'cap_drop': ['ALL'], 'security_opt': ['no-new-privileges:true'],
+        'read_only': True, 'user': f"{value('SERVICE_UID')}:{value('SERVICE_GID')}",
+        'tmpfs': ['/tmp:rw,noexec,nosuid,size=64m'],
+        'pids_limit': 128,
+    }
+    proxy_hardened = hardened | {
+        'tmpfs': hardened['tmpfs'] + [
+            f"/var/cache/nginx:rw,noexec,nosuid,size=32m,uid={value('SERVICE_UID')},"
+            f"gid={value('SERVICE_GID')}",
+            f"/var/run:rw,noexec,nosuid,size=4m,uid={value('SERVICE_UID')},"
+            f"gid={value('SERVICE_GID')}",
+        ],
+        'mem_limit': '256m',
+    }
+
     ready_http = "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready',timeout=5).close()"
 
     identity = {"PUID": value("SERVICE_UID"), "PGID": value("SERVICE_GID"), "TZ": value("TIMEZONE")}
@@ -151,20 +229,32 @@ def render_stack(
     state = bind(appdata / "control", "/var/lib/homeserver")
     live = bind(run, "/run/homeserver", read_only=True)
     services = {
+        "service-proxy": service(
+            "service-proxy",
+            ["edge_control"],
+            [bind(code / "deploy/service-proxy/Caddyfile", "/etc/caddy/Caddyfile",
+                  read_only=True)],
+            ports=[{"host_ip": address, "published": "80", "target": 80, "protocol": "tcp"}
+                   for address in addresses],
+            depends_on=["jellyfin-proxy", "qbit-monitor", "telemetry"],
+        ),
         "jellyfin": service(
             "jellyfin",
-            ["apps", "telemetry", "egress"],
+            {'public_jellyfin': {'ipv4_address': '172.30.240.2'}},
             [
                 bind(appdata / "jellyfin", "/config"),
-                bind(media / "media", "/data/media", read_only=True),
+                bind(media / "media", "/data/media"),
                 bind(value("TRANSCODE_ROOT"), "/transcode"),
             ],
             user=f"{value('SERVICE_UID')}:{value('SERVICE_GID')}",
             environment={"TZ": value("TIMEZONE")},
+            dns=['1.1.1.1', '1.0.0.1'],
+            cap_drop=['ALL'], security_opt=['no-new-privileges:true'],
         ),
         "jellyfin-proxy": service(
             "jellyfin-proxy",
-            ["apps", "edge_control"],
+            {'public_jellyfin': {'ipv4_address': '172.30.240.6', 'gw_priority': 1},
+             'public_relay': {'ipv4_address': '172.30.240.36'}, 'edge_control': {}},
             [
                 bind(
                     code / "deploy/jellyfin-proxy/nginx.conf",
@@ -173,29 +263,97 @@ def render_stack(
                 )
             ],
             ports=ports("JELLYFIN_PORT", 8096),
-            depends_on=["jellyfin", "control-api"],
+            depends_on=["jellyfin", "jellyfin-relay", "control-api"],
+            **proxy_hardened,
+        ),
+        'jellyfin-relay': service(
+            'jellyfin-relay',
+            {'public_jellyfin': {'ipv4_address': '172.30.240.3'},
+             'public_relay': {'ipv4_address': '172.30.240.34'}},
+            [], environment=public_environment('jellyfin-relay'),
+            entrypoint=['python', '-m', 'homeserver_common.runtime'],
+            command=['uvicorn', 'homeserver_control.api.jellyfin_relay:create_app',
+                     '--factory', '--host', '0.0.0.0', '--port', '8083',
+                     '--no-proxy-headers', '--no-access-log', '--ws-max-size', '8388608',
+                     '--log-level', value('LOG_LEVEL').lower()],
+            depends_on=['jellyfin'], mem_limit='512m', **hardened,
+        ),
+        'public-security': service(
+            'public-security',
+            {'public_jellyfin': {'ipv4_address': '172.30.240.4'},
+             'public_seerr': {'ipv4_address': '172.30.240.19'},
+             'public_guard': {'ipv4_address': '172.30.240.50'}},
+            [bind(appdata / 'public-security', '/state')],
+            environment=public_environment(
+                'public-security', HOMESERVER_PUBLIC_ACCESS_STATE_PATH='/state/limits.sqlite3',
+                HOMESERVER_PUBLIC_ACCESS_TRUSTED_PROXY_IPS='172.30.240.51'),
+            entrypoint=['python', '-m', 'homeserver_common.runtime'],
+            command=['uvicorn', 'homeserver_control.api.public_access:create_app',
+                     '--factory', '--host', '0.0.0.0', '--port', '8080',
+                     '--no-proxy-headers', '--no-access-log',
+                     '--log-level', value('LOG_LEVEL').lower()],
+            depends_on=['jellyfin', 'seerr'], mem_limit='256m', **hardened,
+        ),
+        'public-proxy': service(
+            'public-proxy',
+            {'public_jellyfin': {'ipv4_address': '172.30.240.5'},
+             'public_seerr': {'ipv4_address': '172.30.240.20'},
+             'public_relay': {'ipv4_address': '172.30.240.35'},
+             'public_guard': {'ipv4_address': '172.30.240.51'},
+             'public_ingress': {'ipv4_address': '172.30.240.82'}},
+            [bind(code / 'deploy/public-proxy/nginx.conf', '/etc/nginx/nginx.conf',
+                  read_only=True)],
+            ports=ports('PUBLIC_JELLYFIN_PORT', 8097) + ports('PUBLIC_SEERR_PORT', 5056),
+            depends_on=['jellyfin', 'seerr', 'jellyfin-relay', 'public-security'],
+            **proxy_hardened,
+        ),
+        'seerr-proxy': service(
+            'seerr-proxy',
+            {'public_seerr': {'ipv4_address': '172.30.240.21', 'gw_priority': 1},
+             'edge_control': {}},
+            [bind(code / 'deploy/seerr-proxy/nginx.conf', '/etc/nginx/nginx.conf',
+                  read_only=True)],
+            ports=ports('SEERR_PORT', 5055), depends_on=['seerr'], **proxy_hardened,
+        ),
+        'integration-proxy': service(
+            'integration-proxy',
+            {'seerr_integration': {'ipv4_address': '172.30.240.67'},
+             'public_jellyfin': {'ipv4_address': '172.30.240.11'},
+             'automation_backends': {'ipv4_address': '172.30.240.98'}},
+            [], environment=public_environment('integration-proxy'),
+            entrypoint=['python', '-m', 'homeserver_common.runtime'],
+            command=['uvicorn', 'homeserver_control.api.integration_proxy:create_app',
+                     '--factory', '--host', '0.0.0.0', '--port', '8787',
+                     '--no-proxy-headers', '--no-access-log',
+                     '--log-level', value('LOG_LEVEL').lower()],
+            depends_on=['sonarr', 'radarr'], mem_limit='512m', **hardened,
         ),
         "seerr": service(
             "seerr",
-            ["apps", "edge_control", "egress"],
+            {'public_seerr': {'ipv4_address': '172.30.240.18'},
+             'seerr_integration': {'ipv4_address': '172.30.240.66'}},
             [bind(appdata / "seerr", "/app/config")],
-            ports=ports("SEERR_PORT", 5055),
+            init=True,
+            dns=['1.1.1.1', '1.0.0.1'],
             user=f"{value('SERVICE_UID')}:{value('SERVICE_GID')}",
             environment={
                 "TZ": value("TIMEZONE"),
                 "NODE_OPTIONS": "--no-network-family-autoselection --dns-result-order=ipv4first",
             },
+            cap_drop=['ALL'], security_opt=['no-new-privileges:true'],
         ),
         "sonarr": service(
             "sonarr",
-            ["apps", "edge_control", "egress"],
+            {'apps': {}, 'edge_control': {}, 'egress': {},
+             'automation_backends': {'ipv4_address': '172.30.240.100'}},
             [bind(appdata / "sonarr", "/config"), bind(media, "/data")],
             ports=ports("SONARR_PORT", 8989),
             environment=identity,
         ),
         "radarr": service(
             "radarr",
-            ["apps", "edge_control", "egress"],
+            {'apps': {}, 'edge_control': {}, 'egress': {},
+             'automation_backends': {'ipv4_address': '172.30.240.99'}},
             [bind(appdata / "radarr", "/config"), bind(media, "/data")],
             ports=ports("RADARR_PORT", 7878),
             environment=identity,
@@ -206,6 +364,8 @@ def render_stack(
             [bind(appdata / "prowlarr", "/config")],
             ports=ports("PROWLARR_PORT", 9696),
             environment=identity,
+            # Preserve the installation's verified resolver override.
+            dns=['1.1.1.1', '1.0.0.1'],
         ),
         "bazarr": service(
             "bazarr",
@@ -213,6 +373,8 @@ def render_stack(
             [bind(appdata / "bazarr", "/config"), bind(media / "media", "/data/media")],
             ports=ports("BAZARR_PORT", 6767),
             environment=identity,
+            # The installation's local resolver returns NXDOMAIN for OpenSubtitles.
+            dns=["1.1.1.1", "8.8.8.8"],
         ),
         "qbittorrent": service(
             "qbittorrent",
@@ -239,7 +401,9 @@ def render_stack(
         ),
         "control-api": service(
             "control-api",
-            ["edge_control", "apps", "telemetry"],
+            {'edge_control': {}, 'apps': {}, 'telemetry': {},
+             'public_jellyfin': {'ipv4_address': '172.30.240.8'},
+             'public_seerr': {'ipv4_address': '172.30.240.23'}},
             [state, live, bind(media, "/data", read_only=True)],
             environment=control_env,
             ports=ports("CONTROL_PORT", 8080),
@@ -247,6 +411,9 @@ def render_stack(
             command=[
                 "uvicorn",
                 "homeserver_control.api.app:app",
+                "--no-proxy-headers",
+                "--no-access-log",
+                "--ws-max-size", "8388608",
                 "--host",
                 "0.0.0.0",
                 "--port",
@@ -257,7 +424,9 @@ def render_stack(
         ),
         "control-worker": service(
             "control-worker",
-            ["apps", "egress"],
+            {'apps': {}, 'egress': {},
+             'public_jellyfin': {'ipv4_address': '172.30.240.7'},
+             'public_seerr': {'ipv4_address': '172.30.240.22'}},
             [state, live, bind(media, "/data")],
             environment=control_env,
             command=["python", "-m", "homeserver_control.worker"],
@@ -293,12 +462,7 @@ def render_stack(
             "telemetry",
             ["telemetry", "edge_control", "egress"],
             [live, bind(media, "/data", read_only=True)],
-            environment={
-                key: val
-                for key, val in env.items()
-                if key.endswith(("_PUBLIC_URL", "_PORT"))
-                or key in ("HOMESERVER_TAILSCALE_HOSTNAME", "HOMESERVER_METRICS_MAX_AGE_SECONDS")
-            }
+            environment=environment_for_service('telemetry', env)
             | {
                 "HOMESERVER_HOST_SNAPSHOT": "/run/homeserver/host.json",
                 "HOMESERVER_CAPACITY_SNAPSHOT": "/run/homeserver/capacity.json",
@@ -323,7 +487,9 @@ def render_stack(
         ),
         "operator": service(
             "operator",
-            ["apps", "transfer"],
+            {'apps': {}, 'transfer': {},
+             'public_jellyfin': {'ipv4_address': '172.30.240.9'},
+             'public_seerr': {'ipv4_address': '172.30.240.24'}},
             [
                 bind(appdata, "/srv/appdata"),
                 bind(media, "/data"),
@@ -369,13 +535,24 @@ def render_stack(
         ),
     }
     services["host-metrics"].pop("networks")
-    for name in ("control-api", "control-worker", "download-gateway", "telemetry", "host-metrics"):
+    for name in ("control-api", "control-worker", "download-gateway"):
         services[name]["volumes"].append(bind(env_file.parent, "/project", read_only=True))
         services[name]["environment"].update(
             HOMESERVER_ENV_PATH="/project/" + env_file.name,
             HOMESERVER_ENV_MODE=value("ENVIRONMENT"),
         )
-        services[name]["entrypoint"] = ["python", "-m", "homeserver_common.runtime"]
+    services['telemetry']['volumes'].append(
+        bind(env_file, '/project/' + env_file.name, read_only=True))
+    for name in ('control-api', 'control-worker', 'download-gateway', 'telemetry', 'host-metrics'):
+        services[name]['environment']['HOMESERVER_SERVICE_ROLE'] = name
+        services[name]['environment'] = environment_for_service(name, services[name]['environment'])
+        if name in ('control-api', 'control-worker', 'download-gateway', 'telemetry'):
+            # Loader inputs are consumed before the final child environment filter.
+            services[name]['environment'].update(
+                HOMESERVER_ENV_PATH='/project/' + env_file.name,
+                HOMESERVER_ENV_MODE=value('ENVIRONMENT'),
+            )
+        services[name]['entrypoint'] = ['python', '-m', 'homeserver_common.runtime']
     for name in ("control-api", "control-worker", "download-gateway", "telemetry"):
         services[name]["user"] = f"{value('SERVICE_UID')}:{value('SERVICE_GID')}"
     if value("TRANSCODE_MODE") == "intel":
@@ -409,6 +586,22 @@ def render_stack(
             "edge_control": {"internal": False},
             "egress": {"internal": False},
             "egress_transfer": {"internal": False},
+            **{
+                name: {
+                    'internal': internal, 'enable_ipv6': False,
+                    'driver_opts': {'com.docker.network.bridge.name': bridge},
+                    'ipam': {'config': [{'subnet': subnet}]},
+                }
+                for name, bridge, subnet, internal in (
+                    ('public_jellyfin', 'hs-public-jf', '172.30.240.0/28', False),
+                    ('public_seerr', 'hs-public-seer', '172.30.240.16/28', False),
+                    ('public_relay', 'hs-public-rel', '172.30.240.32/28', True),
+                    ('public_guard', 'hs-public-auth', '172.30.240.48/28', True),
+                    ('seerr_integration', 'hs-public-int', '172.30.240.64/28', True),
+                    ('public_ingress', 'hs-public-edge', '172.30.240.80/28', False),
+                    ('automation_backends', 'hs-public-arr', '172.30.240.96/28', True),
+                )
+            },
         },
     }
 

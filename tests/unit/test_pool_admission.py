@@ -21,6 +21,7 @@ from homeserver_control.worker.capacity_evidence import (
 
 class Storage:
     pool_ids = ("ssd", "hdd")
+    primary_pool_id = "ssd"
     offline = frozenset()
 
     def inspect(self, pool_id, *, writable=False):

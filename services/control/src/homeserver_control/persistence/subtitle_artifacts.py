@@ -10,7 +10,17 @@ from pathlib import Path
 from homeserver_control.domain.subtitle_content import valid_srt
 
 MOVIE_FINALIZER_SOURCE = "subdl_movie_finalizer"
-_SOURCES = {"subdl", MOVIE_FINALIZER_SOURCE}
+OPENSUBTITLES_SERIES_FINALIZER_SOURCE = "opensubtitles_series_finalizer"
+_SOURCES = {"subdl", MOVIE_FINALIZER_SOURCE, OPENSUBTITLES_SERIES_FINALIZER_SOURCE}
+
+
+def _validate_source(source: str, scope_key: str | None) -> None:
+    if source not in _SOURCES:
+        raise ValueError("unsupported subtitle source")
+    if source == OPENSUBTITLES_SERIES_FINALIZER_SOURCE:
+        scope = re.fullmatch(r"S([0-9]{2,})E([0-9]{2,})", scope_key or "")
+        if scope is None or int(scope[1]) <= 0 or int(scope[2]) <= 0:
+            raise ValueError("series subtitle source requires an episode scope")
 
 
 class SubtitleArtifactStore:
@@ -36,8 +46,7 @@ class SubtitleArtifactStore:
     ) -> None:
         if language not in {"BR_PT", "EN"}:
             raise ValueError("unsupported subtitle language")
-        if source not in _SOURCES:
-            raise ValueError("unsupported subtitle source")
+        _validate_source(source, scope_key)
         if not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", infohash):
             raise ValueError("invalid subtitle torrent hash")
         if not valid_srt(content):
@@ -103,8 +112,7 @@ class SubtitleArtifactStore:
     ) -> bytes | None:
         if language not in {"BR_PT", "EN"}:
             raise ValueError("unsupported subtitle language")
-        if source not in _SOURCES:
-            raise ValueError("unsupported subtitle source")
+        _validate_source(source, scope_key)
         with self._connect() as connection:
             row = connection.execute(
                 """SELECT sha256, content FROM subtitle_artifacts

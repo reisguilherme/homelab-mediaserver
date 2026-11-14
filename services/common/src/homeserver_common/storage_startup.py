@@ -14,7 +14,7 @@ def verify_storage_startup(registry_path: Path, logical_root: Path) -> bool:
         return False
     try:
         _no_symlinks(logical_root)
-        registry.inspect('ssd')  # SSD is mandatory; USB absence is independent.
+        registry.inspect(registry.primary_pool_id)
         for pool in registry.pools.values():
             registry._guard_parent(pool)
         hosts = [m for m in _mounts(registry.host_mountinfo)
@@ -30,7 +30,7 @@ def verify_storage_startup(registry_path: Path, logical_root: Path) -> bool:
                 or local.root / logical_root.relative_to(local.target) != Path('/')):
             raise StorageUnavailable('logical storage bind does not map mergerfs root')
         control = logical_root / '.mergerfs'
-        expected = '/srv/data=RW:/srv/external/homeserver=RW'
+        expected = ':'.join(f'{pool.host_root}=RW' for pool in registry.pools.values())
         if os.getxattr(control, 'user.mergerfs.branches').decode() != expected:
             raise StorageUnavailable('mergerfs branches differ from registered layout')
         for key, value in {'category.create': 'epff', 'ignorepponrename': 'true',

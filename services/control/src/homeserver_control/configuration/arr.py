@@ -9,6 +9,11 @@ from .native_config import NativeConfigurationError, ServiceOutcome, environment
 
 
 def configured_resolutions(service, env):
+    if "HOMESERVER_DOWNLOAD_DEFAULT_PROFILE" in env:
+        from homeserver_common.download_profiles import PROFILE_QUALITIES
+
+        return {resolution for qualities in PROFILE_QUALITIES.values()
+                for resolution, _ in qualities}
     field = (
         "HOMESERVER_MOVIE_RESOLUTIONS" if service == "radarr" else "HOMESERVER_SERIES_RESOLUTIONS"
     )
@@ -47,6 +52,32 @@ async def reconcile_indexer_filters(service, settings, client, mode):
                 "enableInteractiveSearch": enabled,
             }
         )
+        if service != "prowlarr":
+            fields = []
+            for field in current.get("fields", []):
+                if (enabled and release_indexer({"indexer": current["name"]}) == "uindex"
+                        and field.get("name") == "categories"):
+                    # uIndex also files dubbed movies under Other and animated TV.
+                    categories = field.get("value", [])
+                    if isinstance(categories, list) and all(type(x) is int for x in categories):
+                        fields.append({
+                            "name": "categories", "value": sorted(set(categories) | {5070, 8000})
+                        })
+                if field.get("name") == "baseUrl" and env.get("HOMESERVER_PROWLARR_URL"):
+                    old = urlsplit(str(field.get("value", "")))
+                    target = urlsplit(env["HOMESERVER_PROWLARR_URL"])
+                    if old.hostname == target.hostname and old.port == target.port:
+                        suffix = old.path
+                        prefix = target.path.rstrip("/")
+                        if prefix and not (suffix == prefix or suffix.startswith(prefix + "/")):
+                            fields.append({
+                                "name": "baseUrl",
+                                "value": old._replace(
+                                    path=prefix + "/" + suffix.lstrip("/")
+                                ).geturl(),
+                            })
+            if fields:
+                desired["fields"] = fields
         changes += await collection(
             service,
             client,
@@ -62,12 +93,16 @@ async def reconcile_indexer_filters(service, settings, client, mode):
 def native_quality_source(quality):
     """Normalize native names without treating WEBRip as WEB-DL."""
     source = str(quality.get("source", "")).lower()
+    modifier = str(quality.get("modifier", "none")).lower()
+    if modifier not in {"none", "remux"}:
+        # BR-DISK carries Blu-ray source metadata but is not a single-file encode.
+        return modifier
     name = "".join(
         character for character in str(quality.get("name", "")).lower() if character.isalnum()
     )
     if "webrip" in name:
         return "webrip"
-    if "remux" in name or source == "blurayraw":
+    if "remux" in name or source == "blurayraw" or modifier == "remux":
         return "remux"
     if "webdl" in name:
         return "webdl"
@@ -85,6 +120,10 @@ async def reconcile_quality_sizes(service, env, client, mode):
         return []
     resolutions = configured_resolutions(service, env)
     sources = set(env.get("HOMESERVER_MEDIA_SOURCES", "remux,bluray,webdl").split(","))
+    if "HOMESERVER_DOWNLOAD_DEFAULT_PROFILE" in env:
+        from homeserver_common.download_profiles import PROFILE_QUALITIES
+
+        sources = {source for qualities in PROFILE_QUALITIES.values() for _, source in qualities}
     endpoint = "/api/v3/qualitydefinition"
     response = await client.get(endpoint)
     if response.status_code in (404, 405, 501):
@@ -263,10 +302,10 @@ async def collection(service, client, endpoint, desired, identity, mode, *, sett
     rows = response.json()
     matches = (
         [row for row in rows if row.get("id") == desired["id"]]
-        if desired.get("id")
+        if desired.get("id") is not None
         else [row for row in rows if row.get(identity) == desired[identity]]
     )
-    if desired.get("id") and not matches:
+    if desired.get("id") is not None and not matches:
         raise NativeConfigurationError("Adopted native ID missing; refusing replacement")
     if len(matches) > 1:
         raise NativeConfigurationError("ambiguous native resource identity")
@@ -348,8 +387,110 @@ async def collection(service, client, endpoint, desired, identity, mode, *, sett
     return changes
 
 
+async def reconcile_jellyfin_connection(service, settings, client, mode):
+    """Notify Jellyfin after imports; physical-pool writes may bypass inotify."""
+    env = environment(settings)
+    if service not in {"radarr", "sonarr"} or not env.get("HOMESERVER_JELLYFIN_API_KEY"):
+        return []
+    endpoint = "/api/v3/notification"
+    response = await client.get(endpoint + "/schema")
+    if response.status_code in (404, 405, 501):
+        return None
+    response.raise_for_status()
+    schemas = response.json()
+    templates = [
+        item for item in schemas
+        if isinstance(item, dict) and item.get("implementation") == "MediaBrowser"
+    ] if isinstance(schemas, list) else []
+    if len(templates) != 1:
+        return None
+    desired = deepcopy(templates[0])
+    events = {"onDownload", "onUpgrade", "onRename"}
+    if (
+        desired.get("configContract") != "MediaBrowserSettings"
+        or any(desired.get("supports" + event[0].upper() + event[1:]) is not True
+               for event in events)
+        or not isinstance(desired.get("fields"), list)
+    ):
+        return None
+    # Arr shares edge_control with the private proxy, while native Jellyfin
+    # is isolated on public_jellyfin. Keep the controller's direct URL separate.
+    values = {
+        "host": "service-proxy", "port": 80,
+        "useSsl": False, "urlBase": "/jellyfin",
+        "apiKey": env["HOMESERVER_JELLYFIN_API_KEY"],
+        "notify": False, "updateLibrary": True,
+        # Both containers see the same logical media path, irrespective of pool.
+        "mapFrom": "", "mapTo": "",
+    }
+    names = [field.get("name") for field in desired["fields"] if isinstance(field, dict)]
+    if len(names) != len(desired["fields"]) or any(names.count(key) != 1 for key in values):
+        return None
+    desired.pop("id", None)
+    desired.update(name="HomeServer Jellyfin", tags=[])
+    for key in list(desired):
+        if key.startswith("on") and isinstance(desired[key], bool):
+            desired[key] = key in events
+    desired.update({event: True for event in events})
+    # Manage only known connection fields; retain native future options on update.
+    desired["fields"] = [field | {"value": values[field["name"]]}
+                         for field in desired["fields"] if field["name"] in values]
+    return await collection(
+        service, client, endpoint, desired, "name", mode, settings=settings
+    )
+
+
+async def reconcile_animation_quality_profile(service, settings, client, mode, base_profile):
+    """Allow animation audio fallbacks without changing the original-language profile."""
+    env = environment(settings)
+    if service != "radarr" or "HOMESERVER_ANIMATION_AUDIO_PREFERENCES" not in env:
+        return []
+    response = await client.get("/api/v3/language")
+    if response.status_code in (404, 405, 501):
+        return None
+    response.raise_for_status()
+    try:
+        languages = response.json()
+    except ValueError:
+        return None
+    if not isinstance(languages, list) or any(
+        not isinstance(item, dict)
+        or type(item.get("id")) is not int
+        or not isinstance(item.get("name"), str)
+        for item in languages
+    ):
+        return None
+    if len({item["id"] for item in languages}) != len(languages):
+        return None
+    any_language = [
+        item for item in languages
+        if item["id"] == -1 and item["name"].strip().casefold() == "any"
+    ]
+    if len(any_language) != 1:
+        return None
+    profile = deepcopy(base_profile)
+    profile.pop("id", None)
+    profile.update(
+        name="HomeServer Animation",
+        language={"id": any_language[0]["id"], "name": "Any"},
+    )
+    return await collection(
+        service, client, "/api/v3/qualityprofile", profile, "name", mode, settings=settings,
+    )
+
+
 async def reconcile_arr(service, settings, client, mode):
     env = environment(settings)
+    named_profiles = "HOMESERVER_DOWNLOAD_DEFAULT_PROFILE" in env
+    profile_changes = []
+    if named_profiles:
+        from .quality_profiles import reconcile_named_quality_profiles
+
+        profile_changes = await reconcile_named_quality_profiles(service, settings, client, mode)
+        if profile_changes is None:
+            return ServiceOutcome(
+                service, "unsupported", message="Native named profile schema unsupported"
+            )
     root = env.get(
         "HOMESERVER_MOVIE_ROOT" if service == "radarr" else "HOMESERVER_SERIES_ROOT",
         "/data/media/movies" if service == "radarr" else "/data/media/tv",
@@ -364,13 +505,13 @@ async def reconcile_arr(service, settings, client, mode):
         return ServiceOutcome(
             service, "unsupported", changes, "Native import guard schema unsupported"
         )
-    changes += guard_changes
+    changes += profile_changes + guard_changes
     changes += await reconcile_indexer_filters(service, settings, client, mode)
     if root:
         changes += await collection(
             service, client, "/api/v3/rootfolder", {"path": root}, "path", mode
         )
-    if any(
+    if named_profiles or any(
         key in env
         for key in (
             "HOMESERVER_MEDIA_RESOLUTIONS",
@@ -378,44 +519,56 @@ async def reconcile_arr(service, settings, client, mode):
             "HOMESERVER_SERIES_RESOLUTIONS",
         )
     ):
-        response = await client.get("/api/v3/qualityprofile/schema")
-        response.raise_for_status()
-        template = response.json()
-        if not isinstance(template, dict) or not isinstance(template.get("items"), list):
-            return ServiceOutcome(
-                service, "unsupported", changes, "Native quality profile schema unsupported"
-            )
-        profile = deepcopy(template)
-        profile.pop("id", None)
-        profile["name"] = "HomeServer"
-        resolutions = configured_resolutions(service, env)
-        sources = set(env.get("HOMESERVER_MEDIA_SOURCES", "remux,bluray,webdl").split(","))
+        if not named_profiles:
+            response = await client.get("/api/v3/qualityprofile/schema")
+            response.raise_for_status()
+            template = response.json()
+            if not isinstance(template, dict) or not isinstance(template.get("items"), list):
+                return ServiceOutcome(
+                    service, "unsupported", changes, "Native quality profile schema unsupported"
+                )
+            profile = deepcopy(template)
+            profile.pop("id", None)
+            profile["name"] = "HomeServer"
+            resolutions = configured_resolutions(service, env)
+            sources = set(env.get("HOMESERVER_MEDIA_SOURCES", "remux,bluray,webdl").split(","))
 
-        def configure(items):
-            for item in items:
-                if item.get("items"):
-                    configure(item["items"])
-                    item["allowed"] = any(child["allowed"] for child in item["items"])
-                else:
-                    quality = item.get("quality", {})
-                    source = native_quality_source(quality)
-                    item["allowed"] = quality.get("resolution") in resolutions and source in sources
+            def configure(items):
+                for item in items:
+                    if item.get("items"):
+                        configure(item["items"])
+                        item["allowed"] = any(child["allowed"] for child in item["items"])
+                    else:
+                        quality = item.get("quality", {})
+                        source = native_quality_source(quality)
+                        item["allowed"] = (
+                            quality.get("resolution") in resolutions and source in sources
+                        )
 
-        configure(profile["items"])
-        allowed = [
-            item.get("quality", {}).get("id", item.get("id"))
-            for item in profile["items"]
-            if item["allowed"]
-        ]
-        if not allowed:
-            return ServiceOutcome(
-                service, "unsupported", changes, "No native qualities match configured policy"
+            configure(profile["items"])
+            allowed = [
+                item.get("quality", {}).get("id", item.get("id"))
+                for item in profile["items"]
+                if item["allowed"]
+            ]
+            if not allowed:
+                return ServiceOutcome(
+                    service, "unsupported", changes, "No native qualities match configured policy"
+                )
+            profile["cutoff"] = allowed[-1]
+            profile["upgradeAllowed"] = env.get("HOMESERVER_AUTOMATIC_UPGRADES", "false") == "true"
+            changes += await collection(
+                service, client, "/api/v3/qualityprofile", profile, "name", mode, settings=settings
             )
-        profile["cutoff"] = allowed[-1]
-        profile["upgradeAllowed"] = env.get("HOMESERVER_AUTOMATIC_UPGRADES", "false") == "true"
-        changes += await collection(
-            service, client, "/api/v3/qualityprofile", profile, "name", mode, settings=settings
-        )
+            animation_changes = await reconcile_animation_quality_profile(
+                service, settings, client, mode, profile,
+            )
+            if animation_changes is None:
+                return ServiceOutcome(
+                    service, "unsupported", changes,
+                    "Native animation language profile unsupported",
+                )
+            changes += animation_changes
         response = await client.get("/api/v3/downloadclient/schema")
         response.raise_for_status()
         templates = [
@@ -456,6 +609,12 @@ async def reconcile_arr(service, settings, client, mode):
         changes += await collection(
             service, client, "/api/v3/downloadclient", download, "name", mode, settings=settings
         )
+    connection_changes = await reconcile_jellyfin_connection(service, settings, client, mode)
+    if connection_changes is None:
+        return ServiceOutcome(
+            service, "unsupported", changes, "Native Jellyfin connection schema unsupported"
+        )
+    changes += connection_changes
     return ServiceOutcome(
         service,
         "drift"

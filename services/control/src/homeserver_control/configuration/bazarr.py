@@ -51,6 +51,7 @@ async def reconcile_bazarr(settings, client, mode):
     if not isinstance(actual, dict) or not isinstance(actual.get("general"), dict):
         return ServiceOutcome("bazarr", "unsupported", message="Unknown settings API shape")
     env = environment(settings)
+    use_sonarr = env.get("HOMESERVER_BAZARR_USE_SONARR", "true").lower() == "true"
     desired = {
         "general": {
             "enabled_providers": [
@@ -62,6 +63,8 @@ async def reconcile_bazarr(settings, client, mode):
             ]
         }
     }
+    if not use_sonarr:
+        desired["general"].update(use_sonarr=False, serie_default_enabled=False)
     for service in ("sonarr", "radarr"):
         if env.get(f"HOMESERVER_{service.upper()}_API_KEY"):
             url = urlsplit(env[f"HOMESERVER_{service.upper()}_URL"])
@@ -72,7 +75,7 @@ async def reconcile_bazarr(settings, client, mode):
                 "base_url": url.path.rstrip("/"),
                 "apikey": env[f"HOMESERVER_{service.upper()}_API_KEY"],
             }
-            desired["general"]["use_" + service] = True
+            desired["general"]["use_" + service] = use_sonarr if service == "sonarr" else True
     for section, fields in {
         "subdl": {"api_key": "SUBDL_API_KEY"},
         "opensubtitlescom": {
@@ -123,7 +126,7 @@ async def reconcile_bazarr(settings, client, mode):
                     "language": language,
                     "forced": "False",
                     "hi": "False",
-                    "audio_exclude": "True" if language == "pb" else "False",
+                    "audio_exclude": "False",
                     "audio_only_include": "False",
                 }
                 for index, language in enumerate(languages, 1)
@@ -153,7 +156,7 @@ async def reconcile_bazarr(settings, client, mode):
                 "bazarr", {"enabled_languages": enabled}, {"enabled_languages": desired_languages}
             )
         desired["general"].update(
-            serie_default_enabled=True,
+            serie_default_enabled=use_sonarr,
             movie_default_enabled=True,
             serie_default_profile=profile_id,
             movie_default_profile=profile_id,

@@ -14,11 +14,14 @@ import shutil
 import stat
 import time
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 
 CAPABILITIES = frozenset({'hardlink', 'rename', 'unlink', 'ownership', 'exclusive_placement'})
-POOL_IDS = ('ssd', 'hdd')
+POOL_IDS = ('ssd', 'hdd', 'hdd2', 'hdd3')
+REQUIRED_POOL_IDS = ('ssd', 'hdd')
+POOL_LABELS = {'ssd': 'SSD', 'hdd': 'HD USB', 'hdd2': 'HD USB 2', 'hdd3': 'HD USB 3'}
 
 
 class StorageRegistryError(ValueError):
@@ -71,9 +74,9 @@ def _unescape(value: str) -> str:
     return re.sub(r'\\([0-7]{3})', lambda m: chr(int(m[1], 8)), value)
 
 
-def _mounts(path: Path) -> list[_Mount]:
+def _parse_mounts(text: str) -> list[_Mount]:
     result = []
-    for line in path.read_text(encoding='utf-8').splitlines():
+    for line in text.splitlines():
         before, after = line.split(' - ', 1)
         fields, extra = before.split(), after.split()
         major, minor = map(int, fields[2].split(':'))
@@ -83,6 +86,10 @@ def _mounts(path: Path) -> list[_Mount]:
             extra[0], _unescape(extra[1]), frozenset(extra[2].split(',')),
         ))
     return result
+
+
+def _mounts(path: Path) -> list[_Mount]:
+    return _parse_mounts(path.read_text(encoding='utf-8'))
 
 
 def _no_symlinks(path: Path) -> None:
@@ -103,8 +110,6 @@ def _permit_id(value: str) -> str:
 
 
 class StorageRegistry:
-    pool_ids = POOL_IDS
-
     def __init__(
         self, pools: Mapping[str, StoragePool], *,
         host_mountinfo: Path = Path('/run/host-mountinfo'),
@@ -116,11 +121,26 @@ class StorageRegistry:
         download_uid: int = 1000, download_gid: int = 1000,
         set_owner: Callable = os.chown,
     ):
-        self.pools = dict(pools)
+        if set(pools) - set(POOL_IDS):
+            raise StorageRegistryError('unknown storage pool')
+        if len({pool.root for pool in pools.values()}) != len(pools):
+            raise StorageRegistryError('pools must have distinct physical roots')
+        if len({pool.filesystem_id for pool in pools.values()}) != len(pools):
+            raise StorageRegistryError('pools must have distinct physical identities')
+        self.pool_ids = tuple(name for name in POOL_IDS if name in pools)
+        self.pools = {name: pools[name] for name in self.pool_ids}
         self.host_mountinfo, self.mountinfo = host_mountinfo, mountinfo
         self.uuid_dir, self.placement_claims = uuid_dir, placement_claims
         self._device_id, self._usage, self._set_owner = device_id, usage, set_owner
         self.download_uid, self.download_gid = download_uid, download_gid
+
+    @property
+    def primary_pool_id(self) -> str:
+        return 'ssd' if 'ssd' in self.pools else 'hdd3'
+
+    @property
+    def primary_pool(self) -> StoragePool:
+        return self._pool(self.primary_pool_id)
 
     def _pool(self, pool_id: str) -> StoragePool:
         try:
@@ -128,17 +148,31 @@ class StorageRegistry:
         except KeyError as exc:
             raise StorageUnavailable('unknown storage pool') from exc
 
+    def _mounts(self, path: Path) -> list[_Mount]:
+        return _mounts(path)
+
+    @contextmanager
+    def read_snapshot(self):
+        """Reuse pool evidence for one read, validating all identities before return."""
+        snapshot = _StorageReadSnapshot(self)
+        try:
+            yield snapshot
+            snapshot.verify_unchanged()
+        finally:
+            snapshot._active = False
+
     def inspect(self, pool_id: str, *, writable: bool = False) -> StorageSample:
         pool = self._pool(pool_id)
         try:
             _no_symlinks(pool.root)
             if not pool.root.is_dir():
                 raise StorageUnavailable('pool root absent')
-            hosts = [m for m in _mounts(self.host_mountinfo) if m.target == pool.host_mount]
+            hosts = [m for m in self._mounts(self.host_mountinfo) if m.target == pool.host_mount]
             if len(hosts) != 1:
                 raise StorageUnavailable('physical host mount absent or ambiguous')
             host = hosts[0]
-            if host.root != Path('/') or not host.source.startswith('/dev/'):
+            if (host.root != Path('/') or not host.source.startswith('/dev/')
+                    or host.filesystem != 'ext4'):
                 raise StorageUnavailable('host path is not a physical filesystem root')
             if 'rw' not in host.options or 'rw' not in host.super_options:
                 raise StorageUnavailable('physical host mount is read-only')
@@ -150,7 +184,7 @@ class StorageRegistry:
                 raise StorageUnavailable('UUID does not identify mounted device')
             if self._device_id(pool.root) != host.device:
                 raise StorageUnavailable('bind device differs from physical host mount')
-            locals_ = [m for m in _mounts(self.mountinfo)
+            locals_ = [m for m in self._mounts(self.mountinfo)
                        if pool.root == m.target or m.target in pool.root.parents]
             if not locals_:
                 raise StorageUnavailable('container mount evidence absent')
@@ -185,7 +219,7 @@ class StorageRegistry:
         physical = pool.root.joinpath(*PurePosixPath(raw).parts[2:])
         try:
             _no_symlinks(physical)
-            for mount in _mounts(self.mountinfo):
+            for mount in self._mounts(self.mountinfo):
                 if (pool.root in mount.target.parents
                         and (mount.target == physical or mount.target in physical.parents)):
                     raise StorageUnavailable('nested mount in physical storage path')
@@ -273,6 +307,98 @@ class StorageRegistry:
         return self._destination(pool_id, permit_id, create=False)
 
 
+class _StorageReadSnapshot(StorageRegistry):
+    """Private view; never installed on the shared admission registry."""
+
+    def __init__(self, registry: StorageRegistry):
+        self.__dict__.update(registry.__dict__)
+        self._original = registry
+        self._active = True
+        self._samples: dict[str, StorageSample] = {}
+        self._pool_identities: dict[str, tuple] = {}
+        self._placements: dict[tuple[str, str], tuple[int, int]] = {}
+        self._resolved_paths: dict[Path, tuple[int, int]] = {}
+        try:
+            self._tables = {
+                path: path.read_text(encoding='utf-8')
+                for path in {self.host_mountinfo, self.mountinfo}
+            }
+            self._parsed_tables = {path: _parse_mounts(text)
+                                   for path, text in self._tables.items()}
+        except (OSError, ValueError, IndexError) as exc:
+            raise StorageUnavailable('read snapshot mount evidence unavailable') from exc
+
+    def _mounts(self, path: Path) -> list[_Mount]:
+        if not self._active:
+            raise StorageUnavailable('read snapshot has expired')
+        return self._parsed_tables[path]
+
+    def _pool_identity(self, pool_id: str) -> tuple:
+        pool = self._original._pool(pool_id)
+        info = pool.root.stat()
+        return (pool, info.st_dev, info.st_ino,
+                os.readlink(self.uuid_dir / pool.filesystem_id))
+
+    def inspect(self, pool_id: str, *, writable: bool = False) -> StorageSample:
+        if not self._active or writable:
+            raise StorageUnavailable('snapshot only permits an active read')
+        if pool_id not in self._samples:
+            sample = super().inspect(pool_id)
+            identity = self._pool_identity(pool_id)
+            self._samples[pool_id] = sample
+            self._pool_identities[pool_id] = identity
+        return self._samples[pool_id]
+
+    def resolve(self, pool_id: str, logical_path: str | Path, *, writable: bool = False) -> Path:
+        physical = super().resolve(pool_id, logical_path, writable=writable)
+        if physical.exists():
+            info = physical.stat()
+            identity = (info.st_dev, info.st_ino)
+            if physical in self._resolved_paths and self._resolved_paths[physical] != identity:
+                raise StorageUnavailable('physical path changed during read snapshot')
+            self._resolved_paths[physical] = identity
+        return physical
+
+    def prepare_destination(self, pool_id: str, permit_id: str) -> str:
+        raise StorageUnavailable('read snapshot cannot prepare a destination')
+
+    def validate_destination(self, pool_id: str, permit_id: str) -> str:
+        logical = super().validate_destination(pool_id, permit_id)
+        physical = self._pool(pool_id).root / 'torrents' / '.placements' / permit_id
+        info = physical.stat()
+        identity = (info.st_dev, info.st_ino)
+        key = (pool_id, permit_id)
+        if key in self._placements and self._placements[key] != identity:
+            raise StorageUnavailable('placement changed during read snapshot')
+        self._placements[key] = identity
+        return logical
+
+    def _verify_tables(self) -> None:
+        if any(path.read_text(encoding='utf-8') != text
+               for path, text in self._tables.items()):
+            raise StorageUnavailable('mount table changed during read snapshot')
+
+    def verify_unchanged(self) -> None:
+        try:
+            self._verify_tables()
+            # Claims, counterparts, path components and destination inode remain
+            # independently checked for every source, including after the batch.
+            for pool_id, permit_id in tuple(self._placements):
+                self.validate_destination(pool_id, permit_id)
+            for physical, identity in self._resolved_paths.items():
+                _no_symlinks(physical)
+                info = physical.stat()
+                if (info.st_dev, info.st_ino) != identity:
+                    raise StorageUnavailable('physical path changed during read snapshot')
+            for pool_id, identity in self._pool_identities.items():
+                self._original.inspect(pool_id)
+                if self._pool_identity(pool_id) != identity:
+                    raise StorageUnavailable('physical pool changed during read snapshot')
+            self._verify_tables()
+        except (OSError, ValueError, IndexError) as exc:
+            raise StorageUnavailable('read snapshot identity unavailable') from exc
+
+
 def load_storage_registry(
     path: Path = Path('/run/homeserver/storage.json'),
 ) -> StorageRegistry | None:
@@ -288,8 +414,8 @@ def load_storage_registry(
         data = json.loads(raw)
         if not isinstance(data, dict) or set(data) != {'version', 'pools'} or data['version'] != 1:
             raise ValueError('unsupported storage registry schema')
-        if not isinstance(data['pools'], list) or len(data['pools']) != 2:
-            raise ValueError('both fixed storage pools are required')
+        if not isinstance(data['pools'], list) or len(data['pools']) not in (1, 2, 3, 4):
+            raise ValueError('legacy storage pools or singleton hdd3 are required')
         pools = {}
         for entry in data['pools']:
             if set(entry) != {'pool_id', 'filesystem_id', 'capabilities'}:
@@ -304,14 +430,18 @@ def load_storage_registry(
                     or any(type(value) is not bool for value in caps.values())):
                 raise ValueError('invalid capability evidence')
             ssd = name == 'ssd'
+            suffix = {'hdd2': '2', 'hdd3': '3'}.get(name, '')
+            external = Path('/srv/external' + suffix)
             pools[name] = StoragePool(
-                name, 'SSD' if ssd else 'HD USB', uuid,
-                Path('/storage/ssd' if ssd else '/storage/hdd/homeserver'),
-                Path('/srv/data' if ssd else '/srv/external'),
-                Path('/srv/data' if ssd else '/srv/external/homeserver'), caps,
+                name, POOL_LABELS[name], uuid,
+                Path('/storage/ssd' if ssd else f'/storage/{name}/homeserver'),
+                Path('/srv/data') if ssd else external,
+                Path('/srv/data') if ssd else external / 'homeserver', caps,
             )
-        if len({p.filesystem_id for p in pools.values()}) != 2:
+        if set(pools) != {'hdd3'} and not set(REQUIRED_POOL_IDS).issubset(pools):
+            raise ValueError('SSD and first HD, or singleton hdd3, are required')
+        if len({p.filesystem_id for p in pools.values()}) != len(pools):
             raise ValueError('pools must have distinct physical identities')
-        return StorageRegistry({key: pools[key] for key in POOL_IDS})
+        return StorageRegistry(pools)
     except (ValueError, TypeError, KeyError) as exc:
         raise StorageRegistryError(f'invalid storage registry: {exc}') from exc

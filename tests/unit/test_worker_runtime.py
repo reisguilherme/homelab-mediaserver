@@ -142,6 +142,41 @@ class FakeFinalizer:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status,expected", [(2, 1), (5, 1), (1, 0), (3, 0), (None, 0), (4, 0)])
+async def test_owned_pending_movie_imports_resume_without_new_acquisition(status, expected):
+    class Source(FakeSource):
+        async def get_request_status(self, source_id):
+            assert source_id == "42"
+            return status
+
+    scheduler, acquirer, finalizer = FakeScheduler([]), FakeAcquirer(), FakeFinalizer()
+    cycle = WorkerCycle(
+        source=Source(pages=[]), scheduler=scheduler, acquirer=acquirer, finalizer=finalizer,
+        pending_movie_imports=lambda: [{
+            "source_id": "42", "media_key": "movie:tmdb:10", "reservation_id": "r1",
+        }],
+    )
+    await cycle.run_once()
+    assert len(finalizer.calls) == expected
+    assert scheduler.candidates == acquirer.calls == []
+
+
+@pytest.mark.asyncio
+async def test_pending_movie_already_visited_is_not_finalized_twice():
+    finalizer = FakeFinalizer()
+    cycle = WorkerCycle(
+        source=FakeSource(pages=[[{
+            "source_id": "42", "media_key": "movie:tmdb:10", "kind": "movie",
+        }]]), scheduler=FakeScheduler([ReservationResult(True, reservation_id="r1")]),
+        finalizer=finalizer, pending_movie_imports=lambda: [{
+            "source_id": "42", "media_key": "movie:tmdb:10", "reservation_id": "r1",
+        }],
+    )
+    await cycle.run_once()
+    assert finalizer.calls == [("movie:tmdb:10", "r1")]
+
+
+@pytest.mark.asyncio
 async def test_external_failure_logs_context_without_credentials_or_traceback(caplog):
     import httpx
 
@@ -576,7 +611,14 @@ def test_worker_reads_subdl_key_from_environment(tmp_path, monkeypatch) -> None:
     assert cycle.series_acquirer.arr_token == "gateway-test"
     assert cycle.acquirer.health_store.slow_replacement_enabled is False
     assert cycle.series_acquirer.health_store.slow_replacement_enabled is False
-    assert cycle.acquirer.release_policy.resolutions == (2160, 1080)
+    assert cycle.acquirer.health_store.automatic_replacement_enabled is False
+    assert cycle.series_acquirer.health_store.automatic_replacement_enabled is False
+    assert cycle.acquirer.live_source_probes is False
+    assert cycle.series_acquirer.live_source_probes is False
+    assert cycle.discarded_sources.gateway_url == "http://download-gateway:8081"
+    assert cycle.acquirer.release_policy.profile_name == "Standard"
+    assert cycle.series_acquirer.release_policy.profile_name == "Standard"
+    assert cycle.acquirer.release_policy.resolutions == (1080,)
     assert cycle.series_acquirer.release_policy.resolutions == (1080,)
     assert cycle.series_acquirer.prefer_season_pack is True
     assert cycle.series_acquirer.release_affinity is True
@@ -597,3 +639,19 @@ def test_worker_can_disable_pack_and_affinity_preferences(tmp_path, monkeypatch)
     assert cycle is not None
     assert cycle.series_acquirer.prefer_season_pack is False
     assert cycle.series_acquirer.release_affinity is False
+
+
+@pytest.mark.asyncio
+async def test_worker_cleans_discarded_sources_before_polling_requests():
+    reconciler = FakeSourceReconciler()
+
+    class Source:
+        async def list_approved(self, page):
+            assert reconciler.calls == 1
+            return []
+
+    cycle = WorkerCycle(source=Source(), scheduler=FakeScheduler([]),
+                        discarded_sources=reconciler)
+    report = await cycle.run_once()
+    assert report.processed == 0
+    assert reconciler.calls == 1

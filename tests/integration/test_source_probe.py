@@ -119,7 +119,7 @@ def _health(infohash, left, speed=1):
 
 def test_probe_measures_transfer_and_eta_instead_of_reported_seeds(tmp_path):
     path = tmp_path / "health.sqlite"
-    store = SourceHealthStore(path, slow_seconds=300)
+    store = SourceHealthStore(path, slow_seconds=300, automatic_replacement_enabled=True)
     assert (
         store.probe_decision(
             "old", "new", _health("a" * 40, 200_000_000), _health("b" * 40, 400_000_000), now=1000
@@ -128,7 +128,7 @@ def test_probe_measures_transfer_and_eta_instead_of_reported_seeds(tmp_path):
     )
     # Candidate is twice as large and twice as fast: no ETA improvement.
     assert (
-        SourceHealthStore(path).probe_decision(
+        SourceHealthStore(path, automatic_replacement_enabled=True).probe_decision(
             "old", "new", _health("a" * 40, 185_000_000), _health("b" * 40, 370_000_000), now=1060
         )
         == "reject"
@@ -157,9 +157,9 @@ def test_probe_measures_transfer_and_eta_instead_of_reported_seeds(tmp_path):
 
 def test_current_completion_wins_and_exception_survives_restart(tmp_path):
     path = tmp_path / "health.sqlite"
-    store = SourceHealthStore(path)
+    store = SourceHealthStore(path, automatic_replacement_enabled=True)
     store.protect_source("a" * 40)
-    store = SourceHealthStore(path)
+    store = SourceHealthStore(path, automatic_replacement_enabled=True)
     assert store.is_protected("a" * 40)
     assert not store.is_protected("b" * 40)
     assert (
@@ -183,7 +183,7 @@ def test_probe_admission_rechecks_cancellation_and_tombstones(tmp_path, block):
 def test_probe_old_pause_recovery_and_worker_gap_are_not_speed_proof(tmp_path):
     from dataclasses import replace
 
-    store = SourceHealthStore(tmp_path / "health.sqlite")
+    store = SourceHealthStore(tmp_path / "health.sqlite", automatic_replacement_enabled=True)
     old, new = _health("a" * 40, 10000000), _health("b" * 40, 20000000)
     assert store.probe_decision("o", "n", old, new, now=1000) == "observing"
     assert store.probe_decision("o", "n", replace(old, state="pausedDL"), new, now=1060) == "reject"
