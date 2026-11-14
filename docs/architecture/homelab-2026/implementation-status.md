@@ -63,6 +63,17 @@ verificada nos dois destinos e ensaiada antes de alterar o SSD do sistema.
 
 ## Próxima etapa operacional
 
+Atualização da inspeção em 14/11/2026, 23:20 UTC: o mesmo verificador histórico
+continuava ativo e avançou de 1.701 para 1.705/6.029 grupos saudáveis durante a
+consulta. A prova global continuava falsa, com uma pendência de reparo. Jellyfin
+e telemetria responderam 200; readiness do controlador continuou em 503. Nenhum
+serviço, disco ou montagem foi alterado, nem foi iniciado outro pipeline.
+
+O [planejador de lotes](../../runbooks/incremental-media-planning.md) prepara um
+contrato puro para a publicação incremental. Ele não interpreta os recibos
+históricos automaticamente nem libera execução, cleanup, exclusão ou scans.
+Integração com inventário real, contenção nativa e executor continuam pendentes.
+
 1. Concluir/reconciliar a verificação anterior sem executar outro publicador ou
    modificá-la enquanto mantém locks do pipeline.
 2. Medir conteúdo nativo versus staging, colisões e grupos de hardlinks. Espaço

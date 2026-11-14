@@ -1,5 +1,12 @@
 # SSD e HDs USB
 
+O [planejamento incremental do acervo](runbooks/incremental-media-planning.md)
+prepara lotes completos de hardlinks, dependências e referências de evidência,
+preservando origens. Ainda não executa cópia, publicação ou corte. Não aplicar
+o modo singleton abaixo a uma biblioteca parcial sem conter scans e comprovar
+o conteúdo disponibilizado; a manutenção do controlador não contém todos os
+efeitos internos de Jellyfin/Arr.
+
 ## Acervo em um único HD
 
 O layout independente `compose.storage.single.yaml` usa somente o pool `hdd3`
