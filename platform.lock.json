@@ -1,0 +1,7 @@
+{
+  "apiVersion": "homelab/v1",
+  "repository": "https://github.com/reisguilherme/homelab-platform",
+  "commit": "050772ef92f8d13e61b11fcdec1cf71f7579f216",
+  "serviceSchemaPath": "contracts/v1/service.schema.json",
+  "integrationGuidePath": "docs/integration-contract.md"
+}

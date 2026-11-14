@@ -1,60 +1,48 @@
-# Observabilidade opcional
+# Observabilidade opcional de mídia
 
-Esta entrega prepara um exporter privado de snapshots, Prometheus e Grafana. O
-arquivo [compose.observability.yaml](../compose.observability.yaml) forma o projeto
-independente `homeserver-observability`; não é um override do Compose principal.
-Os comandos abaixo são para ativação manual futura. Não representam instalação,
-dashboard em execução, medição de recursos ou testes no servidor.
+Este consumidor mantém o exporter privado e o dashboard de mídia. Prometheus e
+Grafana pertencem a [homelab-platform](https://github.com/reisguilherme/homelab-platform/blob/refactor/docs/observability.md),
+onde ficam credenciais, persistência e instruções centrais. A configuração não foi
+aplicada ao servidor; não comprova reprodução, acesso remoto ou consumo físico.
 
-O exporter inicia `homeserver_telemetry.metrics:app` na imagem construída pelo
-Dockerfile telemetry existente. Ele não inicializa a aplicação pública, abre banco,
-consulta mídia ou recebe credenciais administrativas. A rede Docker é interna;
-Prometheus e exporter não publicam portas. Apenas Grafana publica
-`127.0.0.1:3000:3000`. Não há socket Docker, filesystem do host ou `.env` montado
-nos containers. Os serviços podem reiniciar sem depender dos serviços de mídia.
+[compose.observability.yaml](../compose.observability.yaml) forma o projeto
+independente `homeserver-observability` contendo **somente** `homeserver-metrics`.
+Não mesclar com o Compose principal. O exporter usa o Dockerfile telemetry
+existente e inicia `homeserver_telemetry.metrics:app`; não inicializa a aplicação
+pública, abre banco, consulta mídia ou recebe credenciais administrativas.
+
+Ele adere à rede Docker externa `homelab-metrics` com alias `media-metrics`, na
+porta interna 8090, sem porta no host. A plataforma cria essa rede como interna;
+ela precisa existir no **mesmo daemon Docker** antes da adesão. O alias não cria
+conectividade entre hosts/VMs/K3s. Rede interna não fornece ACL entre participantes.
+Não há socket Docker, devices, filesystem de controle ou `.env` montados.
 
 ## Antes de ativar
 
-- Garantir Linux, Docker Compose e espaço em SSD local. Estes dados não devem
-  ficar em NFS, mergerfs, HD USB ou diretório de mídia.
-- Provisionar os três diretórios abaixo, sem formatar, montar ou alterar `fstab`.
-  O Compose recusa criar automaticamente os caminhos de bind ausentes.
-- Definir `HOMESERVER_GRAFANA_ADMIN_USER` e `HOMESERVER_GRAFANA_ADMIN_PASSWORD`
-  no `.env` privado. Ambas são obrigatórias; não existe credencial padrão no
-  Compose. Usar senha exclusiva, manter `.env` fora do Git e não imprimir o
-  resultado completo de `docker compose config` com credenciais reais.
-- Revisar e ativar a publicação sanitizada dos dois snapshots conforme a seção
-  seguinte. Arquivo copiado uma única vez envelhece e deixa de alimentar valores
-  operacionais. Sem publicador ativo, o exporter continua vivo e indica falta de
-  evidência fresca.
-- Confirmar que o acesso ao loopback funciona no ambiente escolhido. Acesso
-  remoto exige um caminho privado autenticado configurado separadamente; este
-  arquivo não abre roteador, cria proxy, configura MFA ou publica via Tailscale.
+- Preparar a observabilidade central na plataforma e confirmar a rede privada.
+- Preparar o diretório dedicado de snapshots no SSD, sem formatar, montar ou
+  alterar `fstab`. Bind ausente é recusado com `create_host_path: false`.
+- Revisar e ativar o publicador sanitizado abaixo. Cópia única envelhece; exporter
+  vivo sem publicador não comprova evidência operacional fresca.
+- Fazer a adesão de target e dashboard na plataforma explicitamente; um exporter
+  ativo não é coletado automaticamente.
 
-`HOMESERVER_OBSERVABILITY_DIR` é opcional e tem default
-`/srv/appdata/observability`. Ele deve apontar para uma pasta dedicada no SSD, nunca
-para `/srv/appdata/control` ou para um diretório com bancos, tokens ou inventário.
-As variáveis são interpoladas pelo Compose; só as credenciais selecionadas chegam
-ao Grafana. O `.env` inteiro não é repassado a nenhum container e não há `*_FILE`.
-As credenciais iniciais criam o administrador no primeiro banco Grafana; alterar
-essas variáveis não é um procedimento de rotação de uma conta já persistida.
+`HOMESERVER_OBSERVABILITY_DIR` permanece compatível com o publicador e tem default
+`/srv/appdata/observability`; aqui só o subdiretório `snapshots` é montado. Não
+apontar para `/srv/appdata/control`, bancos, tokens, inventário ou mídia. Nenhuma
+credencial Grafana é necessária neste Compose. Campos `HOMESERVER_` aceitos pela
+aplicação não mudaram; credenciais centrais usam `HOMELAB_` no repo da plataforma.
 
-Preparação manual dos caminhos padrão, após confirmar o SSD de destino:
+Instruções para o destino padrão, após confirmar o SSD:
 
 ```bash
 sudo install -d -m 0755 /srv/appdata/observability
 sudo install -d -o 1000 -g 65534 -m 2750 /srv/appdata/observability/snapshots
-sudo install -d -o 65534 -g 65534 -m 0750 /srv/appdata/observability/prometheus
-sudo install -d -o 472 -g 472 -m 0750 /srv/appdata/observability/grafana
 ```
 
-Se o caminho for personalizado no `.env`, ajustar os comandos ao mesmo destino.
-Os IDs acima correspondem aos usuários fixados no Compose. Os arquivos de
-provisioning versionados precisam ser legíveis pelo Grafana e Prometheus.
-
-O diretório de snapshots pertence ao produtor UID 1000 e ao grupo 65534 do
-exporter, com setgid para arquivos novos herdarem esse grupo. O publicador grava
-arquivos com modo 0640; o exporter não pode modificá-los.
+Ajustar o caminho se personalizado no `.env` privado. UID 1000 é o produtor;
+grupo 65534 permite leitura pelo exporter. Setgid mantém o grupo dos arquivos
+novos; o publicador usa modo 0640. O exporter UID/GID 65534 recebe somente leitura.
 
 ## Publicação dos snapshots
 
@@ -122,105 +110,86 @@ Não fornecer uma lista incompleta de arquivos Compose: isso pode trocar os moun
 do coletor. Esta preparação não executa esses comandos na stack ativa. Confirmar
 a publicação e as permissões antes de iniciar o painel.
 
-## Recursos e persistência
+## Adesão à coleta e ao dashboard
 
-| Componente | Teto de RAM | Persistência local |
-|---|---:|---|
-| Exporter | 128 MiB | Somente leitura de `snapshots/` |
-| Prometheus | 512 MiB | `prometheus/`, retenção inicial de 7 dias ou 4 GiB |
-| Grafana | 384 MiB | `grafana/`, banco/configuração/plugins |
-| Total | 1 GiB | Dentro do orçamento existente do core |
+No diretório privado `HOMELAB_PROMETHEUS_TARGETS_DIR` da plataforma, o operador
+pode adicionar um arquivo regular `.json` com:
 
-O teto conjunto é **experimental**, não uma previsão de consumo ou garantia de
-desempenho. Reservar inicialmente 8 GiB de SSD para Prometheus, pelo menos 1 GiB
-separado para Grafana e margem adicional para logs, build e crescimento. Os binds
-não criam quota nem reserva física: confirmar o orçamento disponível antes de
-ativar. O limite `4GB` de Prometheus usa unidades em potência de dois; a primeira
-política atingida encerra a retenção. WAL/head, compactação e limpeza assíncrona
-exigem folga; retenção não impede todos os arquivos de exceder 4 GiB. Prometheus
-requer armazenamento local compatível com POSIX. [Armazenamento oficial](https://prometheus.io/docs/prometheus/latest/storage/).
+```json
+[{"targets": ["media-metrics:8090"], "labels": {"job": "homeserver"}}]
+```
 
-Há um único target, coleta a cada 15 s, timeout de 5 s, limite de 128 amostras por
-scrape e corpo de até 1 MiB. O intervalo dá folga para a validade de 30 s da
-capacidade; não corrige atraso do produtor. Logs Docker giram em dois arquivos de
-10 MiB por container. Não há Loki, Alloy, traces ou coleta de todos os containers.
+O arquivo deve ser legível pelo UID 65534 de Prometheus. A configuração central
+começa sem targets de consumidores: nenhum catálogo ou contrato ativa essa coleta.
+A label `job` mantém as queries de disponibilidade do dashboard. Remover o target
+interrompe coleta futura, preservando histórico já persistido.
 
-Monitorar espaço livre no SSD, crescimento dos diretórios, RAM/OOM e latência do
-controlador durante o ensaio. Usar `df` no SSD, `du` somente nesses diretórios e
-`docker stats` do projeto. Estes controles são manuais nesta etapa; o dashboard
-não mede quota dedicada, não cria alertas de disco e não reserva a margem do host
-para outra VM. O histórico é local e não protege contra falha do mesmo SSD/host.
+O dashboard específico fica em
+[deploy/metrics/dashboards/homeserver.json](../deploy/metrics/dashboards/homeserver.json).
+Ele usa o datasource central UID `homelab-prometheus`. O operador pode obter esse
+arquivo de um commit revisado e montar um diretório privado de dashboards por
+um override opt-in na plataforma, conforme o guia central. A base da plataforma
+não depende de um caminho de checkout de mídia nem contém esse dashboard.
 
 ## Build e operação manual
 
-Após cumprir as pré-condições, executar na raiz do repositório. Manter
-`-p homeserver-observability` em todas as operações desse projeto: o `.env` pode
-conter `COMPOSE_PROJECT_NAME` do projeto principal, que sobrepõe o `name` do YAML.
-A opção explícita `-p` mantém a stack do painel separada mesmo nesse caso.
+Após cumprir as pré-condições, executar na raiz deste repo. Manter
+`-p homeserver-observability` em todas as operações: `COMPOSE_PROJECT_NAME` no
+`.env` ou no processo pode sobrepor o `name` do YAML. O exporter é independente
+do projeto de mídia e da persistência central. Estes comandos são instruções
+para ativação futura, não foram executados nesta preparação:
 
 ```bash
 docker compose -p homeserver-observability --env-file .env -f compose.observability.yaml config --quiet
 docker compose -p homeserver-observability --env-file .env -f compose.observability.yaml build homeserver-metrics
 docker compose -p homeserver-observability --env-file .env -f compose.observability.yaml up -d
 docker compose -p homeserver-observability --env-file .env -f compose.observability.yaml ps
+docker compose -p homeserver-observability --env-file .env -f compose.observability.yaml logs --tail=100
+docker compose -p homeserver-observability --env-file .env -f compose.observability.yaml restart homeserver-metrics
 ```
 
-Abrir `http://127.0.0.1:3000` no host apropriado e entrar com a conta definida.
-O datasource `HomeServer Prometheus` e o dashboard `HomeServer • host, rede e
-pools` são provisionados por arquivos somente para leitura. Não mesclar esse
-arquivo com `compose.yaml`, nem usar o nome do projeto principal. Reiniciar só o
-painel com:
+Para desligar somente o exporter:
 
 ```bash
-docker compose -p homeserver-observability --env-file .env -f compose.observability.yaml restart grafana
+docker compose -p homeserver-observability --env-file .env -f compose.observability.yaml down
 ```
 
-`docker compose -p homeserver-observability --env-file .env -f compose.observability.yaml down` remove apenas
-os containers/rede desse projeto; os dados nos binds persistem. Não apagar esses
-diretórios para corrigir um problema de inicialização. Conferir permissões,
-configuração e logs antes de qualquer procedimento de recuperação.
+A rede externa pertence à plataforma e não é removida pelo consumidor. Para
+parar a central, primeiro parar os exporters aderidos; não forçar remoção de
+rede ocupada. Snapshots persistem; não os apagar para corrigir inicialização.
+O Compose de source permanece um opt-in separado e não é desligado por este
+comando. A autoridade de recuperação da aplicação continua coordenando bloqueios,
+readiness e retomada; painel não autoriza downloads, exclusões ou remount.
 
-Os estados atuais usam consultas instantâneas; séries históricas preservam
-lacunas. `up=1` significa coleta bem-sucedida. `snapshot_valid=1` significa
-**envelope válido**: JSON, estrutura da fonte e timestamp aceitos. Não comprova
-que cada sensor ou pool tem valor válido, nem que a evidência é recente;
-`snapshot_fresh=1` exige envelope válido e idade dentro da janela. Valores
-operacionais e pools passam por validação individual e podem ser omitidos mesmo
-com envelope válido. Ausência de sensor/pool não é zero. Capacidade é exibida
-separadamente por pool, sem soma física entre eles.
+## Recursos, interpretação e limites
 
-**Alertas ainda não são operacionais.** Canal de notificações, regras, duração,
-severidade, responsável, resolução e teste de entrega continuam pendentes. Não
-há contact point, Alertmanager ou sonda externa provisionados. Queda completa do
-host pode derrubar o próprio painel; consultar o desenho de
-[operação e governança](architecture/homelab-2026/operations.md).
+O exporter mantém teto de 128 MiB, filesystem somente para leitura, capabilities
+removidas e `no-new-privileges`. Logs giram em dois arquivos de 10 MiB. Plataforma
+reserva tetos experimentais de 512 MiB para Prometheus e 384 MiB para Grafana:
+1 GiB com este exporter, sem garantia de consumo, quota ou capacidade real. Não
+há persistência de TSDB ou banco Grafana neste consumidor. O histórico central
+retém 7 dias ou 4 GiB; exige margem local para WAL, compactação e logs. Operador
+deve verificar espaço, permissões, RAM/OOM e latência durante o ensaio.
 
-## Versões e validação
+A central coleta a cada 15 s, timeout de 5 s, até 128 amostras e corpo de 1 MiB por
+scrape. Isso dá folga para a validade de 30 s da capacidade, sem corrigir produtor
+atrasado. Estados atuais usam consultas instantâneas e históricos preservam
+lacunas. `up=1` comprova coleta. `snapshot_valid=1` significa envelope aceito
+(JSON, estrutura da fonte e timestamp), sem garantir cada sensor/pool válido ou
+recente. `snapshot_fresh=1` exige envelope válido e idade dentro da janela.
+Valores e pools passam por validação individual e podem ser omitidos mesmo com
+envelope válido. Ausência não é zero; capacidade não é somada entre pools.
 
-Consulta às fontes oficiais em **14/11/2026**:
+Alertas, regras, canal, duração, severidade, responsável, resolução, sonda externa
+e teste de entrega continuam pendentes. Queda do host pode derrubar a própria
+central. Configuração local não comprova acesso Tailscale, reprodução, dashboard
+renderizado, isolamento físico, permissões do SSD ou recuperação após energia.
 
-- `prom/prometheus:v3.13.5`: versão LTS publicada em 21/10/2026, escolhida para
-  esta preparação. A página também lista 3.16.0 como latest; esta stack fixa a
-  linha LTS. [Download Prometheus](https://prometheus.io/download/).
-- `grafana/grafana:13.3.1`: Grafana OSS publicado em 10/11/2026, com essa tag Docker
-  explicitamente documentada. [Download Grafana OSS](https://grafana.com/grafana/download/13.3.1?edition=oss&platform=docker).
-- O repositório `grafana/grafana` é o repositório OSS mantido; `grafana/grafana-oss`
-  deixou de receber atualizações a partir de 12.4.0. [Docker oficial](https://grafana.com/docs/grafana/latest/setup-grafana/installation/docker/).
-
-As tags estão fixadas, sem `latest`; esta preparação não alega ter baixado ou
-executado essas imagens. Rever atualizações e validar as versões antes do ensaio.
-Provisioning segue o [formato oficial Grafana](https://grafana.com/docs/grafana/latest/administration/provisioning/).
-
-Os testes de contrato verificam isolamento, credenciais obrigatórias, mounts,
-retenção, orçamento, datasource e queries do dashboard:
+Os testes verificam isolamento do exporter, mount dedicado, compatibilidade do
+dashboard com métricas reais e Compose com ambiente fictício explícito, sem ler
+`.env` real ou acessar daemon:
 
 ```bash
 uv sync --frozen
 .venv/bin/python -m pytest tests/contract/test_observability_compose.py -q
 ```
-
-Na preparação, YAML/JSON e Compose foram validados com variáveis fictícias e
-arquivo de ambiente temporário explícito, sem carregar o `.env` privado nem
-contatar o daemon. Credenciais ausentes foram recusadas. Isso não comprova
-provisioning em runtime, renderização visual, permissões do SSD, acesso remoto,
-consumo de RAM, alertas ou funcionamento físico do servidor.

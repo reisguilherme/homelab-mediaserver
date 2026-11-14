@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from homeserver_telemetry.metrics import create_metrics_app
 
 ROOT = Path(__file__).resolve().parents[2]
-DEPLOY = ROOT / "deploy/observability"
+DEPLOY = ROOT / "deploy/metrics"
 METRICS = {
     "homeserver_snapshot_valid",
     "homeserver_snapshot_fresh",
@@ -65,7 +65,7 @@ def test_documented_config_keeps_project_with_conflicting_environment(tmp_path):
         pytest.skip("Docker Compose CLI unavailable; config-only validation needs no daemon")
     environment = {
         key: value for key, value in os.environ.items()
-        if not key.startswith(("HOMESERVER_", "COMPOSE_", "DOCKER_"))
+        if not key.startswith(("HOMESERVER_", "HOMELAB_", "COMPOSE_", "DOCKER_"))
     }
     environment.update(
         COMPOSE_PROJECT_NAME="main-project-from-process",
@@ -79,9 +79,7 @@ def test_documented_config_keeps_project_with_conflicting_environment(tmp_path):
         pytest.skip("Docker Compose CLI unavailable in this environment")
     fixture = tmp_path / "fixture.env"
     fixture.write_text(
-        "COMPOSE_PROJECT_NAME=main-project-from-fixture\n"
-        "HOMESERVER_GRAFANA_ADMIN_USER=fixture-user\n"
-        "HOMESERVER_GRAFANA_ADMIN_PASSWORD=fixture-password-not-a-secret\n",
+        "COMPOSE_PROJECT_NAME=main-project-from-fixture\n",
         encoding="utf-8",
     )
     command = next(cmd for cmd in documented_observability_commands() if "config" in cmd)
@@ -93,7 +91,11 @@ def test_documented_config_keeps_project_with_conflicting_environment(tmp_path):
         capture_output=True, text=True, timeout=30,
     )
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["name"] == "homeserver-observability"
+    rendered = json.loads(result.stdout)
+    assert rendered["name"] == "homeserver-observability"
+    assert set(rendered["services"]) == {"homeserver-metrics"}
+    assert rendered["networks"]["metrics"]["external"] is True
+    assert rendered["networks"]["metrics"]["name"] == "homelab-metrics"
 
 
 def test_source_activation_rebuilds_shared_telemetry_image_before_recreation():
@@ -104,21 +106,19 @@ def test_source_activation_rebuilds_shared_telemetry_image_before_recreation():
     )
 
 
-def test_stack_has_its_own_project_and_only_loopback_grafana_is_published():
+def test_stack_has_only_private_exporter_on_external_platform_metrics_network():
     stack = read_stack()
     assert stack["name"] == "homeserver-observability"
-    assert set(stack["services"]) == {"homeserver-metrics", "prometheus", "grafana"}
-    assert stack["networks"] == {"observability": {"internal": True}}
-    for name, service in stack["services"].items():
-        assert service["networks"] == ["observability"]
-        assert "network_mode" not in service and "pid" not in service
-        assert not service.get("depends_on")
-        assert not service.get("privileged", False)
-        assert service["cap_drop"] == ["ALL"]
-        assert service["security_opt"] == ["no-new-privileges:true"]
-        if name != "grafana":
-            assert not service.get("ports")
-    assert stack["services"]["grafana"]["ports"] == ["127.0.0.1:3000:3000"]
+    assert set(stack["services"]) == {"homeserver-metrics"}
+    assert stack["networks"] == {"metrics": {"external": True, "name": "homelab-metrics"}}
+    metrics = stack["services"]["homeserver-metrics"]
+    assert metrics["networks"] == {"metrics": {"aliases": ["media-metrics"]}}
+    assert not metrics.get("ports")
+    assert "network_mode" not in metrics and "pid" not in metrics
+    assert not metrics.get("depends_on") and not metrics.get("privileged")
+    assert metrics["cap_drop"] == ["ALL"]
+    assert metrics["security_opt"] == ["no-new-privileges:true"]
+    assert metrics["mem_limit"] == "128m"
 
 
 def test_exporter_uses_existing_build_with_only_dedicated_read_only_snapshots():
@@ -146,14 +146,7 @@ def test_exporter_uses_existing_build_with_only_dedicated_read_only_snapshots():
 
 def test_stack_cannot_receive_sensitive_mounts_or_whole_environment():
     stack = read_stack()
-    allowed = {
-        "${HOMESERVER_OBSERVABILITY_DIR:-/srv/appdata/observability}/snapshots",
-        "${HOMESERVER_OBSERVABILITY_DIR:-/srv/appdata/observability}/prometheus",
-        "${HOMESERVER_OBSERVABILITY_DIR:-/srv/appdata/observability}/grafana",
-        "./deploy/observability/prometheus.yml",
-        "./deploy/observability/grafana/provisioning",
-        "./deploy/observability/grafana/dashboards",
-    }
+    allowed = {"${HOMESERVER_OBSERVABILITY_DIR:-/srv/appdata/observability}/snapshots"}
     for service in stack["services"].values():
         assert not service.get("env_file")
         assert not service.get("devices")
@@ -168,67 +161,8 @@ def test_stack_cannot_receive_sensitive_mounts_or_whole_environment():
                 assert mount["read_only"] is True
 
 
-def test_grafana_requires_explicit_credentials_and_disables_anonymous_signup():
-    stack = read_stack()
-    env = stack["services"]["grafana"]["environment"]
-    for key in ("GF_SECURITY_ADMIN_USER", "GF_SECURITY_ADMIN_PASSWORD"):
-        assert re.fullmatch(r"\$\{HOMESERVER_GRAFANA_ADMIN_(USER|PASSWORD):\?[^}]+\}", env[key])
-    assert env["GF_AUTH_ANONYMOUS_ENABLED"] == "false"
-    assert env["GF_USERS_ALLOW_SIGN_UP"] == "false"
-    assert env["GF_ANALYTICS_REPORTING_ENABLED"] == "false"
-
-
-def test_pinned_images_and_experimental_memory_and_disk_budgets():
-    stack = read_stack()
-    services = stack["services"]
-    for name in ("prometheus", "grafana"):
-        assert re.fullmatch(r"[a-z/]+:v?\d+\.\d+\.\d+", services[name]["image"])
-    limits = [service["mem_limit"] for service in services.values()]
-    assert all(re.fullmatch(r"[1-9]\d*m", limit) for limit in limits)
-    assert sum(int(limit[:-1]) for limit in limits) <= 1024
-    command = services["prometheus"]["command"]
-    assert "--storage.tsdb.retention.time=7d" in command
-    assert "--storage.tsdb.retention.size=4GB" in command
-    assert "--storage.tsdb.path=/prometheus" in command
-    for name, target in (("prometheus", "/prometheus"), ("grafana", "/var/lib/grafana")):
-        persistent = [v for v in services[name]["volumes"] if v["target"] == target]
-        assert len(persistent) == 1
-        assert persistent[0]["source"].endswith(f"/observability}}/{name}")
-        assert not persistent[0].get("read_only", False)
-
-
-def test_prometheus_collects_only_the_private_exporter_with_bounded_ingestion():
-    config = read_yaml(DEPLOY / "prometheus.yml")
-    assert config["global"]["scrape_interval"] == "15s"
-    assert len(config["scrape_configs"]) == 1
-    job = config["scrape_configs"][0]
-    assert job["job_name"] == "homeserver"
-    assert job["metrics_path"] == "/metrics"
-    assert job["static_configs"] == [{"targets": ["homeserver-metrics:8090"]}]
-    assert job["sample_limit"] <= 128
-    assert job["body_size_limit"] == "1MB"
-    assert job["honor_labels"] is False
-    assert not config.get("remote_write")
-    assert not config.get("alerting")
-
-
-def test_grafana_provisions_matching_private_datasource_and_dashboard_directory():
-    sources = read_yaml(DEPLOY / "grafana/provisioning/datasources/prometheus.yml")
-    assert sources["apiVersion"] == 1
-    assert len(sources["datasources"]) == 1
-    source = sources["datasources"][0]
-    assert source["uid"] == "homeserver-prometheus"
-    assert source["type"] == "prometheus"
-    assert source["access"] == "proxy"
-    assert source["url"] == "http://prometheus:9090"
-    assert source["editable"] is False
-    provision = read_yaml(DEPLOY / "grafana/provisioning/dashboards/homeserver.yml")
-    assert provision["providers"][0]["options"]["path"] == "/var/lib/grafana/dashboards"
-    assert provision["providers"][0]["allowUiUpdates"] is False
-
-
 def test_dashboard_covers_exporter_contract_and_does_not_turn_missing_into_zero():
-    path = DEPLOY / "grafana/dashboards/homeserver.json"
+    path = DEPLOY / "dashboards/homeserver.json"
     assert path.is_file(), "Missing provisioned dashboard"
     dashboard = json.loads(path.read_text(encoding="utf-8"))
     assert dashboard["uid"] == "homeserver-overview"
@@ -241,7 +175,7 @@ def test_dashboard_covers_exporter_contract_and_does_not_turn_missing_into_zero(
     for panel in dashboard["panels"]:
         if not panel.get("targets"):
             continue
-        assert panel["datasource"]["uid"] == "homeserver-prometheus"
+        assert panel["datasource"]["uid"] == "homelab-prometheus"
         assert panel["fieldConfig"]["defaults"]["noValue"] == "Sem dados"
         assert not panel.get("transformations")
         if panel["type"] == "stat":

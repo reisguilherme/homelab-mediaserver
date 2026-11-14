@@ -1,0 +1,37 @@
+{
+  "apiVersion": "homelab/v1",
+  "id": "media-metrics",
+  "repository": "https://github.com/reisguilherme/homelab-mediaserver",
+  "runtime": "compose-vm",
+  "resources": {"cpu": 0.25, "memoryMiB": 128, "gpu": "none"},
+  "network": {
+    "administration": "private",
+    "inheritPlatformPrivileges": false,
+    "exposure": "private",
+    "ingress": [{"port": 8090, "protocol": "tcp", "scope": "private", "purpose": "metrics"}],
+    "egress": []
+  },
+  "storage": [
+    {
+      "id": "sanitized-snapshots",
+      "mountPath": "/run/homeserver-metrics",
+      "kind": "local-block",
+      "access": "ro",
+      "purpose": "config",
+      "requestedGiB": 1
+    }
+  ],
+  "telemetry": {
+    "metricsPath": "/metrics",
+    "metricsPort": 8090,
+    "healthcheckPath": "/health/live",
+    "healthcheckPort": 8090
+  },
+  "secrets": [],
+  "recovery": {
+    "authority": "consumer",
+    "runbookPath": "docs/platform-integration.md",
+    "requiresStorageReady": true,
+    "preserveOperatorPauses": true
+  }
+}

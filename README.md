@@ -148,10 +148,13 @@ ou remover um vínculo preserva as mídias.
 
 ## Desenvolver
 
-O [desenho de evolução do homelab](docs/architecture/homelab-2026/README.md)
-separa a arquitetura proposta da implantação atual. A
-[observabilidade opcional](docs/observability.md) prepara Grafana/Prometheus
-em projeto independente, com métricas sanitizadas e ativação explícita.
+O [homelab-platform](https://github.com/reisguilherme/homelab-platform/tree/refactor)
+concentra arquitetura geral, infraestrutura compartilhada, contratos e
+Grafana/Prometheus. Este repositório mantém a aplicação de mídia e seus
+componentes. A [integração com a plataforma](docs/platform-integration.md)
+define a versão do contrato e os limites da primeira entrega. A
+[observabilidade opcional](docs/observability.md) publica métricas sanitizadas
+para a plataforma, com ativação explícita.
 
 Use Linux/WSL2, Python 3.12 e `uv sync --frozen`.
 

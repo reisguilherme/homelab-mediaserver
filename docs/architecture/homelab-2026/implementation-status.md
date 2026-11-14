@@ -1,5 +1,13 @@
 # Preparação da implementação — 14/11/2026
 
+A arquitetura geral passou para
+[homelab-platform](https://github.com/reisguilherme/homelab-platform/blob/refactor/docs/architecture/README.md).
+Este registro preserva os fatos da preparação da aplicação. Na separação de
+repositórios, Prometheus/Grafana e seu provisioning passaram para a plataforma;
+o exporter, a publicação sanitizada e o dashboard de mídia permaneceram aqui.
+Os números de testes abaixo são evidências da etapa anterior à separação.
+Consulte a [integração atual](../../platform-integration.md).
+
 O proprietário autorizou implementar e publicar na branch `refactor`, incluindo
 as alterações locais anteriores. **O corte aguarda aviso explícito do
 proprietário.** A preparação não instala Proxmox nem transforma o servidor atual
