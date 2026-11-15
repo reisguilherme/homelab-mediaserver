@@ -31,10 +31,13 @@ pelo console. HTTPS também foi validado pela CA obtida no SSH autenticado.
 Antes do desligamento, o proprietário retirou todos os HDs USB e confirmou
 essa ação. Eles continuam desconectados, aguardando a etapa de storage nas VMs.
 
-O inventário posterior confirmou o Proxmox no SSD correto e o segundo SSD de
-mídia com o mesmo UUID ext4, sem montagem. Nenhuma VM ou aplicação foi iniciada;
-restauração, isolamento e hub permanecem pendentes. O estado do host está na
-[plataforma](https://github.com/reisguilherme/homelab-platform/blob/refactor/docs/implementation-status.md).
+Na entrega inicial, o inventário confirmou o Proxmox no SSD correto e o segundo
+SSD de mídia com o mesmo UUID ext4, sem montagem; ainda não havia VMs ou
+aplicações iniciadas. Depois, core, playback e edge foram criadas com Ubuntu,
+e os testes de rede, autostart ordenado e reboot foram aceitos. Restauração,
+aplicações, NFS e hub continuam pendentes; essa base não comprova prontidão da
+mídia. O [estado canônico da plataforma](https://github.com/reisguilherme/homelab-platform/blob/refactor/docs/implementation-status.md#vms-e-rede-privada)
+registra o alcance das verificações e os limites restantes.
 
 ## Estado observado por SSH em 14/11/2026
 
