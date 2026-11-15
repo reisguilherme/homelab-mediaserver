@@ -58,14 +58,16 @@ Não houve retomada automática dos serviços.
 recibo, os tamanhos dos arquivos selados e os 36 containers parados, sem mudança
 de configuração. Às 21:32 UTC, todos os HDs USB estavam ausentes do host e o
 recibo já não estava acessível. A primeira tentativa de desligamento parou na
-pré-checagem, antes de executar o comando. A causa da desconexão foi perguntada
-ao proprietário; isso não comprova perda do backup.
+pré-checagem, antes de executar o comando. O proprietário confirmou depois
+que havia desconectado todos os HDs USB. A captura e a auditoria final ocorreram
+antes dessa retirada; não há evidência de perda do backup.
 
 Às 21:33 UTC, depois de reconfirmar os containers parados, a sincronização e o
 comando normal de desligamento concluíram com sucesso. SSH ficou inacessível;
 a confirmação física de máquina desligada permanece pendente. Nenhuma montagem,
-reparação ou formatação foi executada. Esclarecer a desconexão antes de iniciar
-a instalação; a decisão de manter somente a cópia final no HD continua válida.
+reparação ou formatação foi executada. Confirmar a máquina fisicamente desligada
+antes de iniciar a instalação, mantendo os HDs USB desconectados e o adaptador
+Ethernet USB conectado. A decisão de manter somente a cópia final no HD continua válida.
 
 ## Ensaios e aceite
 

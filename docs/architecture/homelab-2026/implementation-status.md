@@ -26,8 +26,8 @@ no HD de 18 TB; a transferência foi interrompida e o parcial preservado.
 A restauração completa do conjunto final não foi executada. O desligamento
 normal foi aceito às 21:33 UTC, com os containers parados e as gravações
 sincronizadas; SSH ficou inacessível. A confirmação física está pendente.
-Antes do desligamento, os HDs USB deixaram de aparecer no host; a causa ainda
-aguarda confirmação do proprietário, conforme o roteiro de pré-instalação.
+Antes do desligamento, o proprietário retirou todos os HDs USB e confirmou
+essa ação. Eles devem permanecer desconectados durante a instalação.
 
 ## Estado observado por SSH em 14/11/2026
 
