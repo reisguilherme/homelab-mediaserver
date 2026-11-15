@@ -188,7 +188,7 @@ class OwnedSet:
             if item.identifier in chosen:
                 self._command("start", item.identifier)
 
-    def stop(self):
+    def _stop_snapshot(self):
         snapshots = self.snapshot()
         if any(s["State"]["Restarting"] or s["State"]["Paused"] for s in snapshots):
             self.hold = True
@@ -200,6 +200,10 @@ class OwnedSet:
         if not all(_stopped(s) for s in baseline):
             self.hold = True
             raise ContainmentError("not_stopped")
+        return baseline
+
+    def stop(self):
+        baseline = self._stop_snapshot()
         timestamps = tuple(_state(s) for s in baseline)
 
         def guard():
@@ -213,12 +217,19 @@ class OwnedSet:
         if self.hold:
             return False
         try:
-            guard = self.stop()
+            baseline = {s["Id"]: _state(s) for s in self._stop_snapshot()}
+
+            def guard():
+                # Keep the same timestamps as ownership shrinks after removals.
+                # Merely stopped again does not preserve containment continuity.
+                if any(_state(s) != baseline.get(s["Id"]) for s in self.snapshot()):
+                    self.hold = True
+                    raise ContainmentError("containment_changed")
+
             guard()
             # Every container must be confirmed stopped before the first removal.
             while self.owned:
-                if not all(_stopped(s) for s in self.snapshot()):
-                    raise ContainmentError("not_stopped")
+                guard()
                 self._command("rm", self.owned[0].identifier)
                 self.owned.pop(0)
             return True

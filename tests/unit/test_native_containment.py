@@ -191,6 +191,31 @@ def test_cleanup_validates_entire_set_before_first_removal():
     assert not docker.mutations
 
 
+@pytest.mark.parametrize("changed_snapshot,removed_count", [(4, 0), (5, 1)])
+def test_cleanup_retains_on_restart_and_stop_before_each_removal(changed_snapshot, removed_count):
+    group, docker, states = fixture_set()
+    inspect = docker.inspect
+    reads = 0
+
+    def changed_inspect(identifiers):
+        nonlocal reads
+        reads += 1
+        if reads == changed_snapshot:
+            states[group.owned[-1].identifier]["State"].update(
+                StartedAt="unexpected-start", FinishedAt="unexpected-finish"
+            )
+        return inspect(identifiers)
+
+    docker.inspect = changed_inspect
+    assert group.cleanup() is False
+    assert sum(command[0] == "rm" for command in docker.mutations) == removed_count
+    assert len(group.owned) == 2 - removed_count
+    assert group.hold
+    previous = list(docker.mutations)
+    assert group.cleanup() is False
+    assert docker.mutations == previous
+
+
 def test_failed_stop_latches_hold_even_if_docker_later_recovers():
     group, docker, _ = fixture_set()
     original = docker.command
@@ -429,3 +454,66 @@ def test_unknown_create_retains_fixture_but_missing_image_has_no_cleanup_hold(
         assert not (root / "create-in-progress").exists()
         assert report.blocked_reasons == ("docker_failed",)
         assert not any(args[0] == "create" for args in calls)
+
+
+@pytest.mark.parametrize("diagnostic_failure", ["write", "chmod"])
+def test_failed_private_diagnostic_preserves_sanitized_report_and_owned_cleanup(
+    monkeypatch, tmp_path, diagnostic_failure
+):
+    from dataclasses import asdict
+
+    from homeserver_control import native_rehearsal
+
+    root = tmp_path / "private-fixture"
+    seed, docker, _ = fixture_set()
+
+    def fixture_root(**kwargs):
+        root.mkdir(mode=0o700)
+        return str(root)
+
+    def create(group, *args):
+        group.owned.extend(seed.owned)
+        return {}
+
+    class FailingApps:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def baseline(self):
+            raise RuntimeError("private-native-path-and-token")
+
+    original_write = Path.write_text
+    original_chmod = native_rehearsal.os.chmod
+
+    def write(path, *args, **kwargs):
+        if path.name == "private-error.txt":
+            raise OSError("private-diagnostic-path-and-token")
+        return original_write(path, *args, **kwargs)
+
+    def chmod(path, *args, **kwargs):
+        if Path(path).name == "private-error.txt":
+            raise OSError("private-diagnostic-path-and-token")
+        return original_chmod(path, *args, **kwargs)
+
+    monkeypatch.setattr(native_rehearsal.tempfile, "mkdtemp", fixture_root)
+    monkeypatch.setattr(native_rehearsal, "Docker", lambda **kwargs: docker)
+    monkeypatch.setattr(native_rehearsal, "_resolve_images", lambda _: {})
+    monkeypatch.setattr(native_rehearsal, "_create", create)
+    monkeypatch.setattr(native_rehearsal, "NativeApps", FailingApps)
+    if diagnostic_failure == "write":
+        monkeypatch.setattr(Path, "write_text", write)
+    else:
+        monkeypatch.setattr(native_rehearsal.os, "chmod", chmod)
+
+    report = native_rehearsal.run_native_rehearsal()
+    assert report.blocked_reasons == ("native_rehearsal_failed",)
+    assert report.resources_retained
+    assert report.owned_containers_created == report.owned_containers_removed == 2
+    assert root.is_dir()
+    assert sum(command[0] == "stop" for command in docker.mutations) == 2
+    assert sum(command[0] == "rm" for command in docker.mutations) == 2
+    assert not any(command[0] == "kill" or "--force" in command for command in docker.mutations)
+    public = json.dumps(asdict(report))
+    assert "private-native-path-and-token" not in public
+    assert "private-diagnostic-path-and-token" not in public
+    assert str(root) not in public

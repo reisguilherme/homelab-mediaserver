@@ -230,9 +230,13 @@ def run_native_rehearsal(scenario="success"):
     except (ContainmentError, CheckpointError) as error:
         report.blocked_reasons = (str(error),)
     except Exception:
-        (root / "private-error.txt").write_text(traceback.format_exc(), encoding="utf-8")
-        os.chmod(root / "private-error.txt", 0o600)
         report.blocked_reasons = ("native_rehearsal_failed",)
+        try:
+            (root / "private-error.txt").write_text(traceback.format_exc(), encoding="utf-8")
+            os.chmod(root / "private-error.txt", 0o600)
+        except Exception:
+            # Diagnostics are optional; cleanup and the sanitized report are not.
+            pass
     # Never delete a root on uncertain create/visibility/stop/removal outcomes.
     count = len(group.owned) if group else 0
     cleaned = group.cleanup() if group else True
