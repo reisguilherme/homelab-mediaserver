@@ -52,6 +52,21 @@ sistema identificado na ficha privada para instalar Proxmox, preservando o
 segundo SSD e todos os HDs USB. Conferir modelo e serial no instalador.
 Não houve retomada automática dos serviços.
 
+### Desligamento e passagem física
+
+Às 21:24 UTC, a auditoria confirmou o HD esperado montado, a identidade do
+recibo, os tamanhos dos arquivos selados e os 36 containers parados, sem mudança
+de configuração. Às 21:32 UTC, todos os HDs USB estavam ausentes do host e o
+recibo já não estava acessível. A primeira tentativa de desligamento parou na
+pré-checagem, antes de executar o comando. A causa da desconexão foi perguntada
+ao proprietário; isso não comprova perda do backup.
+
+Às 21:33 UTC, depois de reconfirmar os containers parados, a sincronização e o
+comando normal de desligamento concluíram com sucesso. SSH ficou inacessível;
+a confirmação física de máquina desligada permanece pendente. Nenhuma montagem,
+reparação ou formatação foi executada. Esclarecer a desconexão antes de iniciar
+a instalação; a decisão de manter somente a cópia final no HD continua válida.
+
 ## Ensaios e aceite
 
 Os ensaios usam cópias descartáveis da restauração, imagens já verificadas e

@@ -23,8 +23,11 @@ registro mantém explícitas as pendências antes de substituir o sistema.
 O checkpoint final no HD foi fechado às 21:08 UTC de 15/11. O proprietário
 dispensou a segunda cópia final no Windows e decidiu seguir com a cópia completa
 no HD de 18 TB; a transferência foi interrompida e o parcial preservado.
-A restauração completa do conjunto final não foi executada. Os 22 containers
-originalmente ativos estão parados, com SSH pela LAN disponível.
+A restauração completa do conjunto final não foi executada. O desligamento
+normal foi aceito às 21:33 UTC, com os containers parados e as gravações
+sincronizadas; SSH ficou inacessível. A confirmação física está pendente.
+Antes do desligamento, os HDs USB deixaram de aparecer no host; a causa ainda
+aguarda confirmação do proprietário, conforme o roteiro de pré-instalação.
 
 ## Estado observado por SSH em 14/11/2026
 
