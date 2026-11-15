@@ -17,7 +17,13 @@ no endpoint de readiness. Nenhum processo foi parado, nenhuma manutenção foi
 removida e nenhum segundo pipeline foi iniciado. Esses checks não demonstram
 reprodução real ou capacidade de migração em paralelo.
 
-O corte continua aguardando aviso explícito do proprietário. O pipeline antigo
+Em 15/11/2026, o proprietário autorizou indisponibilidade para prosseguir; a
+[execução do checkpoint operacional](operational-checkpoint-execution.md) registra
+a captura selada no HD e o retorno dos 21 serviços no mesmo layout. A segunda
+cópia completa no Windows e a restauração dos arquivos em Linux foram
+verificadas; as aplicações restauradas não foram iniciadas. A migração do acervo
+continua dependente de prova de conteúdo, reconciliação do reparo e contenção
+apropriada, além do ensaio funcional de restauração. O pipeline antigo
 exige corte integral e uma etapa de limpeza de origens; não deve ser reaproveitado
 para este requisito. A manutenção do controlador não impede, sozinha, scans
 internos de Jellyfin/Arr que possam reagir à ausência de arquivos.
@@ -203,7 +209,7 @@ O relatório diferencia essas operações reais de filesystem da contenção
 
 ## Dependências para implementar o executor
 
-1. Reconciliar o verificador ativo, pendências de reparo, provas e publicação
+1. Reconciliar o relatório do verificador, pendências de reparo, provas e publicação
    anterior. Não iniciar outro escritor enquanto o pipeline mantém seus locks.
 2. Produzir inventário fresco e privado por inode, links, conteúdo, dependências
    e colisões, diferenciando biblioteca nativa e staging. Medir capacidade real.

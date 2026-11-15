@@ -7,8 +7,12 @@ A documentação geral passou para o repositório da plataforma:
 Este repositório mantém a aplicação de mídia. Consulte a
 [integração com a plataforma](../../platform-integration.md) e o
 [registro da preparação operacional](implementation-status.md).
-O [checkpoint operacional](../../runbooks/operational-checkpoint-preparation.md)
-reúne a inspeção SSH mais recente, escopo, capacidade e proposta de restauração.
+A [execução do checkpoint operacional](../../runbooks/operational-checkpoint-execution.md)
+registra a captura no HD, a segunda cópia verificada no Windows, a restauração
+dos arquivos em Linux e o retorno dos 21 serviços originais. A validação
+funcional das aplicações restauradas e a migração do acervo permanecem pendentes.
+A [preparação anterior](../../runbooks/operational-checkpoint-preparation.md)
+reúne escopo, capacidade e procedimento de restauração.
 O [roteiro anterior ao corte](../../runbooks/media-precutover-review.md) registra
 as condições de contenção e as pendências da migração.
 

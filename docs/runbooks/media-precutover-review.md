@@ -1,5 +1,15 @@
 # Inspeção e preparação do corte de mídia
 
+Em 15/11/2026, após as inspeções abaixo, o proprietário autorizou a
+indisponibilidade. A [execução do checkpoint](operational-checkpoint-execution.md)
+registra a captura selada no HD e o retorno dos 21 serviços originais, com
+manutenção preservada e recuperação USB/cron restabelecidos. A segunda cópia
+completa no Windows e a restauração dos arquivos em Linux foram verificadas,
+incluindo 11 bancos SQLite. Nenhuma aplicação restaurada foi iniciada; o ensaio
+funcional e a migração do acervo continuam pendentes. O presente roteiro
+preserva as evidências anteriores e os requisitos de contenção para a migração;
+a retomada do mesmo layout não comprova contenção para biblioteca parcial.
+
 Atualização operacional em 15/11/2026, 13:03 em São Paulo: o relatório existente
 concluiu os 6.029 grupos saudáveis, com uma pendência de reparo e prova global
 ainda falsa. A [preparação do checkpoint](operational-checkpoint-preparation.md)
@@ -18,9 +28,10 @@ Inspeção SSH em **14/11/2026, 21:39–21:49, America/Sao_Paulo**
 dos containers e respostas de saúde. Não foram executados novos hashes de mídia,
 cópias, publicação, mudanças de configuração, mounts ou comandos de parada.
 
-Este documento prepara a operação; **o corte ainda não está pronto para
-execução**. O proprietário mantém a disponibilidade até avisar expressamente.
-A autorização da janela também não escolhe um SSD para sobrescrita ou autoriza
+Este documento prepara a operação; **o corte de mídia ainda depende dos
+requisitos abaixo**. Na data da inspeção, a indisponibilidade aguardava aviso;
+a autorização posterior está registrada na execução do checkpoint.
+A autorização da janela não escolhe um SSD para sobrescrita ou autoriza
 alterar qualquer montagem: dispositivo e escopo precisam estar identificados.
 
 ## Resultado observado
@@ -200,7 +211,8 @@ interrompe o procedimento para revisão.
    guardar somente seus digests não garante que poderão ser obtidas novamente.
    Validar integridade dos bancos **nas cópias**, sem abrir os originais para
    reparo. Uma cópia de arquivos ativos ou apenas do `.db` não atende ao aceite.
-   O checkpoint anterior contém somente código/configuração e não o substitui.
+   O checkpoint inicial de código/configuração não substituía esse conjunto;
+   a captura operacional posterior está registrada na execução do checkpoint.
 
    Guardar no HD de 18 TB e neste Windows, com permissões privadas e SHA-256
    conferido depois da transferência. Usar um arquivo/container de backup que
@@ -208,9 +220,10 @@ interrompe o procedimento para revisão.
    arquivos soltos no NTFS não garante esses metadados. Conferir capacidade dos
    dois destinos e ensaiar a restauração em Linux. Hashes iguais comprovam a
    transferência, não a capacidade de restauração ou consistência das aplicações.
-   O manifesto fechado de arquivos e o ensaio de restauração ainda precisam
-   ser preparados; não há comando de backup genérico autorizado a excluir
-   subdiretórios ou ignorar bancos desconhecidos.
+   O manifesto fechado e a restauração dos arquivos foram verificados depois
+   desta inspeção. O ensaio funcional das aplicações permanece pendente; não
+   há comando de backup genérico autorizado a excluir subdiretórios ou ignorar
+   bancos desconhecidos.
 
 6. Reconciliar delta, prova de conteúdo/topologia e estado por lote antes de
    publicar. Preparar o mapa exato de mounts/binds e alterações de estado para
@@ -250,8 +263,11 @@ pode gerar `container-replaced`. A reativação não é automática no rollback.
 
 ## Trabalho que segue sem indisponibilidade
 
-Implementar e ensaiar contenção nativa em ambiente isolado, preparar o manifesto
-de checkpoint/restauração e integrar evidências autênticas ao futuro executor.
+Implementar e ensaiar contenção nativa em ambiente isolado, testar funcionalmente
+as aplicações em cópias da restauração já conferida e integrar evidências
+autênticas ao futuro executor. Resolver as dependências históricas cuja
+reconstrução ou integridade semântica ainda não foi comprovada e preservar o
+outro projeto antes de reinstalar o sistema.
 Reconciliar a conclusão do verificador e a pendência de reparo quando houver
 evidência nova. Só então fechar comandos específicos de corte para a janela.
 Nobreak, isolamento em VMs e recuperação após mudança de arquitetura continuam
@@ -259,4 +275,4 @@ pendências da [plataforma](https://github.com/reisguilherme/homelab-platform/bl
 
 Evidências com IDs, paths de incidentes, mapas de overrides e relatórios privados
 ficam fora do Git. A presente inspeção não comprova WAN, reprodução, throughput,
-retorno físico do USB, restauração ou integridade global do acervo.
+retorno físico do USB, restauração funcional ou integridade global do acervo.

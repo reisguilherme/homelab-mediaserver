@@ -9,9 +9,11 @@ Os números de testes abaixo são evidências da etapa anterior à separação.
 Consulte a [integração atual](../../platform-integration.md).
 
 O proprietário autorizou implementar e publicar na branch `refactor`, incluindo
-as alterações locais anteriores. **O corte aguarda aviso explícito do
-proprietário.** A preparação não instala Proxmox nem transforma o servidor atual
-em três VMs sem essa etapa.
+as alterações locais anteriores. **Em 15/11/2026, autorizou também a
+indisponibilidade.** A [execução do checkpoint](../../runbooks/operational-checkpoint-execution.md)
+registra a captura no HD, a cópia Windows e a restauração dos arquivos em Linux
+verificadas, além do retorno dos 21 serviços originais. A autorização não escolhe
+SSD para sobrescrita, não altera mounts nem equivale à instalação do Proxmox.
 
 ## Estado observado por SSH em 14/11/2026
 
@@ -41,14 +43,14 @@ não comprovam reprodução real, exposição WAN, desempenho ou integridade tot
 | Storage singleton | Suporte existente para `hdd3`, consumidores e recuperação incluídos na branch | Reconciliação dos dados e estado real antes do corte |
 | Observabilidade | Exporter privado, publicação sanitizada opt-in, Prometheus e Grafana com provisioning | Build, ativação, renderização, permissões e consumo medidos no servidor |
 | Governança | Desenho separa leitura de métricas e controle administrativo | Proxmox real, usuários/ACL por VM, MFA e tarefas administrativas ensaiadas |
-| Recuperação USB | Implementação local existente e desenho de coordenação host/core/NFS | Provar ativação local; implementar e ensaiar coordenação virtualizada |
+| Recuperação USB | Implementação local existente, confirmada habilitada em `ready` após o checkpoint; desenho de coordenação host/core/NFS | Ensaiar falha e retorno físicos; implementar e ensaiar coordenação virtualizada |
 | Energia | Nobreak registrado como aquisição pendente | Equipamento, autonomia, comunicação e desligamento coordenado |
 
 A observabilidade inicial cobre host, rede, capacidade por pool e validade/idade
 dos snapshots. Não cobre ainda todas as VMs, aplicações, energia, auditoria ou
 alertas. O [guia de ativação](../../observability.md) distingue preparação e runtime.
 
-## Checkpoint privado
+## Checkpoint privado anterior: código e configuração
 
 Foi criado um checkpoint do código/configuração efetivamente presentes no
 servidor, incluindo configuração privada e os overrides ativos. O arquivo foi
@@ -56,14 +58,65 @@ relido no HD de 18 TB e copiado para este computador Windows. Tamanho e SHA-256
 coincidiram nos dois destinos; o arquivo Windows está em diretório com ACL
 restrita. Nenhum desses conteúdos entra na branch.
 
-**Esse checkpoint não inclui bancos nem constitui um estado consistente de todas
-as aplicações.** A cópia final dos bancos, configurações, claims e demais dados
-necessários à restauração deve ser feita sob quiescência na janela autorizada,
-verificada nos dois destinos e ensaiada antes de alterar o SSD do sistema.
+**Esse checkpoint anterior não inclui bancos nem constitui um estado consistente
+de todas as aplicações.** A captura posterior sob quiescência está registrada
+abaixo, com segunda cópia e restauração dos arquivos verificadas. A validação
+funcional das aplicações e a preservação do outro projeto no host ainda são
+necessárias antes de qualquer alteração do SSD do sistema.
 
-## Próxima etapa operacional
+## Checkpoint operacional: arquivos restaurados e conferidos
 
-**Inspeção mais recente: 15/11/2026, 12:58–13:03 em São Paulo.** A
+Após a liberação da indisponibilidade em 15/11/2026, foram parados de forma limpa
+os 21 serviços de mídia originalmente ativos. Os nove containers já parados
+permaneceram assim, e o outro projeto no host foi preservado. Recuperação USB
+e cron foram temporariamente suspensos. A captura terminou com fontes estáveis
+e cinco arquivos sincronizados e relidos por SHA-256 no HD, totalizando
+58.114.509.824 bytes. Os mesmos 21 IDs retornaram às **14:42 em São Paulo**,
+com mounts e marcador de manutenção preservados. Cron e recuperação USB foram
+restabelecidos, com USB habilitado em `ready`.
+
+O censo sob quiescência enumerou 259.318 membros, 147.380 inodes regulares únicos
+e 63.228.971.417 bytes lógicos únicos. As 42 imagens exportadas passaram pela
+cópia Windows, retorno ao Linux e importação em daemon isolado; as 20 imagens
+originais disponíveis foram conferidas. Três rootfs de workers históricos com
+imagem indisponível têm hashes verificados, mas sua reconstrução não foi
+demonstrada. Nenhum container de ensaio dessas aplicações foi iniciado.
+
+Na consulta final às **15:52 em São Paulo**, os mesmos 21 IDs estavam ativos,
+os nove já parados continuavam assim e todos mantinham contador de reinícios
+em zero. Byparr, Jellyfin, telemetria e gateway estavam `healthy`; API e worker
+do controlador mantinham o `unhealthy` anterior. Jellyfin, telemetria e liveness
+do controlador responderam HTTP 200; readiness permaneceu em 503, com a
+manutenção histórica preservada. Cron estava ativo, USB habilitado em `ready`
+e o container ativo do outro projeto permanecia em execução. Isso não comprova
+reprodução, acesso WAN ou recuperação após falha física do HD.
+
+A segunda cópia no Windows foi aceita às **15:19 em São Paulo**: 13 arquivos,
+58.209.849.661 bytes, sincronizados com `fsync` e relidos por SHA-256, além do
+recibo de captura confirmado separadamente. O conjunto inclui os cinco arquivos
+de estado/imagens/rootfs e os metadados necessários à conferência.
+
+O retorno ao ext4 do WSL passou pelo preflight, extração sem avisos e verificação
+às **15:50 em São Paulo** (18:50:54 UTC), sem falhas. Foram conferidas 259.318
+entradas do manifesto e 16 diretórios ancestrais implícitos, totalizando 259.334
+entradas restauradas. A comparação cobriu conteúdo e metadados dos 147.380
+inodes regulares únicos, com 63.228.971.417 bytes relidos por hash, além de
+links, ACLs, xattrs e topologia dos hardlinks selecionados.
+
+Onze bancos SQLite passaram em `integrity_check`, com sidecars preservados em
+cópias descartáveis. Uma persistência legada Mosquitto apresentou assinatura
+válida, hash e metadados preservados; sua integridade semântica não foi
+verificada. Relatórios e validadores foram guardados também no Windows privado.
+
+Nenhuma aplicação restaurada foi iniciada. A restauração funcional, a
+reconstrução dos três workers históricos e a preservação do outro projeto no
+host continuam pendentes. `production_ready=false`, `partial_restart_safe=false`
+e a prova global de conteúdo da migração continuam falsas. Resultados e limites
+estão no [registro de execução](../../runbooks/operational-checkpoint-execution.md).
+
+### Evidência anterior: preparação somente leitura
+
+**Inspeção de preparação: 15/11/2026, 12:58–13:03 em São Paulo.** A
 [preparação do checkpoint operacional](../../runbooks/operational-checkpoint-preparation.md)
 registrou 30 containers da mídia, dos quais 21 ativos e nove parados, um volume
 anônimo do Jellyfin e alterações em camadas graváveis. O censo das dez raízes
@@ -77,11 +130,11 @@ uma pendência de reparo. `complete_healthy=true` não significa prova global:
 O PID registrado já não existia. Manutenção, locks, serviços e mounts não foram
 alterados. A recuperação reportava `ready` com evento; HTTP não foi retestado.
 
-O manifesto privado cobre as raízes inventariadas e explicita as pendências:
-camadas graváveis, links/tipos especiais, contenção real e lista de captura
-validada. `capture_allowed`, `restore_allowed` e `production_ready` continuam
-falsos. Não houve backup novo ou restauração real. Outro projeto ativo foi
-identificado no host; sua preservação também é necessária antes de reinstalar
+O manifesto privado daquela inspeção cobria as raízes inventariadas e explicitava
+as pendências: camadas graváveis, links/tipos especiais, contenção real e lista
+de captura validada. `capture_allowed`, `restore_allowed` e `production_ready`
+estavam falsos. Naquela etapa não houve backup novo ou restauração real.
+Outro projeto ativo foi identificado no host; sua preservação também é necessária antes de reinstalar
 o SSD. A proposta manual não reinstala agenda, gerenciador de backups ou units.
 
 ### Evidência anterior: ensaio nativo isolado
@@ -117,8 +170,11 @@ A manutenção pertence ao incidente histórico e a recuperação USB continua
 habilitada. Foram identificados 21 serviços ativos e diferenças de overrides
 por serviço. O bind de mídia do Jellyfin ainda é RW. Nenhum deles foi alterado;
 o requisito de playback RO e a contenção real de scans continuam pendentes.
-O roteiro não libera corte: faltam executor operacional, checkpoint conjunto
-restaurável, contenção nativa demonstrada e reconciliação da verificação/reparo.
+Naquela inspeção, o roteiro ainda exigia executor operacional, checkpoint
+conjunto restaurável, contenção nativa demonstrada e reconciliação da
+verificação/reparo. O checkpoint de arquivos foi executado posteriormente,
+conforme o registro acima; o ensaio funcional e os requisitos da migração
+continuam pendentes.
 
 ### Etapa anterior: planejamento e ensaio offline
 
@@ -151,8 +207,10 @@ registrada acima e não executou o ensaio no acervo.
 3. Preparar publicação por lote com prova nova e estado por conteúdo. O helper
    histórico exige corte integral e cleanup; ele não atende ao requisito atual
    de disponibilizar o HD grande e acrescentar o restante ao longo dos dias.
-4. Quando o proprietário liberar a parada, capturar o conjunto consistente para
-   restauração, validar comandos concretos e apresentar o SSD/montagens exatos
+4. Ensaiar funcionalmente as aplicações em cópias isoladas da restauração já
+   verificada e resolver as dependências históricas não comprovadas. Preservar
+   também o outro projeto antes de reinstalar o sistema. Validar comandos
+   concretos e apresentar o SSD/montagens exatos
    antes de qualquer operação destrutiva ou alteração de montagem.
 5. Conservar os discos de origem. Não executar cleanup nem usar exceções antigas
    de conteúdo degradado como autorização para perda nesta migração.

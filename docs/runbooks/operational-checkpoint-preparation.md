@@ -1,10 +1,19 @@
 # Preparação do checkpoint operacional
 
 Inspeção somente leitura em **15/11/2026, 12:58–13:03 em São Paulo**
-(15:58–16:03 UTC). Este documento fecha o levantamento e o procedimento proposto;
-**a captura consistente e sua restauração ainda não foram executadas**.
-O manifesto privado mantém `capture_allowed=false`, `restore_allowed=false`
-e `production_ready=false` enquanto as condições abaixo não forem atendidas.
+(15:58–16:03 UTC). Este documento preserva o levantamento e o procedimento
+proposto naquela etapa. Naquele momento, captura e restauração ainda não haviam
+sido executadas; o manifesto de preparação registrava `capture_allowed=false`,
+`restore_allowed=false` e `production_ready=false`.
+
+Posteriormente, em 15/11, o proprietário autorizou a indisponibilidade. A
+[execução do checkpoint](operational-checkpoint-execution.md) registra a parada
+controlada, a captura selada no HD e o retorno dos 21 serviços originais.
+A segunda cópia completa no Windows e a restauração dos arquivos em Linux
+foram verificadas, incluindo 11 bancos SQLite. Nenhuma aplicação restaurada
+foi iniciada; a validação funcional ainda está pendente.
+Os resultados posteriores não alteram os fatos deste levantamento nem
+comprovam a migração do acervo.
 Não foi instalado um gerenciador de backups, agenda ou unit do host.
 
 ## Resultado da inspeção
@@ -111,8 +120,9 @@ destinos do checkpoint.
    [roteiro de contenção](media-precutover-review.md). Conferir escritores do host,
    clientes diretos e incidentes; Docker parado sozinho não comprova quiescência.
    O marcador de manutenção existente conserva seu dono. Não remover locks.
-5. **Janela:** o proprietário ainda precisa liberar a indisponibilidade. A
-   conclusão global da mídia não é requisito automático para capturar aplicações
+5. **Janela:** a indisponibilidade, pendente nesta inspeção, foi autorizada
+   posteriormente; acompanhar a [execução](operational-checkpoint-execution.md).
+   A conclusão global da mídia não é requisito automático para capturar aplicações
    sem mudar seu layout; escritores sobrepostos e estado de reparo precisam estar
    estáveis. A migração posterior mantém requisitos adicionais de conteúdo.
 
@@ -137,7 +147,7 @@ para conteúdo novo durante a captura:
 ```bash
 sudo env -u TAR_OPTIONS tar \
   --create --format=pax --numeric-owner \
-  --acls --xattrs --xattrs-include='*' --sparse --check-links \
+  --acls --xattrs --xattrs-include='*' --sparse \
   --no-recursion --null --verbatim-files-from --directory=/ \
   --files-from="${HS_PRIVATE:?}/members.nul" \
   --file="${HS_BUNDLE:?}/state.tar.partial" \
@@ -159,6 +169,16 @@ e sincronizar o diretório após os renames, antes de emitir recibo.
 Só então calcular SHA-256/tamanho finais,
 guardar o esperado separadamente e transferir os arquivos opacos para o Windows.
 Reler o hash no HD e no Windows. Não extrair no NTFS.
+
+O comando não usa `--check-links`: a classificação posterior identificou aliases
+de hardlinks fora do conjunto declarado em 1.063 grupos. Essa opção compara
+o total de links arquivados com o total do inode e emite aviso se diferirem,
+conforme o [manual GNU tar](https://www.gnu.org/software/tar/manual/html_section/Portability.html).
+Aqui produziria avisos esperados sem demonstrar perda de conteúdo selecionado. O manifesto deve
+declarar essa cobertura parcial, guardar cada conteúdo único e comprovar a
+topologia entre todos os nomes selecionados, inclusive entre raízes. Um aviso
+real da captura continua bloqueando o aceite; não ampliar o escopo seguindo
+aliases externos nem silenciar avisos para aceitar o arquivo.
 
 O GNU tar documenta [listas NUL](https://www.gnu.org/software/tar/manual/html_section/files.html)
 e [preservação de atributos](https://www.gnu.org/software/tar/manual/html_section/create-options.html).
@@ -189,10 +209,12 @@ bloqueiam iniciar clones. Um aplicativo que iniciou sem a biblioteca esperada
 e alterou seus registros não comprova preservação do catálogo.
 
 Sem mudanças em produção, o retorno usa `docker start` nos mesmos IDs originalmente
-ativos, em ordem revisada: infraestrutura/telemetria, consumidores nativos sob
-contenção, API/gateway, entradas e worker por último. Preservar manutenção,
-admissão e holds; iniciar qBittorrent pode retomar tarefas, portanto a contenção
-nativa precisa ser comprovada antes. Revalidar estado/catálogo/filas e compatibilidade
+ativos, em ordem revisada: infraestrutura/telemetria, consumidores nativos,
+API/gateway, entradas e worker por último. Preservar manutenção, admissão e holds.
+O mesmo layout e as mesmas configurações retomam o comportamento anterior,
+inclusive tarefas existentes do qBittorrent. Isso não comprova contenção para
+biblioteca parcial nem implementa o playback somente leitura do to-be.
+Revalidar estado/catálogo/filas e compatibilidade
 do evento de recuperação antes de reabilitá-la. Não usar `up`, recreate ou iniciar
 one-offs. Retomar esses containers não restaura bancos byte a byte.
 
@@ -209,7 +231,9 @@ capacidade, progresso existente e manifesto com cobertura de binds e pendências
 Os coletores não foram instalados no servidor. O pacote de planejamento separa
 `inventory_complete_for_declared_roots` de prontidão para captura/restauração.
 
-O próximo fechamento técnico é resolver as camadas graváveis e os membros especiais,
-comprovar contenção real e preparar a lista de captura validada. Depois da liberação
-da janela, executar captura e restauração conforme os critérios acima. A migração
-incremental do acervo continua dependente do reparo, prova atual e executor operacional.
+No encerramento desta inspeção, faltavam resolver as camadas graváveis e os
+membros especiais, comprovar contenção real e preparar a lista de captura
+validada. A etapa seguinte começou com a janela autorizada; resultados e
+pendências atuais estão no [registro de execução](operational-checkpoint-execution.md).
+A migração incremental do acervo continua dependente do reparo, prova atual
+e executor operacional.

@@ -103,6 +103,7 @@ O escopo é `isolated_native_fixture`, com
 21 serviços, overrides, imagens independentes para recuperação, bancos reais,
 playback, retomada com biblioteca parcial, Tailscale, perda de energia ou USB.
 A cópia local não ensaia transferência/restauração Windows nem backup físico em
-USB. Windows e USB continuam destinos aprovados para o checkpoint operacional
-futuro, que precisa de sua própria execução e verificação. O corte de produção
-continua sujeito à [preparação operacional](media-precutover-review.md).
+USB. Windows e USB foram os destinos aprovados para o checkpoint operacional,
+cuja [execução e verificação](operational-checkpoint-execution.md) possuem
+evidência separada deste ensaio sintético. O corte de produção continua sujeito
+à [preparação operacional](media-precutover-review.md).
