@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from homeserver_control import checkpoint
+from homeserver_control import checkpoint, checkpoint_manifest
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="requires Linux GNU tar metadata")
 
@@ -374,3 +374,39 @@ def test_archive_replaced_at_guard_boundary_is_rejected_before_extraction(fixtur
             bundle, fixture_root / "restored", receipt=receipt, guard=replacing_guard
         )
     assert not (fixture_root / "restored").exists()
+
+
+@pytest.mark.parametrize("extension_type", [tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK])
+def test_gnu_extension_header_is_rejected_before_any_large_payload_read(extension_type):
+    header = tarfile.TarInfo("././@LongLink")
+    header.type = extension_type
+    header.size = 4 * 1024**3
+
+    class GuardedReader(io.BytesIO):
+        def __init__(self, payload):
+            super().__init__(payload)
+            self.requested_sizes = []
+
+        def read(self, size=-1):
+            self.requested_sizes.append(size)
+            if size < 0 or size > 1024 * 1024:
+                raise AssertionError("unbounded archive payload read requested")
+            return super().read(size)
+
+    stream = GuardedReader(header.tobuf(format=tarfile.GNU_FORMAT))
+    with pytest.raises(checkpoint.CheckpointError):
+        checkpoint_manifest.preflight(stream, {})
+    assert stream.requested_sizes == [512]
+
+
+def test_pax_long_name_and_link_target_still_roundtrip(fixture_root):
+    source = source_tree(fixture_root)
+    name = "pax-" + "p" * 180 + "-maçã"
+    (source / name).write_bytes(b"long PAX member")
+    (source / "long-link").symlink_to(name)
+    before = snapshot(source)
+    receipt = checkpoint.capture_checkpoint(source, fixture_root / "bundle", guard=noop)
+    checkpoint.restore_checkpoint(
+        fixture_root / "bundle", fixture_root / "restored", receipt=receipt, guard=noop
+    )
+    assert snapshot(fixture_root / "restored") == before

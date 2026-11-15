@@ -113,6 +113,11 @@ def inventory(root: Path):
 
 
 class _BoundedTarInfo(tarfile.TarInfo):
+    def _proc_gnulong(self, tarfile_object):
+        # Capture uses PAX path/linkpath records. Reject GNU longname/longlink
+        # before the inherited handler can read an attacker-declared payload.
+        raise CheckpointError("unsupported_type")
+
     def _proc_pax(self, tarfile_object):
         if self.size > MAX_MANIFEST_BYTES:
             raise CheckpointError("size_limit")
