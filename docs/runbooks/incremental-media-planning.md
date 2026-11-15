@@ -1,9 +1,9 @@
 # Planejar a migração por lotes
 
 O requisito é servir o conteúdo já validado no HD de 18 TB e acrescentar o
-restante ao longo dos dias, preservando todos os discos de origem. Esta etapa
-prepara o cálculo dos lotes no projeto de mídia. Não é um comando de migração
-nem um executor de cópia/publicação.
+restante ao longo dos dias, preservando todos os discos de origem. O projeto de
+mídia prepara o cálculo dos lotes, a interpretação de inventários declarados e
+um ensaio com arquivos sintéticos. A ferramenta de ensaio não migra o acervo.
 
 ## Estado e fronteira operacional
 
@@ -97,6 +97,99 @@ Os quatro flags operacionais permanecem falsos em todo resultado:
 `deletion_allowed`. Nem uma lista vazia de bloqueios nem todos os indicadores
 de evidência verdadeiros liberam execução no servidor.
 
+## Adaptador de inventário
+
+Módulo: `homeserver_control.adapters.migration_inventory`. A entrada é um
+documento já carregado em memória; o adaptador não abre arquivos ou consulta o
+servidor. O formato preserva os campos do inventário existente: versão, geração,
+completude, arquivos, diretórios, nós especiais e colisões declaradas. Cada
+arquivo informa pool, caminho relativo, device/inode, tamanho, alocação,
+mtime, permissões, UID/GID e número de links. `mode` contém somente bits de
+permissão, como no inventário histórico. `incident`, quando presente, é metadado
+opaco vinculado ao digest; não indica um arquivo a ser aberto.
+
+`inspect_inventory(inventory, pool_roots=..., destination_pool=...)` recebe um
+mapa explícito de pools para identidades lógicas distintas. A inspeção produz
+grupos imutáveis por device/inode e um digest que vincula metadados, geração e
+mapa de raízes. `source_id` identifica o conjunto declarado de origens;
+`destination_pool` separa a biblioteca nativa, que participa das verificações de
+colisão mas não entra na fila de cópia. Essas identidades não comprovam UUIDs,
+mounts ou atualidade física.
+
+Os campos `inventory_generation`, `source_id` e `destination_id` da inspeção
+devem formar a `MigrationGeneration` fornecida ao planejamento. Outra geração
+ou outro conjunto lógico de origens/destino é rejeitado.
+
+`plan_inventory_batch(inspection, generation, selected_paths,
+content_declarations, dependencies=())` liga a inspeção ao planejador. Cada
+`ContentDeclaration(group_id, inventory_digest, content_sha256)` fornece a hash
+de conteúdo declarada para um grupo daquela inspeção. O digest do inventário
+não substitui a SHA do arquivo; o adaptador não lê conteúdo para calculá-la.
+Dependências são declaradas por `GroupDependencies` entre IDs dos grupos.
+
+O resultado traz `coverage` (`required_groups`, `declared_groups` e
+`missing_group_ids`) e `plan`, o `BatchPlan` já descrito. As evidências de fase
+continuam falsas, mesmo com cobertura completa de hashes declaradas.
+
+Nesta versão, todos os grupos de origem precisam ter hashes declaradas, mesmo
+quando a seleção pede um lote menor. Uma cobertura parcial bloqueia o plano e
+permanece visível no relatório. Isso permite conferir colisões e aliases do
+conjunto inteiro sem inventar hashes ou descartar os grupos ainda não
+verificados. Planejar diretamente a partir de cobertura parcial exigirá uma
+extensão posterior desse contrato.
+
+O importador não autentica recibos históricos e não transforma declarações em
+evidência de staging, publicação ou leitura nativa. Nomes relativos e razões de
+bloqueio podem revelar o conteúdo do acervo se o chamador usar dados reais;
+esses relatórios devem permanecer privados e fora do Git.
+
+## Ensaio de publicação
+
+Em Linux/WSL, a partir da raiz do repositório e com o ambiente Python 3.12
+preparado por `uv sync --frozen`:
+
+```bash
+.venv/bin/python scripts/rehearse-media-batch.py
+.venv/bin/python scripts/rehearse-media-batch.py --scenario interruption
+.venv/bin/python scripts/rehearse-media-batch.py --help
+```
+
+O primeiro comando executa o cenário de sucesso. O segundo injeta uma
+interrupção e deve terminar com código 1 e lote incompleto no JSON; código 0
+indica conclusão somente da fixture. Opções inválidas retornam 2. A CLI não
+aceita `--source`, `--destination`, `--apply` ou `--resume`. Ela não precisa de
+credenciais, Docker, rede ou privilégios de root.
+
+O ensaio percorre este fluxo apenas em seu diretório temporário:
+
+```mermaid
+flowchart LR
+    A[Arquivos sintéticos e hardlinks] --> B[Inventário e hashes reais]
+    B --> C[Adaptador e seleção do lote]
+    C --> D[Cópia exclusiva no staging]
+    D --> E[Conferência de conteúdo e links]
+    E --> F[Publicação exclusiva por caminho]
+    F --> G[Releitura do lote completo]
+    G --> H[Scan restrito simulado]
+    D -. falha .-> I[Lote incompleto e consumidor bloqueado]
+    E -. falha .-> I
+    F -. falha .-> I
+    G -. falha .-> I
+```
+
+Publicar vários caminhos é uma operação multietapa. Uma interrupção pode deixar
+parte deles publicada na fixture; isso nunca conta como conclusão. O staging e
+os caminhos parciais são conservados até o relatório do ensaio, e o diretório
+temporário inteiro é removido ao terminar. Não há retomada de uma execução
+anterior ou aceitação de journal externo.
+
+Fontes sintéticas e staging usam inodes diferentes. Dois arquivos de origem com
+bytes iguais continuam sendo grupos distintos, e a ferramenta verifica hashes
+e topologia dos aliases. Conteúdo não selecionado não deve aparecer no destino.
+O relatório diferencia essas operações reais de filesystem da contenção
+**simulada** de Jellyfin, Sonarr e Radarr. Sucesso na fixture mantém
+`production_ready=false` e todas as permissões operacionais falsas.
+
 ## Dependências para implementar o executor
 
 1. Reconciliar o verificador ativo, pendências de reparo, provas e publicação
@@ -110,16 +203,37 @@ de evidência verdadeiros liberam execução no servidor.
 5. Ensaiar interrupção, retorno do USB, geração alterada e rollback em fixtures;
    revisar o conjunto de comandos e o estado real antes da janela autorizada.
 
+O ensaio local de publicação acrescenta evidência sobre cópia, hashes,
+hardlinks e bloqueios de falhas em arquivos pequenos. A contenção de consumidores
+é simulada; não comprova que APIs ou scans de Jellyfin/Arr respeitem esses
+bloqueios no servidor. Também não exercita perda de energia ou reconexão USB,
+capacidade real, sparse, ACLs/xattrs, locks entre processos ou retomada após
+crash. Esses itens continuam necessários para o executor operacional.
+
 A [plataforma](https://github.com/reisguilherme/homelab-platform/blob/refactor/docs/architecture/README.md)
 mantém a autoridade sobre recursos físicos, mounts e exports. Este consumidor
 mantém o planejamento lógico e os efeitos sobre a aplicação. Consulte o
 [plano operacional](../superpowers/plans/2026-11-14-homelab-refactor-migration.md)
 e o [registro de preparação](../architecture/homelab-2026/implementation-status.md).
 
-## Verificação desta etapa
+## Verificação do planejador puro
 
 Python 3.12.3/WSL: 213 testes passaram, incluindo 69 casos do planejador e
 regressões de singleton, consumidores, recuperação USB, admissão e exclusão
 coordenada. Um caso foi pulado por exigir root real para fixture UID1000; nenhum
 teste usou o acervo. Ruff e a revisão independente passaram. Essa rodada não
 representa execução da suíte completa nem validação física do servidor.
+
+## Verificação do adaptador e do ensaio
+
+Python 3.12/WSL: 126 testes passaram, sem skips: 41 do inventário, 16 do ensaio
+e os 69 do planejador puro. Ruff passou nos cinco arquivos novos. Essa rodada
+tem sobreposição com a verificação anterior; não somar as contagens.
+
+A CLI também foi executada diretamente. O caso de sucesso publicou três grupos
+e quatro caminhos na fixture e manteve as fontes. O caso `containment_loss`
+retornou 1, conservou um caminho parcial até encerrar o ensaio e bloqueou o scan
+simulado. Os testes cobrem ainda interrupção, colisão, corrupção de mesmo tamanho
+no staging e após publicação, mudança de origem, hardlink não contabilizado e
+symlink. Nenhum desses resultados é uma verificação do acervo ou dos serviços
+reais; não houve nova conexão SSH ou implantação nesta etapa.

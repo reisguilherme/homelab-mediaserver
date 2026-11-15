@@ -72,7 +72,17 @@ serviço, disco ou montagem foi alterado, nem foi iniciado outro pipeline.
 O [planejador de lotes](../../runbooks/incremental-media-planning.md) prepara um
 contrato puro para a publicação incremental. Ele não interpreta os recibos
 históricos automaticamente nem libera execução, cleanup, exclusão ou scans.
-Integração com inventário real, contenção nativa e executor continuam pendentes.
+O adaptador offline de inventário já valida metadados, hardlinks, colisões e
+cobertura de hashes declaradas antes de chamar o planejador. Um ensaio
+executável percorre cópia, publicação e releitura em arquivos sintéticos Linux,
+com nove cenários de sucesso e falha. Nesta versão, faltarem hashes de qualquer
+grupo de origem mantém o plano bloqueado, inclusive para seleções menores.
+O acervo e os recibos históricos não foram importados nessa validação.
+
+Contenção de Jellyfin/Arr no ensaio é simulada e não libera nenhuma ação real.
+Integração com o estado atual do servidor, contenção nativa e executor continuam
+pendentes. Esta preparação não fez nova conexão SSH ou implantação, não parou
+serviços e não publicou arquivos no HD de 18 TB. A inspeção acima é histórica.
 
 1. Concluir/reconciliar a verificação anterior sem executar outro publicador ou
    modificá-la enquanto mantém locks do pipeline.
@@ -94,6 +104,11 @@ preparação.
 
 ## Verificação do código
 
+- Incremento de inventário/ensaio: **126 testes passaram** em Python 3.12/WSL
+  (41 do adaptador, 16 do ensaio e 69 do planejador existente), sem skips.
+  Ruff passou nos cinco arquivos Python novos. CLI executada também diretamente:
+  sucesso com três grupos/quatro caminhos; perda de contenção com um caminho
+  parcial, lote incompleto e nenhum scan liberado. Somente fixtures locais.
 - Python 3.12 em WSL; `uv sync --frozen` conferiu 27 pacotes sem alterar dependências.
 - Suíte unitária, de contrato, integração e sistema: **4.362 passaram, 156 pulados**.
   Os skips dependem de root, runtimes/imagens Nginx/Caddy ou Compose no WSL.
