@@ -38,10 +38,19 @@ captura. O conjunto contém 49 imagens disponíveis e três rootfs históricos s
 reconstrução comprovada. Os 26 arquivos do recibo somam **124.604.820.080 bytes**;
 os arquivos tar foram sincronizados e relidos no HD antes do fechamento.
 
-O recibo final já foi copiado para o Windows e conferido contra sua identidade
-obtida por SSH. A transferência do conteúdo está em andamento. A segunda cópia
-ainda precisa de verificação integral e restauração de teste; esta seção não
-libera sobrescrita do SSD. Não houve retomada automática dos serviços.
+O recibo final foi copiado para o Windows e conferido contra sua identidade
+obtida por SSH. Depois, o proprietário decidiu **manter o backup final completo
+somente no HD de 18 TB e seguir com a instalação**. A transferência do conteúdo
+para o Windows foi interrompida; os arquivos parciais foram preservados e não
+formam uma cópia verificada para restauração. O checkpoint anterior do Windows
+continua intacto, com estado mais antigo.
+
+A restauração completa do conjunto final não foi executada. Os ensaios anteriores
+mantêm o alcance descrito abaixo; a escolha atual aceita prosseguir com a única
+cópia final completa no HD. O proprietário autorizou apagar somente o SSD do
+sistema identificado na ficha privada para instalar Proxmox, preservando o
+segundo SSD e todos os HDs USB. Conferir modelo e serial no instalador.
+Não houve retomada automática dos serviços.
 
 ## Ensaios e aceite
 
@@ -62,8 +71,9 @@ depois, sem disparar workers automáticos.
 | Inventário ampliado de host, projeto adicional e volumes | Concluído em arquivo privado |
 | Inicialização isolada dos serviços de mídia | Concluída com os limites descritos abaixo; não certifica integração ou produção |
 | Captura consistente final no HD | Concluída, origens estáveis e recibo fechado |
-| Segunda cópia e restauração da captura final | Transferência para Windows em andamento; verificações pendentes |
-| Autorização do SSD e escopo de instalação | Pendente; identidades já levantadas |
+| Segunda cópia final no Windows | Dispensada pelo proprietário; transferência interrompida e parcial preservado |
+| Restauração completa da captura final | Não executada; limite registrado na decisão de seguir |
+| Autorização do SSD e escopo de instalação | Recebida para somente o SSD do sistema identificado na ficha privada; conferência física no instalador pendente |
 | Rede de reconexão | Proprietário confirmou manter o adaptador e reservar o IP; configuração do roteador não conferida |
 | Mídia de instalação | ISO x86 local conferida contra SHA-256 oficial; gravação e boot do pendrive pendentes |
 
@@ -91,9 +101,9 @@ aceite de GPU. Worker, gateway de download, host-metrics, proxies de entrada e
 qbit-monitor ficaram fora desta rodada. O arquivo base permaneceu intacto;
 `production_ready` e o aceite da integração completa continuam falsos.
 
-A captura final contém estado posterior ao usado nesse ensaio. Sua integridade
-e restauração precisam de evidências próprias; os resultados acima não
-substituem essa verificação nem a retomada com os discos reais.
+A captura final contém estado posterior ao usado nesse ensaio. Seus arquivos
+foram conferidos por hash no HD; sua restauração completa não foi testada.
+Os resultados acima não certificam o conjunto novo nem a retomada com os discos reais.
 
 O checkpoint não é uma imagem bootável de todo o Ubuntu. Configurações antigas
 do host servem à reconstrução seletiva e não devem ser restauradas por cima do

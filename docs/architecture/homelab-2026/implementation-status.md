@@ -20,9 +20,11 @@ O fechamento posterior está na
 ensaio funcional em clones isolados, inventário ampliado dos dois projetos,
 preservação de todos os volumes Docker e captura consistente final. Esse
 registro mantém explícitas as pendências antes de substituir o sistema.
-O checkpoint final no HD foi fechado às 21:08 UTC de 15/11; a cópia do conteúdo
-para o Windows está em andamento e sua restauração continua pendente. Os 22
-containers originalmente ativos estão parados, com SSH pela LAN disponível.
+O checkpoint final no HD foi fechado às 21:08 UTC de 15/11. O proprietário
+dispensou a segunda cópia final no Windows e decidiu seguir com a cópia completa
+no HD de 18 TB; a transferência foi interrompida e o parcial preservado.
+A restauração completa do conjunto final não foi executada. Os 22 containers
+originalmente ativos estão parados, com SSH pela LAN disponível.
 
 ## Estado observado por SSH em 14/11/2026
 
