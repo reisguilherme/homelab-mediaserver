@@ -15,6 +15,15 @@ registra a captura no HD, a cópia Windows e a restauração dos arquivos em Lin
 verificadas, além do retorno dos 21 serviços originais. A autorização não escolhe
 SSD para sobrescrita, não altera mounts nem equivale à instalação do Proxmox.
 
+O fechamento posterior está na
+[preparação para instalar Proxmox](../../runbooks/proxmox-preinstallation.md):
+ensaio funcional em clones isolados, inventário ampliado dos dois projetos,
+preservação de todos os volumes Docker e captura consistente final. Esse
+registro mantém explícitas as pendências antes de substituir o sistema.
+O checkpoint final no HD foi fechado às 21:08 UTC de 15/11; a cópia do conteúdo
+para o Windows está em andamento e sua restauração continua pendente. Os 22
+containers originalmente ativos estão parados, com SSH pela LAN disponível.
+
 ## Estado observado por SSH em 14/11/2026
 
 - Servidor Ubuntu 24.04.5 LTS, com virtualização disponível. O SSD do sistema e

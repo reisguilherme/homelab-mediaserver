@@ -10,7 +10,9 @@ Este repositório mantém a aplicação de mídia. Consulte a
 A [execução do checkpoint operacional](../../runbooks/operational-checkpoint-execution.md)
 registra a captura no HD, a segunda cópia verificada no Windows, a restauração
 dos arquivos em Linux e o retorno dos 21 serviços originais. A validação
-funcional das aplicações restauradas e a migração do acervo permanecem pendentes.
+funcional posterior e a captura ampliada estão registradas na
+[preparação para instalar Proxmox](../../runbooks/proxmox-preinstallation.md),
+que distingue resultados comprovados de pendências. A migração do acervo continua aberta.
 A [preparação anterior](../../runbooks/operational-checkpoint-preparation.md)
 reúne escopo, capacidade e procedimento de restauração.
 O [roteiro anterior ao corte](../../runbooks/media-precutover-review.md) registra
