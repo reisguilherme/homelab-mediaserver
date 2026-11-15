@@ -64,10 +64,27 @@ antes dessa retirada; não há evidência de perda do backup.
 
 Às 21:33 UTC, depois de reconfirmar os containers parados, a sincronização e o
 comando normal de desligamento concluíram com sucesso. SSH ficou inacessível;
-a confirmação física de máquina desligada permanece pendente. Nenhuma montagem,
-reparação ou formatação foi executada. Confirmar a máquina fisicamente desligada
-antes de iniciar a instalação, mantendo os HDs USB desconectados e o adaptador
-Ethernet USB conectado. A decisão de manter somente a cópia final no HD continua válida.
+naquele momento, a confirmação física ainda estava pendente. A instalação e a
+reconexão posteriores estão registradas a seguir. A decisão de manter somente
+a cópia final no HD continua válida.
+
+### Reconexão após instalar Proxmox
+
+O proprietário concluiu a instalação no SSD autorizado. A identidade SSH do
+novo host foi comparada ao fingerprint informado pelo console; a chave pública
+dedicada foi cadastrada e uma nova sessão autenticada por chave foi verificada.
+A senha foi digitada pelo proprietário em terminal local, sem gravação.
+
+O inventário de 15/11 às 21:56 UTC confirmou Proxmox VE 9.2.2 no SSD esperado,
+o segundo SSD com o mesmo UUID ext4 e sem montagem, e os HDs USB ausentes.
+Os nomes dos dispositivos NVMe trocaram de posição; continuar usando serial e
+UUID para identidade. HTTPS foi validado com CA obtida pelo SSH autenticado,
+nome/IP do certificado e resposta HTTP `200`.
+
+A entrega do host acessível não restaura o consumidor: não há VMs nem serviços
+de mídia executando. Nenhum acervo foi montado ou reparado nesta reconexão.
+O firewall do Proxmox ainda estava desabilitado. A criação dos convidados,
+restauração seletiva, posse do storage e isolamento seguem como próximas etapas.
 
 ## Ensaios e aceite
 
@@ -90,9 +107,9 @@ depois, sem disparar workers automáticos.
 | Captura consistente final no HD | Concluída, origens estáveis e recibo fechado |
 | Segunda cópia final no Windows | Dispensada pelo proprietário; transferência interrompida e parcial preservado |
 | Restauração completa da captura final | Não executada; limite registrado na decisão de seguir |
-| Autorização do SSD e escopo de instalação | Recebida para somente o SSD do sistema identificado na ficha privada; conferência física no instalador pendente |
+| Autorização do SSD e escopo de instalação | Recebida para somente o SSD do sistema; instalação concluída pelo proprietário e identidade do disco conferida depois por SSH |
 | Rede de reconexão | Proprietário confirmou manter o adaptador e reservar o IP; configuração do roteador não conferida |
-| Mídia de instalação | ISO x86 local conferida contra SHA-256 oficial; gravação e boot do pendrive pendentes |
+| Mídia de instalação | ISO x86 local conferida contra SHA-256 oficial; proprietário concluiu a instalação e o host foi conferido por SSH |
 
 ### Resultado da inicialização isolada
 
@@ -131,7 +148,8 @@ O checksum inicialmente informado correspondia à edição ARM64. O host Intel
 precisa da edição **x86**; a ficha privada e o roteiro da plataforma apontam
 o arquivo e o checksum oficiais. O download local da ISO x86 foi conferido:
 1.706.178.560 bytes, SHA-256 igual ao oficial e arquivo estável durante a leitura.
-Isso valida o download; a gravação e o boot do pendrive ainda não foram verificados.
+Isso validou o download; posteriormente o proprietário concluiu a instalação,
+e a versão e o disco do novo host foram conferidos por SSH.
 
 Este preparo não publica lotes de mídia, altera mounts ou conclui a migração ao
 hub. O reparo histórico e a prova de conteúdo continuam no escopo de

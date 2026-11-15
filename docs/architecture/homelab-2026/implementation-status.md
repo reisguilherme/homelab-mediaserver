@@ -25,9 +25,16 @@ dispensou a segunda cópia final no Windows e decidiu seguir com a cópia comple
 no HD de 18 TB; a transferência foi interrompida e o parcial preservado.
 A restauração completa do conjunto final não foi executada. O desligamento
 normal foi aceito às 21:33 UTC, com os containers parados e as gravações
-sincronizadas; SSH ficou inacessível. A confirmação física está pendente.
+sincronizadas; SSH ficou inacessível. Depois, o proprietário instalou Proxmox
+no SSD autorizado e o acesso por chave foi retomado, com identidade conferida
+pelo console. HTTPS também foi validado pela CA obtida no SSH autenticado.
 Antes do desligamento, o proprietário retirou todos os HDs USB e confirmou
-essa ação. Eles devem permanecer desconectados durante a instalação.
+essa ação. Eles continuam desconectados, aguardando a etapa de storage nas VMs.
+
+O inventário posterior confirmou o Proxmox no SSD correto e o segundo SSD de
+mídia com o mesmo UUID ext4, sem montagem. Nenhuma VM ou aplicação foi iniciada;
+restauração, isolamento e hub permanecem pendentes. O estado do host está na
+[plataforma](https://github.com/reisguilherme/homelab-platform/blob/refactor/docs/implementation-status.md).
 
 ## Estado observado por SSH em 14/11/2026
 
