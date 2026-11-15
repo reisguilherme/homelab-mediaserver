@@ -29,14 +29,17 @@ sincronizadas; SSH ficou inacessível. Depois, o proprietário instalou Proxmox
 no SSD autorizado e o acesso por chave foi retomado, com identidade conferida
 pelo console. HTTPS também foi validado pela CA obtida no SSH autenticado.
 Antes do desligamento, o proprietário retirou todos os HDs USB e confirmou
-essa ação. Eles continuam desconectados, aguardando a etapa de storage nas VMs.
+essa ação. Posteriormente, reconectou e autorizou o HD de 18 TB para posse
+exclusiva do core; os demais HDs permanecem fora dessa etapa.
 
 Na entrega inicial, o inventário confirmou o Proxmox no SSD correto e o segundo
 SSD de mídia com o mesmo UUID ext4, sem montagem; ainda não havia VMs ou
 aplicações iniciadas. Depois, core, playback e edge foram criadas com Ubuntu,
-e os testes de rede, autostart ordenado e reboot foram aceitos. Restauração,
-aplicações, NFS e hub continuam pendentes; essa base não comprova prontidão da
-mídia. O [estado canônico da plataforma](https://github.com/reisguilherme/homelab-platform/blob/refactor/docs/implementation-status.md#vms-e-rede-privada)
+e os testes de rede, autostart ordenado e reboot foram aceitos. O core passou
+a exportar mídia NFS RO para playback, com leitura e negações de escrita
+testadas. Restauração, aplicações e recuperação USB automática continuam
+pendentes; essa base não comprova prontidão da mídia. O
+[estado canônico da plataforma](https://github.com/reisguilherme/homelab-platform/blob/refactor/docs/implementation-status.md#storage-no-core-e-nfs-ro)
 registra o alcance das verificações e os limites restantes.
 
 ## Estado observado por SSH em 14/11/2026
