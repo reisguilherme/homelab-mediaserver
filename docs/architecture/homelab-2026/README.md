@@ -7,8 +7,10 @@ A documentação geral passou para o repositório da plataforma:
 Este repositório mantém a aplicação de mídia. Consulte a
 [integração com a plataforma](../../platform-integration.md) e o
 [registro da preparação operacional](implementation-status.md).
-O [roteiro anterior ao corte](../../runbooks/media-precutover-review.md) reúne
-a última inspeção SSH, as condições de contenção e as pendências da migração.
+O [checkpoint operacional](../../runbooks/operational-checkpoint-preparation.md)
+reúne a inspeção SSH mais recente, escopo, capacidade e proposta de restauração.
+O [roteiro anterior ao corte](../../runbooks/media-precutover-review.md) registra
+as condições de contenção e as pendências da migração.
 
 A separação dos repositórios não alterou o servidor, as montagens nem o acervo.
 O desenho anterior permanece no

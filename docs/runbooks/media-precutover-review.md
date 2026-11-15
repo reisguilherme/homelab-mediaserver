@@ -1,5 +1,11 @@
 # Inspeção e preparação do corte de mídia
 
+Atualização operacional em 15/11/2026, 13:03 em São Paulo: o relatório existente
+concluiu os 6.029 grupos saudáveis, com uma pendência de reparo e prova global
+ainda falsa. A [preparação do checkpoint](operational-checkpoint-preparation.md)
+traz o censo real, capacidade e procedimento proposto. Os fatos abaixo preservam
+a inspeção anterior; nenhuma captura, parada ou publicação foi feita na nova rodada.
+
 Atualização de preparação em 15/11/2026: o
 [ensaio nativo isolado de checkpoint](native-checkpoint-rehearsal.md) verifica
 catálogo sintético Jellyfin, objetos locais Arr e restauração no Linux local.

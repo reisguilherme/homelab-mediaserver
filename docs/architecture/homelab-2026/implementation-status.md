@@ -13,7 +13,7 @@ as alterações locais anteriores. **O corte aguarda aviso explícito do
 proprietário.** A preparação não instala Proxmox nem transforma o servidor atual
 em três VMs sem essa etapa.
 
-## Estado observado por SSH
+## Estado observado por SSH em 14/11/2026
 
 - Servidor Ubuntu 24.04.5 LTS, com virtualização disponível. O SSD do sistema e
   o SSD de mídia são dispositivos distintos; nenhum foi escolhido para sobrescrita.
@@ -63,6 +63,29 @@ verificada nos dois destinos e ensaiada antes de alterar o SSD do sistema.
 
 ## Próxima etapa operacional
 
+**Inspeção mais recente: 15/11/2026, 12:58–13:03 em São Paulo.** A
+[preparação do checkpoint operacional](../../runbooks/operational-checkpoint-preparation.md)
+registrou 30 containers da mídia, dos quais 21 ativos e nove parados, um volume
+anônimo do Jellyfin e alterações em camadas graváveis. O censo das dez raízes
+declaradas terminou sem erros, com cerca de 63,23 GB lógicos únicos, incluindo
+20,27 GB de reparo dentro do appdata. Há capacidade para as cópias e o ensaio,
+com orçamento conjunto para Windows e WSL; isso não substitui a medição na janela.
+
+O relatório anterior terminou **6.029/6.029 grupos saudáveis**, sem erros e com
+uma pendência de reparo. `complete_healthy=true` não significa prova global:
+`content_verified=false` continua registrado, e nenhum hash de mídia foi relido.
+O PID registrado já não existia. Manutenção, locks, serviços e mounts não foram
+alterados. A recuperação reportava `ready` com evento; HTTP não foi retestado.
+
+O manifesto privado cobre as raízes inventariadas e explicita as pendências:
+camadas graváveis, links/tipos especiais, contenção real e lista de captura
+validada. `capture_allowed`, `restore_allowed` e `production_ready` continuam
+falsos. Não houve backup novo ou restauração real. Outro projeto ativo foi
+identificado no host; sua preservação também é necessária antes de reinstalar
+o SSD. A proposta manual não reinstala agenda, gerenciador de backups ou units.
+
+### Evidência anterior: ensaio nativo isolado
+
 Preparação adicional em 15/11/2026: o
 [ensaio nativo isolado](../../runbooks/native-checkpoint-rehearsal.md) executou
 Jellyfin 12.2.0, Sonarr 4.0.15.2941 e Radarr 6.4.4.10685 sobre configurações novas
@@ -77,7 +100,7 @@ do clone próprio, com `containment_changed`, e removeu seus três clones.
 cobre produção, transferência/restauração Windows ou backup físico USB, e não
 altera as pendências operacionais registradas abaixo.
 
-**Inspeção mais recente: 14/11/2026, 21:39–21:49 em São Paulo** (15/11,
+**Inspeção anterior: 14/11/2026, 21:39–21:49 em São Paulo** (15/11,
 00:39–00:49 UTC). O cache de verificação saudável avançou de 1.833 para 1.848
 dos 6.029 grupos, ainda incompleto e com uma pendência de reparo. Jellyfin e
 telemetria responderam 200; readiness do controlador, 503. Há cerca de 6,84 TB

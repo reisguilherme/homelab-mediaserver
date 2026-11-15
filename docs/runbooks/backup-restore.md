@@ -12,5 +12,8 @@ As provas históricas de captura/restauração estão no
 O [ensaio manual de checkpoint nativo](native-checkpoint-rehearsal.md) usa apenas
 configurações novas e mídia sintética no Linux local. Ele não reinstala o
 gerenciador retirado nem constitui o checkpoint operacional do servidor.
+A [preparação do checkpoint operacional](operational-checkpoint-preparation.md)
+registra o levantamento real, capacidade e procedimento manual proposto para
+a janela da migração; captura e restauração reais ainda estão pendentes.
 O procedimento anterior permanece no
 [histórico Git](https://github.com/reisguilherme/homelab-mediaserver/blob/89c84f26e4426d2f025573ce3728c5fa320f6267/docs/runbooks/backup-restore.md).
