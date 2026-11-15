@@ -63,6 +63,20 @@ verificada nos dois destinos e ensaiada antes de alterar o SSD do sistema.
 
 ## Próxima etapa operacional
 
+Preparação adicional em 15/11/2026: o
+[ensaio nativo isolado](../../runbooks/native-checkpoint-rehearsal.md) executou
+Jellyfin 12.2.0, Sonarr 4.0.15.2941 e Radarr 6.4.4.10685 sobre configurações novas
+e mídia sintética no WSL/Linux local. O catálogo Jellyfin e as tags Arr foram
+preservados após parada, checkpoint, cópia opaca local e restauração; cinco
+bancos SQLite foram verificados. A rodada de sucesso criou e removeu seis
+clones próprios. Tags Arr não representam scan do catálogo Arr.
+O teste opt-in final de sucesso passou após readiness autenticada e refresh
+explícito; a CLI negativa final bloqueou a captura após restart/stop deliberado
+do clone próprio, com `containment_changed`, e removeu seus três clones.
+`partial_restart_safe=false` e `production_ready=false`: esta evidência não
+cobre produção, transferência/restauração Windows ou backup físico USB, e não
+altera as pendências operacionais registradas abaixo.
+
 **Inspeção mais recente: 14/11/2026, 21:39–21:49 em São Paulo** (15/11,
 00:39–00:49 UTC). O cache de verificação saudável avançou de 1.833 para 1.848
 dos 6.029 grupos, ainda incompleto e com uma pendência de reparo. Jellyfin e

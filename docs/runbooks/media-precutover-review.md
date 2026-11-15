@@ -1,5 +1,12 @@
 # Inspeção e preparação do corte de mídia
 
+Atualização de preparação em 15/11/2026: o
+[ensaio nativo isolado de checkpoint](native-checkpoint-rehearsal.md) verifica
+catálogo sintético Jellyfin, objetos locais Arr e restauração no Linux local.
+Essa evidência não cobre a contenção dos serviços reais, o checkpoint dos 21
+serviços ou a retomada com biblioteca parcial; o corte continua bloqueado pelas
+dependências operacionais abaixo.
+
 Inspeção SSH em **14/11/2026, 21:39–21:49, America/Sao_Paulo**
 (15/11, 00:39–00:49 UTC). Foram lidos metadados, estados existentes, labels/binds
 dos containers e respostas de saúde. Não foram executados novos hashes de mídia,

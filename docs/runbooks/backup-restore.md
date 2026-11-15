@@ -9,5 +9,8 @@ A persistência atual fica em `/srv/appdata` e `/srv/data`; veja
 [instalação](../installation.md) e [operação](../operator-guide.md).
 As provas históricas de captura/restauração estão no
 [registro de ensaio](../evidence/restore-report.md).
+O [ensaio manual de checkpoint nativo](native-checkpoint-rehearsal.md) usa apenas
+configurações novas e mídia sintética no Linux local. Ele não reinstala o
+gerenciador retirado nem constitui o checkpoint operacional do servidor.
 O procedimento anterior permanece no
 [histórico Git](https://github.com/reisguilherme/homelab-mediaserver/blob/89c84f26e4426d2f025573ce3728c5fa320f6267/docs/runbooks/backup-restore.md).
