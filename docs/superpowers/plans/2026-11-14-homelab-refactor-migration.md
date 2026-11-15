@@ -119,3 +119,16 @@
 - Checkpoint privado de código/configuração criado e relido no HD de 18 TB; cópia Windows com SHA-256 idêntico e ACL restrita. Não inclui bancos nem comprova consistência conjunta de aplicações.
 - Exporter, publicador sanitizado opt-in e stack Grafana/Prometheus preparados no repositório, sem ativação em produção. [Plano de observabilidade](2026-11-14-observability-preparation.md).
 - Suíte ampla posterior: 4.362 testes aprovados, 156 pulados e nenhum erro; os skips dependem de root, binários/imagens de proxy ou Compose no WSL. Correções posteriores de integração do `.env` têm validação focada própria. [Registro de implementação](../../architecture/homelab-2026/implementation-status.md).
+
+### Inspeção complementar — 14/11/2026, 21:39–21:49 São Paulo
+
+- Leitura SSH de metadados e estados existentes: cache saudável ativo,
+  1.833 → 1.848/6.029 grupos, reparo pendente e prova global ausente no incidente.
+  Sem novo hash/cópia, publicação, parada, alteração de mount ou implantação.
+- Capacidade atual consultada; contagens de nativo/staging e hardlinks foram
+  extraídas de documentos históricos, sem alegar inventário físico atual.
+- O inventário inicial disponível não atende ao contrato normalizado v1.
+  Documentação corrigida; nenhum campo ou evidência foi preenchido por suposição.
+- Preparado [roteiro de contenção e retorno](../../runbooks/media-precutover-review.md)
+  com limites de manutenção, USB, Compose efetivo e checkpoint. Os comandos
+  mutantes não foram executados; corte, contenção nativa e executor seguem pendentes.

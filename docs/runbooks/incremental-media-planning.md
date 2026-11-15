@@ -101,8 +101,11 @@ de evidência verdadeiros liberam execução no servidor.
 
 Módulo: `homeserver_control.adapters.migration_inventory`. A entrada é um
 documento já carregado em memória; o adaptador não abre arquivos ou consulta o
-servidor. O formato preserva os campos do inventário existente: versão, geração,
-completude, arquivos, diretórios, nós especiais e colisões declaradas. Cada
+servidor. O contrato normalizado v1 exige versão, geração, completude, arquivos,
+diretórios, nós especiais e colisões declaradas. Corresponde à estrutura do
+inventário privado de delta final; não importa diretamente o inventário inicial
+de lançamento (`created_at`, `roots`, `files`, `special`, `collisions`). A
+normalização e a coleta de evidências operacionais não estão implementadas. Cada
 arquivo informa pool, caminho relativo, device/inode, tamanho, alocação,
 mtime, permissões, UID/GID e número de links. `mode` contém somente bits de
 permissão, como no inventário histórico. `incident`, quando presente, é metadado
@@ -142,6 +145,14 @@ O importador não autentica recibos históricos e não transforma declarações 
 evidência de staging, publicação ou leitura nativa. Nomes relativos e razões de
 bloqueio podem revelar o conteúdo do acervo se o chamador usar dados reais;
 esses relatórios devem permanecer privados e fora do Git.
+
+A ausência de geração, completude ou diretórios é uma lacuna de evidência. Não
+preencher `complete=True`, criar uma geração operacional ou presumir
+`directories=[]` para obter aceitação do schema. O digest dos metadados não é
+hash de conteúdo nem o SHA dos bytes do inventário privado. Recibos de cache e
+contagens históricas não substituem validação atual de delta, prova e publicação.
+Consulte a [inspeção anterior ao corte](media-precutover-review.md) para o formato
+efetivamente encontrado no servidor e as condições de contenção.
 
 ## Ensaio de publicação
 

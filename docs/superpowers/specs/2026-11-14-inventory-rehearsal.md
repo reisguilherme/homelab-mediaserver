@@ -12,10 +12,14 @@ continua dependendo de aviso explícito. Esta entrega não acessa o servidor.
 - Python 3.12, biblioteca padrão, sem novas dependências ou hooks no runtime.
 - Nenhuma leitura de `.env`, bancos, mídia, inventário privado ou helpers privados
   pela implementação pública. Nenhuma chamada de rede, Docker ou subprocesso.
-- O adaptador recebe em memória o formato de inventário existente: `version=1`,
+- O adaptador recebe em memória um contrato normalizado v1, correspondente à
+  estrutura do inventário privado de delta final: `version=1`,
   `inventory_generation`, `complete`, `files`, `directories`, `special`,
   `collisions`. As entradas de arquivo têm `pool`, `relative`, `device`, `inode`,
   `size`, `allocated`, `mtime_ns`, `mode`, `uid`, `gid`, `nlink`.
+  O inventário inicial de lançamento não é entrada compatível. Campos ausentes
+  não recebem valores presumidos; este adaptador não converte o formato inicial
+  nem autentica evidências do servidor.
 - Mapa explícito de pools para identidades lógicas e pool nativo do destino;
   nenhuma identificação automática por nome de device. Metadados importados
   continuam sendo declarações offline, sem comprovação de atualidade física.

@@ -63,6 +63,28 @@ verificada nos dois destinos e ensaiada antes de alterar o SSD do sistema.
 
 ## Próxima etapa operacional
 
+**Inspeção mais recente: 14/11/2026, 21:39–21:49 em São Paulo** (15/11,
+00:39–00:49 UTC). O cache de verificação saudável avançou de 1.833 para 1.848
+dos 6.029 grupos, ainda incompleto e com uma pendência de reparo. Jellyfin e
+telemetria responderam 200; readiness do controlador, 503. Há cerca de 6,84 TB
+disponíveis no HD grande, ocupado por biblioteca nativa e staging distintos.
+
+O [registro de inspeção e preparação do corte](../../runbooks/media-precutover-review.md)
+documenta os agregados históricos, limites da evidência e comandos de contenção
+para uma janela futura. Não foram encontrados inventário/delta finais, prova
+global ou journal/recibo de publicação no incidente consultado. Isso não prova
+ausência de alterações fora desses artefatos. O inventário inicial observado
+não é compatível com o adaptador v1; não foi convertido nem importado.
+
+A manutenção pertence ao incidente histórico e a recuperação USB continua
+habilitada. Foram identificados 21 serviços ativos e diferenças de overrides
+por serviço. O bind de mídia do Jellyfin ainda é RW. Nenhum deles foi alterado;
+o requisito de playback RO e a contenção real de scans continuam pendentes.
+O roteiro não libera corte: faltam executor operacional, checkpoint conjunto
+restaurável, contenção nativa demonstrada e reconciliação da verificação/reparo.
+
+### Etapa anterior: planejamento e ensaio offline
+
 Atualização da inspeção em 14/11/2026, 23:20 UTC: o mesmo verificador histórico
 continuava ativo e avançou de 1.701 para 1.705/6.029 grupos saudáveis durante a
 consulta. A prova global continuava falsa, com uma pendência de reparo. Jellyfin
@@ -80,9 +102,10 @@ grupo de origem mantém o plano bloqueado, inclusive para seleções menores.
 O acervo e os recibos históricos não foram importados nessa validação.
 
 Contenção de Jellyfin/Arr no ensaio é simulada e não libera nenhuma ação real.
-Integração com o estado atual do servidor, contenção nativa e executor continuam
-pendentes. Esta preparação não fez nova conexão SSH ou implantação, não parou
-serviços e não publicou arquivos no HD de 18 TB. A inspeção acima é histórica.
+Integração operacional com o servidor, contenção nativa e executor continuam
+pendentes. A entrega do ensaio não fez conexão SSH ou implantação, não parou
+serviços e não publicou arquivos no HD de 18 TB. A inspeção posterior está
+registrada acima e não executou o ensaio no acervo.
 
 1. Concluir/reconciliar a verificação anterior sem executar outro publicador ou
    modificá-la enquanto mantém locks do pipeline.
