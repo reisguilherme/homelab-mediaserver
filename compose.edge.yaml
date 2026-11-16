@@ -1,0 +1,104 @@
+name: homeserver-edge
+x-isolated: &isolated
+  pull_policy: never
+  restart: 'no'
+  init: false
+  user: '1000:1000'
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  healthcheck: {disable: true}
+  logging: {driver: none}
+  pids_limit: 96
+  cpus: 0.75
+  stop_grace_period: 20s
+services:
+  edge-tls:
+    <<: *isolated
+    image: sha256:${EDGE_CADDY_IMAGE_ID:?authenticated Caddy image without file capabilities required}
+    mem_limit: 96m
+    memswap_limit: 96m
+    entrypoint: [/usr/bin/env, -i, PATH=/usr/bin:/bin, HOME=/tmp, XDG_DATA_HOME=/data, XDG_CONFIG_HOME=/config, /usr/bin/caddy]
+    command: [run, --config, /etc/caddy/Caddyfile, --adapter, caddyfile]
+    ports:
+      - host_ip: ${EDGE_BIND_IP:?verified private edge address required}
+        published: '80'
+        target: 8080
+        protocol: tcp
+      - host_ip: ${EDGE_BIND_IP:?verified private edge address required}
+        published: '443'
+        target: 8443
+        protocol: tcp
+    networks:
+      edge: {ipv4_address: 172.30.248.2}
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=1000,gid=1000,mode=0700
+      - /config:rw,noexec,nosuid,nodev,size=4m,uid=1000,gid=1000,mode=0700
+    volumes:
+      - type: bind
+        source: ./deploy/edge/Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/appdata/edge/caddy
+        target: /data
+        bind: {create_host_path: false}
+    depends_on:
+      public-proxy: {condition: service_started}
+  public-proxy:
+    <<: *isolated
+    image: sha256:${EDGE_NGINX_IMAGE_ID:?authenticated Nginx image required}
+    mem_limit: 96m
+    memswap_limit: 96m
+    entrypoint: [/usr/bin/env, -i, PATH=/usr/sbin:/usr/bin:/sbin:/bin, /usr/sbin/nginx]
+    command: [-g, 'daemon off;', -c, /etc/nginx/nginx.conf]
+    networks:
+      edge: {ipv4_address: 172.30.248.3}
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=32m,uid=1000,gid=1000,mode=0700
+      - /var/cache/nginx:rw,noexec,nosuid,nodev,size=32m,uid=1000,gid=1000
+      - /var/run:rw,noexec,nosuid,nodev,size=4m,uid=1000,gid=1000
+    volumes:
+      - type: bind
+        source: ./deploy/edge/nginx.conf
+        target: /etc/nginx/nginx.conf
+        read_only: true
+        bind: {create_host_path: false}
+    depends_on:
+      public-security: {condition: service_started}
+  public-security:
+    <<: *isolated
+    image: sha256:${EDGE_PYTHON_IMAGE_ID:?authenticated current public Python sources required}
+    mem_limit: 256m
+    memswap_limit: 256m
+    entrypoint:
+      - /usr/bin/env
+      - -i
+      - PATH=/app/.venv/bin:/usr/local/bin:/usr/bin:/bin
+      - PYTHONPATH=/app/services/common/src:/app/services/control/src
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - HOMESERVER_JELLYFIN_URL=http://172.28.64.20:8096/jellyfin
+      - HOMESERVER_SEERR_URL=http://127.0.0.1:9
+      - HOMESERVER_PUBLIC_ACCESS_STATE_PATH=/state/limits.sqlite3
+      - HOMESERVER_PUBLIC_ACCESS_TRUSTED_PROXY_IPS=172.30.248.3
+      - /app/.venv/bin/python
+      - -B
+      - -m
+      - uvicorn
+    command: [homeserver_control.api.public_access:create_app, --factory, --host, 0.0.0.0, --port, '8080', --no-proxy-headers, --no-access-log, --log-level, critical]
+    networks:
+      edge: {ipv4_address: 172.30.248.4}
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,uid=1000,gid=1000,mode=0700
+    volumes:
+      - type: bind
+        source: /srv/appdata/edge/public-security
+        target: /state
+        bind: {create_host_path: false}
+networks:
+  edge:
+    internal: false
+    ipam:
+      config: [{subnet: 172.30.248.0/28}]

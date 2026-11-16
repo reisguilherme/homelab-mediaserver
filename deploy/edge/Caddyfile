@@ -1,0 +1,30 @@
+{
+    admin off
+    http_port 8080
+    https_port 8443
+    servers {
+        protocols h1 h2
+    }
+    # Request URLs can carry native session tokens, including on error paths.
+    log {
+        output discard
+    }
+}
+
+streaming.greis.dev.br {
+    reverse_proxy 172.30.248.3:8097 {
+        header_up Host streaming.greis.dev.br
+        header_up X-Forwarded-For {http.request.remote.host}
+        header_up X-Real-IP {http.request.remote.host}
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-Host streaming.greis.dev.br
+        header_up X-Forwarded-Port 443
+        header_up -Forwarded
+        header_up -X-Original-URI
+        header_up -X-Original-Method
+        header_up -X-Verified-Authorization
+        header_up -Remote-User
+        header_up -X-Forwarded-User
+        header_up -X-Auth-Request-User
+    }
+}
