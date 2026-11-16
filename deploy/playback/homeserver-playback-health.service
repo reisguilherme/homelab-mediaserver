@@ -1,0 +1,37 @@
+[Unit]
+Description=Observe Jellyfin availability and mandatory storage admission
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/homeserver/playback-health.conf
+ExecStart=/usr/bin/python3 -I -B /usr/local/lib/homeserver/playback-health.py --jellyfin-address ${PLAYBACK_JELLYFIN_ADDRESS}
+TimeoutStartSec=8s
+TimeoutStopSec=2s
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/prometheus/node-exporter
+InaccessiblePaths=/srv /run /tmp /var/tmp -/etc/homelab-storage.json -/etc/shadow
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+MemoryMax=64M
+TasksMax=8

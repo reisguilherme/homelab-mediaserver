@@ -1,0 +1,3 @@
+# Replace privately with the reviewed RFC1918 IPv4 of Jellyfin on this guest.
+# An invalid or missing address prevents publication; there is no default target.
+PLAYBACK_JELLYFIN_ADDRESS=REPLACE_WITH_PRIVATE_IPV4
