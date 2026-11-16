@@ -1,8 +1,17 @@
 # Publicar aliases do staging consolidado
 
+**Execução aceita em 16/11/2026:** publicação por hardlinks de 8.209 caminhos,
+6.023 arquivos únicos e 5.449.345.898.283 bytes (5,449 TB), sem sobrescrita ou
+exclusão. Dois aliases degradados ficaram fora da publicação, com origens
+preservadas; seis auxiliares permaneceram fora da biblioteca. O delta posterior
+de metadados encontrou os 8.209 publicados e os dois aliases degradados, sem
+outros casos no escopo inspecionado. Isso não prova todos os bytes atuais nem
+remove a limitação de journals pendentes nas origens. Gatilhos Jellyfin seguem
+contidos; não repetir a publicação ou a varredura integral automaticamente.
+
 `scripts/publish-consolidation-target.py` prepara um plano privado e publica
-hardlinks no mesmo ext4. A implementação foi preparada para operação assistida;
-este documento não comprova execução no servidor. O operador coordena a
+hardlinks no mesmo ext4. A implementação foi usada na operação assistida acima;
+os procedimentos abaixo documentam seu contrato. O operador coordena a
 quiescência, as provas físicas atuais e a readmissão das aplicações separadamente.
 
 O critério autorizado nesta etapa é **hash histórico autenticado e metadados

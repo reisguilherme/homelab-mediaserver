@@ -1,5 +1,11 @@
 # Execução explícita de aplicativos pelo guard do core
 
+**Atualização em 16/11/2026:** oito processos nativos estão vivos no core;
+API, gateway e worker estão iniciados em manutenção, sem readmissão da automação.
+A fila qBit permanece parada. O [estado atual](../architecture/homelab-2026/implementation-status.md)
+registra o aceite parcial; a descrição do incremento abaixo preserva a etapa
+inicial, anterior à integração e ativação no servidor.
+
 Este incremento acrescenta `--run` ao consumidor de storage. O Compose e
 `core-entrypoint.sh` continuam na preparação com inicialização negada; este
 documento não comprova que as aplicações restauradas foram readmitidas.

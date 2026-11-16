@@ -1,5 +1,52 @@
 # Entrada pública Jellyfin na edge
 
+**Estado em 16/11/2026, publicação em ativação:** backend edge → playback:8096 ativo
+(HTTP 200). Firewall PVE `enabled/running`, DROP IN/OUT e chains das NICs
+conferidos; edge → core:8080, controle:443 e PVE:8006/22 deram timeout.
+Proxy: Items sem sessão 401, configuração 403, Users/Public `[]`, acesso direto
+ao Nginx 403 e guard indisponível 500. Hostname incorreto no Caddy retornou 200
+com corpo vazio, sem Jellyfin; esse teste não é uma negação HTTP 403/444.
+
+Duas regras DNAT TCP 80/443 foram aplicadas no PVE sem reload. HTTP 308 para
+HTTPS correto passou pela LAN. O proxy passou em **33 checks reais**: login
+comum, identidade, catálogo de 20 itens, Range 206 de 64 KiB, WebSocket 101,
+login admin 403, token admin válido 403, GETs administrativos/spoof negados e
+três logouts. Caddy definitivo e os outros dois containers estão Running com
+rootfs RO, UID 1000, capabilities ALL removidas e limites somados de 448 MiB.
+O DNS A foi confirmado e o diretório ACME respondeu 200 até a partir do Caddy.
+**Ainda não há certificado TLS.** Let's Encrypt resolveu o hostname/destino
+esperado, mas registrou timeout externo TCP 80. O proprietário confirmou a WAN
+esperada e mapeamentos TCP 80/443 ativos para o endereço LAN do PVE, com MAC
+correto. HTTP e HTTPS deram timeout pelo 4G. Windows resolveu
+o A esperado e o domínio respondeu HTTP 308 pelo Caddy, com Location HTTPS
+correto; HTTP LAN com Host explícito também retornou 308. NAT loopback funciona
+nesse desktop, superando a tentativa anterior de timeout HTTP. HTTPS falhou no
+Schannel, ainda sem certificado emitido. Essa prova local não comprova acesso 4G.
+
+As capturas anteriores em `vmbr0` foram invalidadas: nem o controle LAN apareceu.
+Elas não provam ausência de tráfego externo. A captura SYN corrigida em `nic1`
+validou controles LAN e NAT loopback e cobriu o intervalo da tentativa 4G
+relatada. Outros SYN com origem aparente igual à WAN também apareceram; não foi
+identificada origem externa distinta atribuível à tentativa 4G. Isso orienta
+a investigação do caminho anterior ao servidor, sem concluir bloqueio da
+operadora ou falha do roteador: SNAT pode ocultar a origem real. O status WAN
+enviado pelo proprietário confirmou a conexão IPv4 ativa com o endereço esperado
+pelo DNS e o vínculo correto dos mapeamentos.
+
+O próximo teste orientado usa regra temporária **WAN TCP 10443 → LAN TCP 443
+do PVE**, na mesma conexão WAN. O proprietário ainda não confirmou sua criação;
+o teste não foi aplicado e não houve mudança adicional no PVE ou na edge.
+
+O túnel temporário de teste foi encerrado. O health privado na porta 18096
+respondeu HTTP 200; essa prova não demonstra acesso pela internet.
+
+Não anunciar disponibilidade pública: os checks do proxy e o redirect LAN não
+comprovam TLS ou reprodução externa. Manter as proteções do firewall, sem
+ampliar portas do PVE ou da edge. O diagnóstico TLS temporário do Caddy usa arquivo
+privado 0600 limitado a 1 MiB; logs HTTP continuam desativados. IPs e pacotes
+brutos não pertencem à documentação pública. As etapas abaixo conservam a
+ordem de implantação.
+
 `compose.edge.yaml` prepara somente `streaming.greis.dev.br`: Caddy TLS →
 Nginx → Jellyfin privado na playback, com o guard `public_access` existente.
 Este arquivo não comprova DNS, NAT, emissão de certificado ou reprodução externa.
@@ -32,7 +79,9 @@ não é necessário para o ingresso; este caminho usa a resposta nativa Jellyfin
   capabilities ou host networking. `restart: no` mantém a ativação inicial
   explícita. O consumo real e a capacidade de streaming dependem de medição.
 - Não há logs de requisições: URLs podem conter tokens nativos. Nginx descarta
-  erros e Caddy descarta seu logger; Docker usa `none`. Capturas excepcionais
+  erros e a configuração padrão do Caddy descarta seu logger; Docker usa `none`.
+  A exceção temporária de diagnóstico TLS está delimitada no estado acima.
+  Capturas excepcionais
   precisam permanecer privadas e redigidas; não habilitar logs brutos na WAN.
 
 ## Ordem operacional

@@ -2,6 +2,54 @@
 
 ## Atualização operacional — 16/11/2026
 
+O core mantém **oito processos nativos vivos**: Sonarr, Radarr, Prowlarr,
+Bazarr, Seerr, integration-proxy, qBittorrent e monitor. API, download gateway
+e **worker estão iniciados em manutenção**, sem readmissão da automação. A fila
+conserva 734 torrents parados, um em `missingFiles`. Não se declara retomada de downloads.
+Os gatilhos Jellyfin continuam contidos e a mídia na playback permanece RO.
+
+O recibo do worker registra `RUNNING_IN_MAINTENANCE`. O guard real foi validado,
+com worker/collector no mesmo PGID/SID e collector UID 1000. Capacidade e
+heartbeat avançaram; o último sucesso de ingestão ficou inalterado. A amostra
+de memória foi 87,3 MB, sem demonstrar consumo final sob carga.
+
+O backend edge → playback:8096 respondeu HTTP 200. Firewall PVE está
+`enabled/running`, com DROP IN/OUT e chains das NICs conferidos; conexões da
+edge para core:8080, controle:443 e PVE:8006/22 deram timeout. Proxy sem sessão:
+Items 401, configuração 403, Users/Public `[]`; Nginx direto 403 e guard
+indisponível 500. Hostname incorreto no Caddy deu HTTP 200 com corpo vazio,
+sem conteúdo Jellyfin.
+
+As duas regras DNAT TCP 80/443 foram aplicadas no PVE sem reload. Pela LAN,
+HTTP retornou 308 para o HTTPS correto. O aceite do proxy passou em **33 checks**:
+login comum, identidade, catálogo de 20 itens, Range 206 de 64 KiB, WebSocket
+101, login admin 403, token admin válido 403, GETs administrativos e spoof
+negados e três logouts. Caddy definitivo, Nginx e guard estão Running, com
+rootfs RO, UID 1000, capabilities ALL removidas e limites somados de 448 MiB.
+DNS A confirmado e diretório ACME respondendo 200, inclusive a partir do Caddy,
+**ainda sem certificado TLS**. Let's Encrypt resolveu o destino esperado e
+registrou timeout externo TCP 80. O proprietário confirmou WAN e mapeamentos
+TCP 80/443 ativos para o endereço LAN do PVE, com MAC correto. HTTP/HTTPS pelo
+4G deram timeout. Windows resolveu o A esperado e o domínio
+respondeu HTTP 308 pelo Caddy, com Location HTTPS correto; HTTP LAN com Host
+explícito também retornou 308. NAT loopback funciona nesse desktop, superando
+a tentativa anterior de timeout HTTP. HTTPS falhou no Schannel, sem certificado
+emitido; isso não demonstra acesso externo.
+As capturas anteriores em `vmbr0` foram invalidadas porque nem o controle LAN
+apareceu. A captura SYN corrigida em `nic1` validou LAN e NAT loopback e cobriu
+o intervalo da tentativa 4G relatada. Outros SYN com origem aparente igual à WAN
+também apareceram; não foi identificada origem externa distinta atribuível ao
+4G. Investigar o caminho anterior ao servidor, sem concluir falha de operadora
+ou roteador: SNAT pode ocultar a origem real. O status WAN enviado pelo
+proprietário confirmou a conexão IPv4 ativa com o endereço esperado pelo DNS
+e o vínculo correto dos mapeamentos. Foi orientado teste temporário de
+WAN TCP 10443 → LAN TCP 443 do PVE, na mesma WAN, ainda sem confirmação de
+criação ou aplicação. Nenhuma alteração adicional no PVE/edge.
+O túnel temporário de teste foi encerrado; health privado na porta 18096 deu 200.
+A publicação está em ativação, sem aceite de disponibilidade/reprodução externa.
+Firewall preservado, sem portas adicionais. O log temporário de diagnóstico
+TLS do Caddy é privado, 0600 e limitado a 1 MiB; logs HTTP continuam desativados.
+
 A publicação no hub integrou **8.209 caminhos de 6.023 arquivos únicos**
 (5.449.345.898.283 bytes) às pastas finais `media` e `torrents`. O
 [publicador](../../runbooks/consolidation-publication.md) utilizou hardlinks,
@@ -12,14 +60,17 @@ temporários foram preservados; compartilham o inode e não são outro backup.
 
 Uma cópia publicada de cada uma das três origens passou por HTTP do Jellyfin e
 decodificação de início, meio e fim, sem alterar o histórico dos usuários.
-O resultado cobre três amostras, não o acervo inteiro. Delta final das origens,
-arquivo degradado e readmissão da automação continuam pendentes.
+O resultado cobre três amostras, não o acervo inteiro. O delta somente de
+metadados encontrou 8.209 correspondências publicadas e dois aliases do arquivo
+degradado, sem outros casos no escopo inspecionado. Esses aliases ficam fora da
+publicação, com origens preservadas; journals pendentes das origens limitam a
+conclusão. O caso degradado e a readmissão da automação continuam pendentes.
 
 O backend explícito `ext4-single` foi implementado e testado. No core, fixtures
 novas como UID 1000 comprovaram hardlinks, rename, unlink, ownership e proteção
 do diretório de placements. Nenhum arquivo real foi usado nessas operações.
-O registry e o marcador foram preparados; os aplicativos restaurados ainda
-não foram iniciados. O restante deste documento preserva o histórico das etapas.
+O registry e o marcador foram preparados antes da ativação parcial registrada
+acima. O restante deste documento preserva o histórico das etapas datadas.
 
 A arquitetura geral passou para
 [homelab-platform](https://github.com/reisguilherme/homelab-platform/blob/refactor/docs/architecture/README.md).
@@ -112,7 +163,9 @@ pela dependência do Docker, mantendo `noauto` no `fstab`. Docker voltou ativo e
 Jellyfin saudável, com contador de reinícios do container em zero. Identidade,
 catálogo, usuários, histórico e contenção de scans foram conferidos novamente,
 com os mesmos hashes e sem erros nos logs examinados. A saúde HTTP respondeu
-ao core; conexões da edge às portas 8096 e 18096 continuaram negadas. Esse teste
+ao core; nesse aceite de 15/11, conexões da edge às portas 8096 e 18096
+continuaram negadas. Em 16/11, a exceção de backend liberou somente 8096,
+conforme o estado atual acima. Esse teste histórico
 não simula queda de energia do HD nem valida recuperação física do USB.
 
 O [runbook de playback](../../runbooks/playback-nfs.md) registra os procedimentos

@@ -1,5 +1,16 @@
 # HomeServer
 
+**Atualização de 16/11/2026:** oito processos nativos do core estão vivos;
+API, gateway e worker em manutenção, sem readmitir automações. Os 734 torrents
+estão parados, um em `missingFiles`. Foram publicados 8.209 caminhos/6.023 arquivos únicos
+(5,449 TB), preservando as origens e excluindo os dois aliases degradados.
+Scans Jellyfin continuam contidos. Backend edge e isolamento PVE passaram;
+DNAT TCP 80/443 aplicado e 33 checks do proxy aprovados. **Publicação em
+ativação, ainda sem certificado TLS.** ACME e teste 4G deram timeout externo,
+apesar do redirect LAN funcionar; a causa ainda não foi determinada. Manter
+firewall e portas atuais, sem declarar disponibilidade. Veja o
+[estado atual e histórico](docs/architecture/homelab-2026/implementation-status.md).
+
 HomeServer reúne Jellyfin, Seerr, Sonarr, Radarr, Prowlarr, Bazarr e qBittorrent
 para organizar filmes e séries em um servidor pessoal Ubuntu. Um controlador
 coordena downloads, espaço disponível, legendas, importação e exclusões
@@ -24,17 +35,19 @@ das 18 contas após redefinição de senha passaram; as credenciais ficam soment
 no Windows privado. A lease obrigatória foi testada para expiração e HOLD,
 preservando parada manual; reboot com SSD e guard passou, recusando a lease do boot anterior. A readmissão exige
 prova nova e ação explícita; reboot do Proxmox pede auditoria do estado, sem
-promessa de retorno integral desassistido. GPU, recuperação física USB, entrada pública, Arr e
-consolidação continuam pendentes; Abyss permanece adiado.
+promessa de retorno integral desassistido. GPU, recuperação automática USB,
+entrada pública e conclusão da automação continuam pendentes; Abyss permanece adiado.
 
-O core tem [preparação própria](docs/runbooks/core-migration.md), com estado
-restaurado e inicialização ainda negada. A [verificação das cópias no destino](docs/runbooks/consolidation-target-verification.md)
+O core tem [preparação e ativação próprias](docs/runbooks/core-migration.md), com
+estado restaurado e ativação parcial registrada acima. A [verificação das cópias no destino](docs/runbooks/consolidation-target-verification.md)
 foi interrompida a pedido do proprietário, que escolheu triagem de reprodução
 em vez da releitura integral por hashes. O piloto de três arquivos passou em
 entrega HTTP e decodificação de trechos, sem exclusões; isso não testa todo o
-acervo. Publicação, delta final das origens e readmissão das aplicações continuam pendentes. Os
+acervo. Publicação e delta de metadados foram depois conferidos; caso degradado
+e readmissão da automação continuam pendentes. Os
 [domínios greis.dev.br](https://github.com/reisguilherme/homelab-platform/blob/refactor/docs/architecture/access-domains.md)
-estão definidos na plataforma, sem DNS/TLS/entrada pública aplicados.
+estão definidos na plataforma; backend/proxy aceitos e DNAT aplicado, ainda sem
+certificado TLS público.
 
 ```mermaid
 flowchart LR

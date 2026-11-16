@@ -2,6 +2,18 @@
 
 ## Migração para Proxmox
 
+Estado observado em 16/11/2026: oito processos nativos do core estão vivos
+(quatro Arr, Seerr, integration-proxy, qBittorrent e monitor); API, gateway e
+worker estão em manutenção, sem readmissão da automação. Os 734 torrents estão
+parados, um `missingFiles`.
+Publicação por hardlinks integrou 8.209 caminhos/6.023 arquivos únicos (5,449 TB);
+dois aliases degradados ficam excluídos, com origens preservadas. Backend edge
+e isolamento PVE passaram; DNAT TCP 80/443 aplicado e 33 checks do proxy aprovados.
+Publicação em ativação, sem certificado TLS após timeouts externos no ACME e
+4G; causa ainda não determinada. Manter firewall e portas atuais. Gatilhos Jellyfin
+continuam contidos. Esse estado não altera os limites abaixo; consulte o
+[registro atual](docs/architecture/homelab-2026/implementation-status.md).
+
 A etapa atual de playback usa somente `compose.playback.yaml`, conforme o
 [runbook NFS](docs/runbooks/playback-nfs.md). Nesse destino, o proprietário
 determinou mídia somente leitura; a regra histórica de Jellyfin RW abaixo
@@ -24,8 +36,9 @@ com remoção de parada manual pelo Docker. Reboot com SSD e guard passou, inclu
 recusa da lease do boot anterior; após reboot do Proxmox, auditar o estado antes de readmitir. Não prometer
 retorno integral desassistido. GPU e reintegração física USB seguem pendentes.
 
-A preparação do core e seu guard permanecem inativos, conforme
-`docs/runbooks/core-migration.md`. A verificação somente leitura das cópias no
+A preparação inicial do core ocorreu com apps inativos; a ativação parcial
+posterior está registrada em `docs/runbooks/core-migration.md`. A verificação
+somente leitura das cópias no
 destino usa `scripts/verify-consolidation-target.py`; o executor transitório
 iniciado em 16/11 foi parado a pedido do proprietário no mesmo dia. Não retomar
 a varredura integral: a orientação atual é triagem de reprodução. Conferir os

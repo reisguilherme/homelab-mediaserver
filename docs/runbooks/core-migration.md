@@ -1,7 +1,21 @@
 # Preparação e readmissão do core
 
-**Estado operacional: Compose preparado com inicialização negada. As aplicações
-restauradas do core ainda não foram readmitidas.** O layout aprovado separa
+**Estado em 16/11/2026:** Sonarr, Radarr, Prowlarr, Bazarr, Seerr,
+integration-proxy, qBittorrent e monitor estão vivos. API, gateway e worker estão
+iniciados em manutenção, sem readmissão da automação. Os 734 torrents continuam
+parados, um `missingFiles`. Isso não declara retomada automática nem downloads liberados.
+O [registro de implementação](../architecture/homelab-2026/implementation-status.md)
+conserva o alcance das provas.
+
+O worker chegou a `RUNNING_IN_MAINTENANCE`: guard real válido, worker/collector
+no mesmo PGID/SID, collector UID 1000, capacidade e heartbeat avançando. O último
+sucesso de ingestão não mudou; memória observada de 87,3 MB nessa amostra.
+
+**Preparação inicial, histórica em 16/11/2026:** o Compose de preparação
+recusava a inicialização das aplicações restauradas. Os parágrafos abaixo
+descrevem essa barreira inicial; a ativação usa os caminhos explícitos
+documentados em [core-native-activation.md](core-native-activation.md).
+O layout aprovado separa
 o core de playback e edge: estado no SSD da VM de 4 GiB e dados locais ext4 em
 `/srv/external3/homeserver`. Não iniciar o monólito nas novas VMs.
 
