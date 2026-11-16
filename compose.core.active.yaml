@@ -1,0 +1,469 @@
+# Explicit activation manifest. Use alone after audited work copies and receipts exist.
+# Image IDs, receipt pins and the literal private guest address are deployment inputs.
+name: homeserver-core-active
+
+x-core-base: &core-base
+  pull_policy: never
+  restart: 'no'
+  init: false
+  user: '1000:1000'
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  healthcheck: {disable: true}
+  pids_limit: 128
+  cpus: 1.0
+  stop_grace_period: 15s
+  networks: [core, egress]
+  tmpfs:
+    - /tmp:rw,nosuid,nodev,noexec,size=64m,uid=1000,gid=1000,mode=1777
+    - /run:rw,nosuid,nodev,noexec,size=16m,uid=0,gid=0,mode=0755
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: '3'}
+  labels:
+    homeserver.core.phase: explicit-guarded-activation
+
+x-native-base: &native-base
+  <<: *core-base
+  entrypoint: [/usr/bin/env, -i, PATH=/usr/sbin:/usr/bin:/sbin:/bin, LANG=C.UTF-8,
+               /usr/bin/python3, -I, -B, /usr/local/libexec/core-storage-guard.py]
+
+x-python-base: &python-base
+  <<: *core-base
+  working_dir: /app
+  entrypoint: [/usr/bin/env, -i, PATH=/app/.venv/bin:/usr/local/bin:/usr/bin:/bin,
+               'PYTHONPATH=/app/services/common/src:/app/services/control/src',
+               PYTHONDONTWRITEBYTECODE=1, PYTHONUNBUFFERED=1, LANG=C.UTF-8,
+               /app/.venv/bin/python, -B, /app/scripts/core-python-entrypoint.py]
+
+x-core-lease: &core-lease
+  type: bind
+  source: /var/lib/homelab-storage/core-writer-admission
+  target: /run/core-writer-admission
+  read_only: true
+  bind: {create_host_path: false}
+
+x-core-boot: &core-boot
+  type: bind
+  source: /proc/sys/kernel/random/boot_id
+  target: /run/guest-boot-id
+  read_only: true
+  bind: {create_host_path: false}
+
+x-core-marker: &core-marker
+  type: bind
+  source: /srv/external3/.homelab-volume-id
+  target: /run/core-filesystem-uuid
+  read_only: true
+  bind: {create_host_path: false}
+
+x-core-mountinfo: &core-mountinfo
+  type: bind
+  source: /proc/1/mountinfo
+  target: /run/host-mountinfo
+  read_only: true
+  bind: {create_host_path: false}
+
+x-native-guard: &native-guard
+  type: bind
+  source: ./scripts/core-storage-guard.py
+  target: /usr/local/libexec/core-storage-guard.py
+  read_only: true
+  bind: {create_host_path: false}
+
+x-data-rw: &data-rw
+  type: bind
+  source: /srv/external3/homeserver
+  target: /data
+  read_only: false
+  bind: {create_host_path: false}
+
+x-data-ro: &data-ro
+  <<: *data-rw
+  read_only: true
+
+x-control-state: &control-state
+  type: bind
+  source: /srv/appdata/core/control
+  target: /var/lib/homeserver
+  read_only: false
+  bind: {create_host_path: false}
+
+x-status: &status
+  type: bind
+  source: /srv/appdata/core-runtime/status
+  target: /run/homeserver
+  read_only: true
+  bind: {create_host_path: false}
+
+x-registry: &registry
+  type: bind
+  source: /srv/appdata/core-runtime/storage.json
+  target: /run/homeserver/storage.json
+  read_only: true
+  bind: {create_host_path: false}
+
+x-host-uuids: &host-uuids
+  type: bind
+  source: /dev/disk/by-uuid
+  target: /run/host-uuids
+  read_only: true
+  bind: {create_host_path: false}
+
+x-claims-ro: &claims-ro
+  type: bind
+  source: /srv/appdata/core-placements
+  target: /var/lib/homeserver/storage-placements
+  read_only: true
+  bind: {create_host_path: false}
+
+x-capacity-ro: &capacity-ro
+  type: bind
+  source: /srv/appdata/core-capacity
+  target: /run/core-capacity
+  read_only: true
+  bind: {create_host_path: false}
+
+services:
+  sonarr:
+    <<: *native-base
+    image: sha256:${CORE_SONARR_IMAGE_ID:?verified final image ID required}
+    command: [--run, sonarr, --filesystem-uuid,
+              '${CORE_FILESYSTEM_UUID:?verified ext4 UUID required}', --activation-sha256,
+              '${CORE_SONARR_ACTIVATION_SHA256:?audited activation receipt hash required}']
+    mem_limit: 512m
+    memswap_limit: 512m
+    volumes:
+      - *core-lease
+      - *core-boot
+      - *core-marker
+      - *core-mountinfo
+      - *data-rw
+      - type: bind
+        source: /srv/appdata/core-activation/sonarr
+        target: /run/core-activation
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/appdata/core/sonarr
+        target: /config
+        read_only: false
+        bind: {create_host_path: false}
+    ports:
+      - host_ip: ${CORE_BIND_IP:?literal private VM address required}
+        published: '8989'
+        target: 8989
+        protocol: tcp
+
+  radarr:
+    <<: *native-base
+    image: sha256:${CORE_RADARR_IMAGE_ID:?verified final image ID required}
+    command: [--run, radarr, --filesystem-uuid,
+              '${CORE_FILESYSTEM_UUID:?verified ext4 UUID required}', --activation-sha256,
+              '${CORE_RADARR_ACTIVATION_SHA256:?audited activation receipt hash required}']
+    mem_limit: 512m
+    memswap_limit: 512m
+    volumes:
+      - *core-lease
+      - *core-boot
+      - *core-marker
+      - *core-mountinfo
+      - *data-rw
+      - type: bind
+        source: /srv/appdata/core-activation/radarr
+        target: /run/core-activation
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/appdata/core/radarr
+        target: /config
+        read_only: false
+        bind: {create_host_path: false}
+    ports:
+      - host_ip: ${CORE_BIND_IP:?literal private VM address required}
+        published: '7878'
+        target: 7878
+        protocol: tcp
+
+  prowlarr:
+    <<: *native-base
+    image: sha256:${CORE_PROWLARR_IMAGE_ID:?verified final image ID required}
+    command: [--run, prowlarr, --filesystem-uuid,
+              '${CORE_FILESYSTEM_UUID:?verified ext4 UUID required}', --activation-sha256,
+              '${CORE_PROWLARR_ACTIVATION_SHA256:?audited activation receipt hash required}']
+    mem_limit: 256m
+    memswap_limit: 256m
+    volumes:
+      - *core-lease
+      - *core-boot
+      - *core-marker
+      - *core-mountinfo
+      - type: bind
+        source: /srv/appdata/core-activation/prowlarr
+        target: /run/core-activation
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/appdata/core/prowlarr
+        target: /config
+        read_only: false
+        bind: {create_host_path: false}
+    ports:
+      - host_ip: ${CORE_BIND_IP:?literal private VM address required}
+        published: '9696'
+        target: 9696
+        protocol: tcp
+
+  bazarr:
+    <<: *native-base
+    image: sha256:${CORE_BAZARR_IMAGE_ID:?verified final image ID required}
+    entrypoint: [/usr/bin/env, -i, PATH=/lsiopy/bin:/usr/local/bin:/usr/bin:/bin, LANG=C.UTF-8,
+                 /lsiopy/bin/python3, -I, -B, /usr/local/libexec/core-storage-guard.py]
+    command: [--run, bazarr, --filesystem-uuid,
+              '${CORE_FILESYSTEM_UUID:?verified ext4 UUID required}', --activation-sha256,
+              '${CORE_BAZARR_ACTIVATION_SHA256:?audited activation receipt hash required}']
+    mem_limit: 256m
+    memswap_limit: 256m
+    volumes:
+      - *native-guard
+      - *core-lease
+      - *core-boot
+      - *core-marker
+      - *core-mountinfo
+      - *data-rw
+      - type: bind
+        source: /srv/appdata/core-activation/bazarr
+        target: /run/core-activation
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/appdata/core/bazarr
+        target: /config
+        read_only: false
+        bind: {create_host_path: false}
+    ports:
+      - host_ip: ${CORE_BIND_IP:?literal private VM address required}
+        published: '6767'
+        target: 6767
+        protocol: tcp
+
+  qbittorrent:
+    <<: *native-base
+    image: sha256:${CORE_QBITTORRENT_IMAGE_ID:?verified final image ID required}
+    command: [--run, qbittorrent, --filesystem-uuid,
+              '${CORE_FILESYSTEM_UUID:?verified ext4 UUID required}', --activation-sha256,
+              '${CORE_QBITTORRENT_ACTIVATION_SHA256:?audited activation receipt hash required}']
+    mem_limit: 384m
+    memswap_limit: 384m
+    volumes:
+      - *native-guard
+      - *core-lease
+      - *core-boot
+      - *core-marker
+      - *core-mountinfo
+      - *data-rw
+      - type: bind
+        source: /srv/appdata/core-activation/qbittorrent
+        target: /run/core-activation
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/appdata/core/qbittorrent
+        target: /config
+        read_only: false
+        bind: {create_host_path: false}
+
+  seerr:
+    <<: *native-base
+    image: sha256:${CORE_SEERR_IMAGE_ID:?verified final image ID required}
+    command: [--run, seerr, --filesystem-uuid,
+              '${CORE_FILESYSTEM_UUID:?verified ext4 UUID required}', --activation-sha256,
+              '${CORE_SEERR_ACTIVATION_SHA256:?audited activation receipt hash required}']
+    mem_limit: 384m
+    memswap_limit: 384m
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,uid=1000,gid=1000,mode=1777
+      - /run:rw,nosuid,nodev,noexec,size=16m,uid=0,gid=0,mode=0755
+      - /config:rw,nosuid,nodev,noexec,size=16m,uid=1000,gid=1000,mode=0700
+    volumes:
+      - *core-lease
+      - *core-boot
+      - *core-marker
+      - *core-mountinfo
+      - type: bind
+        source: /srv/appdata/core-activation/seerr
+        target: /run/core-activation
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/appdata/core/seerr
+        target: /app/config
+        read_only: false
+        bind: {create_host_path: false}
+    ports:
+      - host_ip: ${CORE_BIND_IP:?literal private VM address required}
+        published: '5055'
+        target: 5055
+        protocol: tcp
+
+  byparr:
+    <<: *native-base
+    profiles: [byparr]
+    image: sha256:${CORE_BYPARR_IMAGE_ID:?verified final image ID required}
+    entrypoint: [/usr/bin/env, -i, PATH=/usr/local/bin:/usr/bin:/bin, LANG=C.UTF-8,
+                 /app/.venv/bin/python, -I, -B, /usr/local/libexec/core-storage-guard.py]
+    command: [--run, byparr, --filesystem-uuid,
+              '${CORE_FILESYSTEM_UUID:?verified ext4 UUID required}', --activation-sha256,
+              '${CORE_BYPARR_ACTIVATION_SHA256:?audited activation receipt hash required}']
+    mem_limit: 768m
+    memswap_limit: 768m
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,uid=1000,gid=1000,mode=1777
+      - /run:rw,nosuid,nodev,noexec,size=16m,uid=0,gid=0,mode=0755
+      - /config:rw,nosuid,nodev,noexec,size=128m,uid=1000,gid=1000,mode=0700
+    volumes:
+      - *native-guard
+      - *core-lease
+      - *core-boot
+      - *core-marker
+      - *core-mountinfo
+      - type: bind
+        source: /srv/appdata/core-activation/byparr
+        target: /run/core-activation
+        read_only: true
+        bind: {create_host_path: false}
+
+  control-api:
+    <<: *python-base
+    image: sha256:${CORE_CONTROL_API_IMAGE_ID:?verified final image ID required}
+    command: [--run, control-api, --filesystem-uuid,
+              '${CORE_FILESYSTEM_UUID:?verified ext4 UUID required}', --activation-sha256,
+              '${CORE_CONTROL_API_ACTIVATION_SHA256:?audited activation receipt hash required}']
+    mem_limit: 128m
+    memswap_limit: 128m
+    volumes:
+      - *core-lease
+      - *core-boot
+      - *core-marker
+      - *core-mountinfo
+      - *data-ro
+      - *control-state
+      - *status
+      - *registry
+      - *host-uuids
+      - *claims-ro
+      - *capacity-ro
+      - type: bind
+        source: /srv/appdata/core-activation/control-api
+        target: /run/core-activation
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/appdata/core-runtime/control-api.env
+        target: /run/core-runtime.env
+        read_only: true
+        bind: {create_host_path: false}
+    ports:
+      - host_ip: ${CORE_BIND_IP:?literal private VM address required}
+        published: '8080'
+        target: 8080
+        protocol: tcp
+
+  control-worker:
+    <<: *python-base
+    image: sha256:${CORE_CONTROL_WORKER_IMAGE_ID:?verified final image ID required}
+    user: '0:0'
+    cap_add: [CHOWN, DAC_OVERRIDE, SETUID, SETGID, KILL]
+    command: [--run, control-worker, --filesystem-uuid,
+              '${CORE_FILESYSTEM_UUID:?verified ext4 UUID required}', --activation-sha256,
+              '${CORE_CONTROL_WORKER_ACTIVATION_SHA256:?audited activation receipt hash required}']
+    mem_limit: 384m
+    memswap_limit: 384m
+    volumes:
+      - *core-lease
+      - *core-boot
+      - *core-marker
+      - *core-mountinfo
+      - *data-rw
+      - *control-state
+      - *status
+      - *registry
+      - *host-uuids
+      - <<: *claims-ro
+        read_only: false
+      - <<: *capacity-ro
+        read_only: false
+      - type: bind
+        source: /srv/appdata/core-activation/control-worker
+        target: /run/core-activation
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/appdata/core-runtime/control-worker.env
+        target: /run/core-runtime.env
+        read_only: true
+        bind: {create_host_path: false}
+
+  download-gateway:
+    <<: *python-base
+    image: sha256:${CORE_DOWNLOAD_GATEWAY_IMAGE_ID:?verified final image ID required}
+    networks: [core]
+    command: [--run, download-gateway, --filesystem-uuid,
+              '${CORE_FILESYSTEM_UUID:?verified ext4 UUID required}', --activation-sha256,
+              '${CORE_DOWNLOAD_GATEWAY_ACTIVATION_SHA256:?audited activation receipt hash required}']
+    mem_limit: 192m
+    memswap_limit: 192m
+    volumes:
+      - *core-lease
+      - *core-boot
+      - *core-marker
+      - *core-mountinfo
+      - *data-ro
+      - *control-state
+      - *status
+      - *registry
+      - *host-uuids
+      - *claims-ro
+      - *capacity-ro
+      - type: bind
+        source: /srv/appdata/core-activation/download-gateway
+        target: /run/core-activation
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/appdata/core-runtime/download-gateway.env
+        target: /run/core-runtime.env
+        read_only: true
+        bind: {create_host_path: false}
+
+  qbit-monitor:
+    <<: *core-base
+    image: sha256:${CORE_QBIT_MONITOR_IMAGE_ID:?verified final image ID required}
+    networks: [core]
+    entrypoint: [/usr/bin/env, -i, PATH=/usr/bin:/bin, HOME=/config,
+                 XDG_CONFIG_HOME=/config, XDG_DATA_HOME=/data, /usr/bin/caddy]
+    command: [run, --config, /etc/caddy/Caddyfile, --adapter, caddyfile]
+    mem_limit: 64m
+    memswap_limit: 64m
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=8m,uid=1000,gid=1000,mode=1777
+      - /config:rw,nosuid,nodev,noexec,size=8m,uid=1000,gid=1000,mode=0700
+      - /data:rw,nosuid,nodev,noexec,size=8m,uid=1000,gid=1000,mode=0700
+    volumes:
+      - type: bind
+        source: ./deploy/qbit-monitor/Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
+        bind: {create_host_path: false}
+    ports:
+      - host_ip: ${CORE_BIND_IP:?literal private VM address required}
+        published: '18080'
+        target: 8080
+        protocol: tcp
+
+networks:
+  core:
+    internal: true
+  egress:
+    internal: false
