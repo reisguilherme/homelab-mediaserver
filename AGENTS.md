@@ -7,19 +7,31 @@ Estado observado em 16/11/2026: oito processos nativos do core estão vivos
 worker estão em manutenção, sem readmissão da automação. Os 734 torrents estão
 parados, um `missingFiles`.
 Publicação por hardlinks integrou 8.209 caminhos/6.023 arquivos únicos (5,449 TB);
-dois aliases degradados ficam excluídos, com origens preservadas. Backend edge
-e isolamento PVE passaram; DNAT TCP 80/443 aplicado e 33 checks do proxy aprovados.
-TLS estático de streaming implantado na porta 10443, com certificado Let's Encrypt
-emitido por DNS-01 no Certbot do control. Só os dois proxies foram recriados;
-ID e StartedAt do guard foram preservados. Passaram 33 aceites TLS reais pelo
-Windows na LAN até o destino público, via NAT loopback: login comum, catálogo,
-Range de 64 KiB, WebSocket, admin 403, spoof e três logouts. Isso não comprova
-4G nem reprodução completa nesse TLS; o proprietário ainda precisa testá-los.
-O registro A foi corrigido após mudança do IP dinâmico e confirmado nos DNS
-autoritativos e em resolvedor público; o Windows ainda tinha cache antigo.
-Registro.br permanece no DNS, sem Cloudflare/VPS. Renovação e DDNS continuam
-manuais, sem API integrada. Gestão por Tailscale segue separada. Gatilhos Jellyfin
-continuam contidos. Esse estado não altera os limites abaixo; consulte o
+dois aliases degradados ficam excluídos, com origens preservadas.
+O proprietário revogou a publicação WAN: Jellyfin agora usa exclusivamente
+`https://jellyfin.greis.dev.br`, porta 443 por Tailscale, conservando o prefixo
+`/jellyfin/`. O proxy privado do control encaminha diretamente à playback:8096,
+com autenticação e autorização nativas. Os três containers públicos da edge
+foram parados e a VM edge foi desligada normalmente, com início automático
+desabilitado. Discos e demais configurações foram preservados. Os dois DNAT,
+quatro hooks persistentes e três exceções de
+firewall da publicação foram removidos e conferidos no dataplane. SSH, NFS,
+NAT de saída e o novo caminho privado foram preservados. Não reativar o Compose
+da edge nem seus headers/redirects públicos antigos para atender esse acesso.
+O código do guard público permanece preservado e inativo; o certificado e a
+chave exclusivos de streaming foram retidos privadamente, sem uso no listener.
+O ingresso privado tem adaptação restrita do `api_key` legado em WebSocket e
+Download, preservando a precedência da autenticação moderna. Após desligar a
+edge, os nove domínios privados responderam HTTP 200 com TLS válido. Nos 14
+checks HTTP/API pelo Windows via Tailscale, DNS normal e HTTPS verificado,
+passaram login/identidade comum
+e admin, negação 403 de endpoint admin à conta comum, catálogo, Range e Download
+legado de 64 KiB, WebSocket 101 nativo e legado e dois logouts com revogação.
+Isso não comprova a interface web completa ou reprodução interativa completa;
+os 33 checks anteriores de NAT loopback público são históricos.
+DNS permanece no Registro.br, sem Cloudflare/VPS; a renovação DNS-01 do TLS
+privado continua manual. Gatilhos Jellyfin continuam contidos.
+Esse estado não altera os limites abaixo; consulte o
 [registro atual](docs/architecture/homelab-2026/implementation-status.md).
 
 A etapa atual de playback usa somente `compose.playback.yaml`, conforme o

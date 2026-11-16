@@ -2,19 +2,45 @@
 
 ## Atualização operacional — 16/11/2026
 
-TLS estático de streaming implantado em `:10443`, com certificado Let's Encrypt
-emitido por DNS-01 no Certbot do control. Foram recriados somente `edge-tls`
-e `public-proxy`; ID e StartedAt de `public-security` ficaram iguais.
-Os 33 aceites TLS reais pelo Windows na LAN, até o destino público via NAT
-loopback, passaram: login comum, catálogo, Range de 64 KiB, WebSocket, admin
-403, spoof e três logouts. Ainda faltam teste 4G e reprodução completa nesse
-TLS pelo proprietário; não se declara disponibilidade externa comprovada.
-O registro A antigo foi substituído pelo atual após mudança do IP dinâmico;
-`a.sec.dns.br`, `b.sec.dns.br` e o resolvedor público consultado confirmaram a
-correção. O resolvedor Windows ainda apresentava cache antigo. DNS permanece
-no Registro.br, sem Cloudflare/VPS; renovação e DDNS são manuais, sem API
-integrada. Gestão por Tailscale é etapa separada.
-Ver o [runbook da edge](../../runbooks/edge-public.md).
+**Decisão vigente: Jellyfin exclusivamente por Tailscale.** O proprietário
+revogou a publicação WAN e escolheu `https://jellyfin.greis.dev.br`, porta 443,
+mantendo `/jellyfin/`. O DNS aponta ao control na tailnet; seu proxy HTTPS
+privado usa diretamente playback:8096, com autenticação e autorização nativas
+do Jellyfin. O guard público antigo não participa desse caminho.
+
+`edge-tls`, `public-proxy` e `public-security` foram parados. A VM edge foi
+desligada normalmente, sem parada forçada, e seu início automático ficou
+desabilitado. Discos e demais configurações foram preservados. Foram removidos
+os dois DNAT TCP 80/443, quatro hooks persistentes e três exceções de firewall
+da publicação. A conferência do dataplane confirmou sua ausência e preservou
+control → playback, SSH, NFS e toda a NAT restante. Nenhum encaminhamento do
+roteador foi alterado nessa retirada. Certificado e chave exclusivos de
+streaming foram preservados privadamente e não são usados pelo listener atual.
+O Compose, o guard e os headers públicos antigos permanecem no código,
+inativos; não reativá-los para oferecer o endereço privado.
+
+A plataforma registrou 478 testes locais aprovados e um skip. O ingresso
+privado recebeu adaptação restrita de `api_key` legado para WebSocket e
+Download: usa autenticação nativa somente quando não existe credencial
+moderna, preservando sua precedência. Não foi necessário recriar a playback
+nem alterar imagem, dados ou configuração do Jellyfin.
+Após desligar a edge, os nove domínios privados responderam HTTP 200 com TLS
+válido pelo Windows/Tailscale com DNS normal; as portas de gestão direta
+inspecionadas permaneceram negadas. Os 14 checks do helper HTTP/API no Windows
+via Tailscale, DNS normal e HTTPS verificado passaram, incluindo
+login e identidade comum/admin, endpoint admin 403 para a conta comum,
+catálogo, Range 206 de 65.536 bytes, Download legado 206 de 65.536 bytes,
+WebSocket 101 tanto com `ApiKey` nativo como com `api_key` legado e dois
+logouts com revogação. Essas provas não atestam a interface web completa
+nem reprodução interativa completa pelo novo caminho.
+DNS permanece no Registro.br, sem Cloudflare/VPS; o certificado privado do
+control usa DNS-01 e renovação manual.
+Ver o [runbook de retirada da edge](../../runbooks/edge-public.md).
+
+Antes dessa revogação, o TLS estático público em `:10443` passou em 33 checks
+pelo Windows na LAN via NAT loopback. Só os dois proxies tinham sido recriados,
+preservando ID e StartedAt do guard. Esse aceite é histórico e nunca comprovou
+4G ou reprodução completa externa; não há etapa pendente para reativar a WAN.
 
 Abyss `r6` implantado: barra Início/Favoritos oculta a pedido do proprietário,
 preservando menu lateral, busca e abas das bibliotecas. O import de CSS foi
@@ -62,8 +88,8 @@ com worker/collector no mesmo PGID/SID e collector UID 1000. Capacidade e
 heartbeat avançaram; o último sucesso de ingestão ficou inalterado. A amostra
 de memória foi 87,3 MB, sem demonstrar consumo final sob carga.
 
-No diagnóstico anterior à implantação TLS descrita acima, o backend edge →
-playback:8096 respondeu HTTP 200. Firewall PVE está
+No diagnóstico histórico anterior à implantação TLS pública, o backend edge →
+playback:8096 respondeu HTTP 200. O firewall PVE estava
 `enabled/running`, com DROP IN/OUT e chains das NICs conferidos; conexões da
 edge para core:8080, controle:443 e PVE:8006/22 deram timeout. Proxy sem sessão:
 Items 401, configuração 403, Users/Public `[]`; Nginx direto 403 e guard
@@ -74,7 +100,7 @@ As duas regras DNAT TCP 80/443 foram aplicadas no PVE sem reload. Pela LAN,
 HTTP retornou 308 para o HTTPS correto. O aceite do proxy passou em **33 checks**:
 login comum, identidade, catálogo de 20 itens, Range 206 de 64 KiB, WebSocket
 101, login admin 403, token admin válido 403, GETs administrativos e spoof
-negados e três logouts. Caddy definitivo, Nginx e guard estão Running, com
+negados e três logouts. Caddy definitivo, Nginx e guard estavam Running, com
 rootfs RO, UID 1000, capabilities ALL removidas e limites somados de 448 MiB.
 DNS A, WAN e vínculo dos mapeamentos conferidos, com NAT loopback HTTP funcional,
 **naquela etapa ainda sem certificado TLS**. ACME e 4G nas portas externas 80/443 deram timeout.
@@ -85,17 +111,18 @@ Isso comprova chegada pela porta alternativa ao mesmo destino interno, sem
 TLS. A falha externa de 80/443 ainda não distingue roteador de operadora.
 A preferência inicial de **resolver primeiro 80/443 para URL sem porta** e o
 uso de 10443 somente para diagnóstico foram substituídos pela implantação
-TLS descrita no início. O diagnóstico detalhado permanece no estado canônico
-da plataforma.
+TLS pública, posteriormente revogada. O diagnóstico detalhado permanece no
+estado canônico da plataforma.
 
 Limpeza dos dispositivos de teste Jellyfin v2/v3: seis registros conferidos,
 quatro já ausentes e dois removidos por IDs de recibos, metadados e janela
 temporal. Logout próprio verificado. Registros v1 não identificados com
 segurança permaneceram intactos; nenhuma identidade ou token foi publicado.
 O túnel temporário de teste foi encerrado; health privado na porta 18096 deu 200.
-A publicação está em ativação, sem aceite de disponibilidade/reprodução externa.
-Firewall preservado, sem ampliar portas no PVE/edge. O log temporário de diagnóstico
-TLS do Caddy é privado, 0600 e limitado a 1 MiB; logs HTTP continuam desativados.
+Naquela etapa, a publicação estava em ativação, sem aceite de disponibilidade
+ou reprodução externa. O firewall foi preservado, sem ampliar portas no PVE/edge.
+O log temporário de diagnóstico TLS do Caddy era privado, 0600 e limitado a
+1 MiB; os logs HTTP permaneceram desativados.
 
 A publicação no hub integrou **8.209 caminhos de 6.023 arquivos únicos**
 (5.449.345.898.283 bytes) às pastas finais `media` e `torrents`. O
