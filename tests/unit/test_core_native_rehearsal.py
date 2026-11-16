@@ -496,3 +496,33 @@ def test_foreground_executable_change_after_readiness_cannot_pass(runner):
     result, _, _ = exercise(runner, evidence=evidence, docker=docker, observer=observer)
     assert result["status"] == "HOLD" and result["removed"]
     assert result["code"] == "foreground_executable_changed"
+
+
+def test_image_without_declared_volumes_uses_missing_safe_docker_lookup(runner):
+    docker = runner.Docker(Path("/synthetic/config"))
+
+    def call(args):
+        template = args[args.index("--format") + 1]
+        # Docker's strict template evaluator raises on .Config.Volumes when the
+        # image has no Volumes member. index returns null for that legitimate case.
+        if ".Config.Volumes" in template:
+            raise runner.Hold("command_failed")
+        assert 'index .Config "Volumes"' in template
+        return json.dumps({"Id": IMAGE, "Volumes": None}).encode()
+
+    docker.call = call
+    docker.validate_image(IMAGE, "seerr")
+
+
+def test_metadata_failure_before_create_does_not_claim_unknown_fixture(runner):
+    evidence = MemoryEvidence()
+    docker = FakeDocker(runner, evidence)
+
+    def unavailable(*_):
+        raise runner.Hold("command_failed")
+
+    docker.validate_image = unavailable
+    result, _, _ = exercise(runner, evidence=evidence, docker=docker)
+    assert result["status"] == "HOLD" and result["code"] == "command_failed"
+    assert not result["retained"] and not result["removed"]
+    assert docker.calls == [] and "cleanup_code" not in result

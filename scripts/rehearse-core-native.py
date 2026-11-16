@@ -215,7 +215,8 @@ class Docker:
 
     def validate_image(self, image: str, role: str) -> None:
         row = decode_json(self.call(["image", "inspect", "--format",
-                                    '{"Id":{{json .Id}},"Volumes":{{json .Config.Volumes}}}',
+                                    '{"Id":{{json .Id}},'
+                                    '"Volumes":{{json (index .Config "Volumes")}}}',
                                     image]))
         if row.get("Id") != image or not isinstance(row.get("Volumes"), (dict, type(None))):
             raise Hold("image_identity_invalid")
@@ -386,6 +387,7 @@ def rehearse(role: str, image: str, evidence, docker, observer, *, nonce: str | 
               "kill_required": False, "removed": False, "retained": False,
               "status": "HOLD", "code": "not_started", "process_samples": []}
     identifier = None
+    create_attempted = False
     observed = {}
     ownership_saved = False
 
@@ -415,6 +417,7 @@ def rehearse(role: str, image: str, evidence, docker, observer, *, nonce: str | 
 
     try:
         docker.validate_image(image, role)
+        create_attempted = True
         raw = docker.call(create_arguments(role, image, nonce))
         try:
             candidate = raw.decode("ascii").strip()
@@ -498,7 +501,7 @@ def rehearse(role: str, image: str, evidence, docker, observer, *, nonce: str | 
                 result["retained"] = False
             except (Hold, OSError) as exc:
                 result["cleanup_code"] = str(exc) if isinstance(exc, Hold) else "local_io_error"
-        elif result["code"] in {"command_timeout", "create_identity_ambiguous", "command_failed"}:
+        elif create_attempted:
             result["retained"] = True
             result["cleanup_code"] = "creation_outcome_unknown_no_guessed_cleanup"
         if (result["http_ready"] and result["foreground_stable"] and result["graceful_stop"]
