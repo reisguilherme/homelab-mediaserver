@@ -54,6 +54,10 @@ e não concede lease, reinicia serviço ou remove parada manual.
    O intervalo é 15 s e cada execução tem limite de 8 s. O serviço roda como
    root para atravessar o diretório privado da plataforma, sem capabilities,
    com filesystem protegido e escrita somente no diretório textfile.
+   O conteúdo original de `/run` fica oculto por um tmpfs privado somente leitura
+   (`TemporaryFileSystem=/run:ro`). Não trocar essa proteção por
+   `InaccessiblePaths=/run`: no systemd 255.4 esse último bloqueio causou
+   `226/NAMESPACE` antes de iniciar Python, embora a verificação de sintaxe passasse.
 5. Confira no Prometheus as séries do guest, os três novos painéis de playback
    e as regras `PlaybackJellyfinUnavailable`, `PlaybackStorageAdmissionRefused`
    e `PlaybackCollectorStale`. A plataforma provisiona esses arquivos; não
@@ -85,3 +89,11 @@ Os testes usam fixtures temporárias e dependências injetadas:
 `uv run --frozen pytest tests/unit/test_playback_health.py -q`. A implantação,
 as permissões efetivas da unit e a resolução dos alertas precisam de prova no
 guest; testes locais não atestam essa etapa.
+
+Em Linux/WSL descartável com systemd, o teste de namespace pode ser habilitado
+explicitamente como root com
+`HOMESERVER_TEST_SYSTEMD_SANDBOX=1 uv run --frozen pytest tests/integration/test_playback_health_sandbox.py -q`.
+Ele cria uma unit transitória automaticamente removida e usa somente arquivos
+temporários, sem executar o coletor ou consultar serviços. Verifica que o runtime
+original fica oculto, que `/run` é somente leitura e que a única escrita aceita
+é no diretório textfile da fixture. Não executar esse ensaio no host Proxmox.

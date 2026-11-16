@@ -18,7 +18,9 @@ AmbientCapabilities=
 ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/prometheus/node-exporter
-InaccessiblePaths=/srv /run /tmp /var/tmp -/etc/homelab-storage.json -/etc/shadow
+InaccessiblePaths=/srv /tmp /var/tmp -/etc/homelab-storage.json -/etc/shadow
+# Keep the original runtime tree hidden without masking systemd's namespace setup.
+TemporaryFileSystem=/run:ro
 PrivateDevices=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
