@@ -282,6 +282,7 @@ def check_runtime(
             admitted["boot_id"],
             admitted["filesystem_uuid"],
             admitted["generation"],
+            admitted["physical_generation"],
         ),
         "sequence": admitted["sequence"],
         "lease_sha256": hashlib.sha256(lease).hexdigest(),

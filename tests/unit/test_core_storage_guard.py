@@ -415,7 +415,9 @@ def test_runtime_check_reads_uptime_last_and_returns_storage_only_snapshot(guard
 
     result = guard.check_runtime(FILESYSTEM, "rw", read=read, kernel_read=kernel_read)
     assert order[-1] == guard.UPTIME_PATH
-    assert result["token"] == ("20", "30", "31", "32", device, BOOT, FILESYSTEM, GENERATION)
+    assert result["token"] == (
+        "20", "30", "31", "32", device, BOOT, FILESYSTEM, GENERATION, PHYSICAL
+    )
     assert result["sequence"] == 7
     assert 44 < result["expires_at"] - time.clock_gettime(time.CLOCK_BOOTTIME) <= 45
     assert len(result["lease_sha256"]) == 64
@@ -441,6 +443,27 @@ def test_runtime_check_refuses_proof_that_expired_during_processing(guard):
             ),
             clock=lambda: next(times),
         )
+
+
+def test_new_sequence_cannot_change_physical_generation_of_running_writer(guard):
+    host, local = mounts()
+    leases = iter((lease(), lease(sequence="8", physical_generation="d" * 64)))
+
+    def read(path, _limit, **_kwargs):
+        values = {
+            guard.BOOT_PATH: ((BOOT + "\n").encode(), "8:1"),
+            guard.MARKER_PATH: ((FILESYSTEM + "\n").encode(), "8:16"),
+            guard.HOST_MOUNT_PATH: (host, "8:1"),
+        }
+        return (next(leases), "8:1") if path == guard.LEASE_PATH else values[path]
+
+    def kernel_read(path, _limit):
+        return b"100.00 90.00\n" if path == guard.UPTIME_PATH else local
+
+    previous = guard.check_runtime(FILESYSTEM, "rw", read=read, kernel_read=kernel_read)
+    changed = guard.check_runtime(FILESYSTEM, "rw", read=read, kernel_read=kernel_read)
+    with pytest.raises(guard.GuardError, match="storage_identity_changed"):
+        guard.accept_update(previous, changed)
 
 
 def test_kernel_reader_only_accepts_fixed_proc_inputs(guard, tmp_path):

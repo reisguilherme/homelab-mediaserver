@@ -97,6 +97,8 @@ Uma lease de playback não é aceita. A presença do mount não é saúde físic
 
 Cada check lê novamente o recibo fixado e verifica storage. A identidade do
 mount do recibo e seu hash entram no token acompanhado pelo supervisor.
+O identificador opaco `physical_generation` também permanece fixo durante a
+execução; uma sequência maior não autoriza trocar essa identidade física.
 São feitas duas verificações antes do filho. Alteração do recibo, HOLD,
 expiração, troca de identidade ou leitor bloqueado causam contenção pelo
 supervisor já existente: TERM no grupo, depois KILL quando necessário, com
