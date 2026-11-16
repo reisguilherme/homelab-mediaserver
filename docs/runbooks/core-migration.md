@@ -1,14 +1,16 @@
 # Preparação e readmissão do core
 
-**Estado desta revisão: preparação com inicialização negada. O core ainda não
-está finalizado nem autorizado a executar aplicações.** O layout aprovado separa
+**Estado operacional: Compose preparado com inicialização negada. As aplicações
+restauradas do core ainda não foram readmitidas.** O layout aprovado separa
 o core de playback e edge: estado no SSD da VM de 4 GiB e dados locais ext4 em
 `/srv/external3/homeserver`. Não iniciar o monólito nas novas VMs.
 
 `compose.core.yaml` é independente. Cada serviço troca o entrypoint por
 `scripts/core-entrypoint.sh`, que termina com código 78, inclusive com seleção
 explícita do serviço, `--check`, argumentos, variáveis de ambiente ou recibos.
-Não existe chave de ativação nesta revisão. Os nomes em `command` são identificadores
+Não existe chave de ativação nesse entrypoint. O guard agora oferece execução
+explícita conforme [core-native-activation.md](core-native-activation.md), ainda
+sem integração ao Compose. Os nomes em `command` são identificadores
 da preparação, não comandos nativos. O profile organiza a preparação; a recusa
 do entrypoint é a barreira. Não substituir o entrypoint para testar a restauração.
 

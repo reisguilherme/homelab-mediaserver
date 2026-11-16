@@ -1,5 +1,26 @@
 # Preparação da implementação — 14/11/2026
 
+## Atualização operacional — 16/11/2026
+
+A publicação no hub integrou **8.209 caminhos de 6.023 arquivos únicos**
+(5.449.345.898.283 bytes) às pastas finais `media` e `torrents`. O
+[publicador](../../runbooks/consolidation-publication.md) utilizou hardlinks,
+recibos históricos autenticados, metadados atuais e a lease core-writer v2.
+Não houve sobrescrita, exclusão ou repetição da varredura integral de conteúdo.
+Seis auxiliares de recuperação permaneceram fora da biblioteca. Os aliases
+temporários foram preservados; compartilham o inode e não são outro backup.
+
+Uma cópia publicada de cada uma das três origens passou por HTTP do Jellyfin e
+decodificação de início, meio e fim, sem alterar o histórico dos usuários.
+O resultado cobre três amostras, não o acervo inteiro. Delta final das origens,
+arquivo degradado e readmissão da automação continuam pendentes.
+
+O backend explícito `ext4-single` foi implementado e testado. No core, fixtures
+novas como UID 1000 comprovaram hardlinks, rename, unlink, ownership e proteção
+do diretório de placements. Nenhum arquivo real foi usado nessas operações.
+O registry e o marcador foram preparados; os aplicativos restaurados ainda
+não foram iniciados. O restante deste documento preserva o histórico das etapas.
+
 A arquitetura geral passou para
 [homelab-platform](https://github.com/reisguilherme/homelab-platform/blob/refactor/docs/architecture/README.md).
 Este registro preserva os fatos da preparação da aplicação. Na separação de
