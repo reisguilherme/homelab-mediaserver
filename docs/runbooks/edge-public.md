@@ -4,23 +4,39 @@
 
 O proprietário aceitou `https://streaming.greis.dev.br:10443/jellyfin/` após
 a recusa da operadora em liberar 80/443 para PF. Esta escolha substitui a
-preferência anterior pela URL sem porta. O código prepara os headers canônicos
+preferência anterior pela URL sem porta. A edge usa os headers canônicos
 Host/X-Forwarded-Host com `:10443`, X-Forwarded-Port 10443 e redirect HTTP 308
 explícito para a mesma autoridade, preservando caminho e query.
 
-**Preparação, ainda sem deploy:** permanece WAN 10443 → PVE 443 → edge 443 →
-Caddy 8443. Nenhuma porta interna, regra de firewall, Compose, guard ou mídia
-foi alterada nesta preparação. A `https_port` do Caddy não deve virar 10443.
+**TLS implantado:** permanece WAN 10443 → PVE 443 → edge 443 → Caddy 8443.
+Somente `public-proxy` e `edge-tls` foram recriados; o ID e o StartedAt de
+`public-security` foram preservados. Portas internas, firewall, guard e mídia
+permanecem iguais. A `https_port` do Caddy não deve virar 10443.
 O redirect HTTP é útil onde a porta 80 estiver alcançável; não faz a porta 80
 bloqueada funcionar. Usuários externos precisam do endereço HTTPS completo.
 
-Faltam emissão DNS-01, renovação e DDNS, aplicação controlada da configuração,
-e testes externos de TLS/reprodução e na LAN. O Caddy padrão ainda usa seus
-issuers anteriores; este patch sozinho não emite o certificado DNS-01. Não
-anunciar o endpoint como disponível nem iniciar tentativas de emissão com
-credenciais inexistentes. A escolha do provedor DNS permanece pendente:
-Cloudflare apenas DNS é opcional, sem zona criada ou nameservers alterados.
-O registro do domínio pode continuar no Registro.br em qualquer alternativa.
+O Certbot do control emitiu os certificados Let's Encrypt por DNS-01. O Caddy
+carrega `fullchain.pem` e `privkey.pem` do certificado estático exclusivo para
+`streaming.greis.dev.br`. A edge recebe
+somente a cadeia pública e a chave desse certificado, sem conta ACME, chave
+de outros domínios ou credenciais DNS. Arquivos ausentes impedem a inicialização;
+não há fallback para emissão HTTP-01.
+
+Passaram **33 aceites TLS reais** pelo Windows na LAN até o destino público
+na porta 10443, via NAT loopback: login comum, catálogo, Range de 64 KiB,
+WebSocket, admin 403, spoof e três logouts. Esses testes não comprovam 4G
+nem reprodução completa nesse TLS; o proprietário ainda precisa testar ambos.
+
+O registro A antigo correspondia ao IP dinâmico anterior. O proprietário
+corrigiu-o, mantendo somente o destino atual; `a.sec.dns.br`, `b.sec.dns.br`
+e o resolvedor público consultado confirmaram a resposta. O resolvedor Windows
+ainda mantinha cache antigo. DNS segue no Registro.br, sem Cloudflare/VPS.
+**Renovação DNS-01 e DDNS continuam manuais**, sem API integrada do Registro.br.
+Mudança de IP ou expiração exigem intervenção; não prometer continuidade automática.
+
+O deploy usou `.env.edge` e backup privado v2; a identidade real do guest foi
+conferida separadamente do alias SSH. Conferir esses recibos antes de reutilizar
+o helper transitório ou executar rollback.
 
 Administração permanece privada. A plataforma prepara domínios próprios
 apontando ao IP Tailscale da VM control, com HTTPS na porta 443 e grants; não adicionar
@@ -42,7 +58,7 @@ login admin 403, token admin válido 403, GETs administrativos/spoof negados e
 três logouts. Caddy definitivo e os outros dois containers estão Running com
 rootfs RO, UID 1000, capabilities ALL removidas e limites somados de 448 MiB.
 O DNS A foi confirmado e o diretório ACME respondeu 200 até a partir do Caddy.
-**Ainda não há certificado TLS.** ACME e 4G nas portas externas 80/443 deram
+**Naquele diagnóstico ainda não havia certificado TLS.** ACME e 4G nas portas externas 80/443 deram
 timeout. DNS, WAN e vínculo dos mapeamentos foram conferidos; HTTP pelo domínio
 retorna 308 no desktop, comprovando NAT loopback nesse cliente.
 
@@ -86,8 +102,8 @@ segurança não foram alterados. IDs, nomes e tokens permanecem privados.
 O túnel temporário de teste foi encerrado. O health privado na porta 18096
 respondeu HTTP 200; essa prova não demonstra acesso pela internet.
 
-Não anunciar disponibilidade pública: os checks do proxy e o redirect LAN não
-comprovam TLS ou reprodução externa. Manter as proteções do firewall, sem
+Os checks anteriores do proxy e o redirect LAN não comprovavam TLS ou
+reprodução externa. Manter as proteções do firewall, sem
 ampliar portas do PVE ou da edge. O diagnóstico TLS temporário do Caddy usa arquivo
 privado 0600 limitado a 1 MiB; logs HTTP continuam desativados. IPs e pacotes
 brutos não pertencem à documentação pública. As etapas abaixo conservam a
@@ -115,12 +131,21 @@ não é necessário para o ingresso; este caminho usa a resposta nativa Jellyfin
 - `EDGE_BIND_IP` deve ser o endereço privado conferido da VM edge. Somente
   TCP 80/443 são publicados; os listeners internos são 8080/8443 para UID 1000.
   Confirmar ausência de conflito de `172.30.248.0/28` antes de criar a rede Docker.
-- Preparar exclusivamente `/srv/appdata/edge/caddy` e
-  `/srv/appdata/edge/public-security` no SSD da edge, UID/GID 1000, modo 0700.
-  O primeiro conserva certificados/chaves ACME; o segundo conserva apenas o
+- Preparar `/srv/appdata/edge/caddy`, `/srv/appdata/edge/public-security` e
+  `/srv/appdata/edge/tls/streaming` no SSD da edge, UID/GID 1000, modo 0700.
+  O primeiro conserva o estado local do Caddy; o segundo conserva apenas o
   limitador de login, sem banco do controlador, fila, mídia ou credenciais admin.
+  O terceiro contém somente `fullchain.pem` e `privkey.pem` entregues pelo control,
+  UID/GID 1000, modo 0600. O diretório inteiro é montado somente leitura em
+  `/etc/homelab-tls/streaming`; não montar a árvore privada do Certbot na edge.
   `create_host_path: false` recusa diretórios ausentes. Os binds de configuração
   são somente leitura e precisam existir.
+- Antes da entrega, conferir validade, SAN `streaming.greis.dev.br`, cadeia e
+  correspondência certificado/chave. Validar o Caddy com os arquivos instalados.
+  A renovação exige nova entrega do par e reinício controlado somente de
+  `edge-tls`, pois a API administrativa está desabilitada; trocar arquivos no
+  host não recarrega o certificado em memória. Preservar o par anterior privado
+  para rollback. Automação de renovação/distribuição ainda depende da plataforma.
 - Os limites somam 448 MiB: Caddy 96, Nginx 96, Python 256. Sem swap adicional,
   capabilities ou host networking. `restart: no` mantém a ativação inicial
   explícita. O consumo real e a capacidade de streaming dependem de medição.
@@ -133,11 +158,10 @@ não é necessário para o ingresso; este caminho usa a resposta nativa Jellyfin
 ## Ordem operacional
 
 1. Conferir imagens, SSD, diretórios, subnet, configuração renderizada e sintaxe
-   dos dois proxies. Preparar e testar DNS-01, renovação e DDNS antes da
-   ativação TLS; este Caddyfile ainda não contém essa integração. Se a emissão
-   ocorrer em validador privado separado, conferir a entrega do certificado
-   e a configuração de carregamento no Caddy. Não iniciar a configuração de
-   preparação presumindo que os desafios antigos em 80/443 funcionarão.
+   dos dois proxies. Preparar e testar DNS-01 no Certbot do control, renovação
+   e DDNS antes da ativação TLS. Conferir a entrega exclusiva do certificado
+   de streaming, suas permissões e o carregamento estático no Caddy.
+   Não iniciar antes de instalar e validar `fullchain.pem` e `privkey.pem`.
 2. Preservar as permissões mínimas existentes: entrada na edge em TCP 443,
    edge → playback TCP 8096 e as negações para core/gestão. A porta 80 interna
    existente atende apenas o redirect onde alcançável; não depender dela para

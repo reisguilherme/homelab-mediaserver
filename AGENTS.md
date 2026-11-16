@@ -9,12 +9,16 @@ parados, um `missingFiles`.
 Publicação por hardlinks integrou 8.209 caminhos/6.023 arquivos únicos (5,449 TB);
 dois aliases degradados ficam excluídos, com origens preservadas. Backend edge
 e isolamento PVE passaram; DNAT TCP 80/443 aplicado e 33 checks do proxy aprovados.
-Publicação em ativação, sem certificado TLS: 80/443 externas dão timeout;
-10443 recebeu conexões externas no diagnóstico. Depois da recusa da operadora,
-o proprietário aceitou a URL com `:10443`, certificado DNS-01 e gestão privada
-por Tailscale com domínio próprio. A configuração da porta 10443 está em preparação;
-certificado, renovação/DDNS e acesso externo seguem pendentes. Cloudflare é
-opcional; não há decisão de migrar o DNS nem zona criada. Gatilhos Jellyfin
+TLS estático de streaming implantado na porta 10443, com certificado Let's Encrypt
+emitido por DNS-01 no Certbot do control. Só os dois proxies foram recriados;
+ID e StartedAt do guard foram preservados. Passaram 33 aceites TLS reais pelo
+Windows na LAN até o destino público, via NAT loopback: login comum, catálogo,
+Range de 64 KiB, WebSocket, admin 403, spoof e três logouts. Isso não comprova
+4G nem reprodução completa nesse TLS; o proprietário ainda precisa testá-los.
+O registro A foi corrigido após mudança do IP dinâmico e confirmado nos DNS
+autoritativos e em resolvedor público; o Windows ainda tinha cache antigo.
+Registro.br permanece no DNS, sem Cloudflare/VPS. Renovação e DDNS continuam
+manuais, sem API integrada. Gestão por Tailscale segue separada. Gatilhos Jellyfin
 continuam contidos. Esse estado não altera os limites abaixo; consulte o
 [registro atual](docs/architecture/homelab-2026/implementation-status.md).
 

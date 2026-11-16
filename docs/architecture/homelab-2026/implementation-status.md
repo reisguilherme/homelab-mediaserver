@@ -2,11 +2,19 @@
 
 ## Atualização operacional — 16/11/2026
 
-Acesso público com `:10443` aceito pelo proprietário; headers e redirect da
-edge preparados no código, com gestão por Tailscale e domínio próprio em
-etapa separada. Sem deploy desta configuração, certificado público ou alteração
-DNS. Provedor para DNS-01/DDNS ainda por escolher; Cloudflare é opcional, não
-uma condição do domínio próprio. Ver o [runbook da edge](../../runbooks/edge-public.md).
+TLS estático de streaming implantado em `:10443`, com certificado Let's Encrypt
+emitido por DNS-01 no Certbot do control. Foram recriados somente `edge-tls`
+e `public-proxy`; ID e StartedAt de `public-security` ficaram iguais.
+Os 33 aceites TLS reais pelo Windows na LAN, até o destino público via NAT
+loopback, passaram: login comum, catálogo, Range de 64 KiB, WebSocket, admin
+403, spoof e três logouts. Ainda faltam teste 4G e reprodução completa nesse
+TLS pelo proprietário; não se declara disponibilidade externa comprovada.
+O registro A antigo foi substituído pelo atual após mudança do IP dinâmico;
+`a.sec.dns.br`, `b.sec.dns.br` e o resolvedor público consultado confirmaram a
+correção. O resolvedor Windows ainda apresentava cache antigo. DNS permanece
+no Registro.br, sem Cloudflare/VPS; renovação e DDNS são manuais, sem API
+integrada. Gestão por Tailscale é etapa separada.
+Ver o [runbook da edge](../../runbooks/edge-public.md).
 
 Abyss `r6` implantado: barra Início/Favoritos oculta a pedido do proprietário,
 preservando menu lateral, busca e abas das bibliotecas. O import de CSS foi
@@ -54,7 +62,8 @@ com worker/collector no mesmo PGID/SID e collector UID 1000. Capacidade e
 heartbeat avançaram; o último sucesso de ingestão ficou inalterado. A amostra
 de memória foi 87,3 MB, sem demonstrar consumo final sob carga.
 
-O backend edge → playback:8096 respondeu HTTP 200. Firewall PVE está
+No diagnóstico anterior à implantação TLS descrita acima, o backend edge →
+playback:8096 respondeu HTTP 200. Firewall PVE está
 `enabled/running`, com DROP IN/OUT e chains das NICs conferidos; conexões da
 edge para core:8080, controle:443 e PVE:8006/22 deram timeout. Proxy sem sessão:
 Items 401, configuração 403, Users/Public `[]`; Nginx direto 403 e guard
@@ -68,16 +77,16 @@ login comum, identidade, catálogo de 20 itens, Range 206 de 64 KiB, WebSocket
 negados e três logouts. Caddy definitivo, Nginx e guard estão Running, com
 rootfs RO, UID 1000, capabilities ALL removidas e limites somados de 448 MiB.
 DNS A, WAN e vínculo dos mapeamentos conferidos, com NAT loopback HTTP funcional,
-**ainda sem certificado TLS**. ACME e 4G nas portas externas 80/443 deram timeout.
-A regra **temporária WAN TCP 10443 → LAN TCP 443 do PVE** está ativa: o teste
+**naquela etapa ainda sem certificado TLS**. ACME e 4G nas portas externas 80/443 deram timeout.
+A regra então **temporária WAN TCP 10443 → LAN TCP 443 do PVE** estava ativa: o teste
 4G retornou `ERR_SSL_PROTOCOL_ERROR` e a captura validada em `nic1` registrou
 oito SYN de origem externa distinta para PVE:443, além dos controles LAN.
 Isso comprova chegada pela porta alternativa ao mesmo destino interno, sem
 TLS. A falha externa de 80/443 ainda não distingue roteador de operadora.
-O proprietário escolheu **resolver primeiro 80/443 para URL sem porta**;
-10443 é só diagnóstico temporário, sem preparação de DNS-01 ou uso em produção.
-A conferência somente leitura de acesso WAN e filtros IP do roteador segue pendente;
-o diagnóstico detalhado permanece no estado canônico da plataforma.
+A preferência inicial de **resolver primeiro 80/443 para URL sem porta** e o
+uso de 10443 somente para diagnóstico foram substituídos pela implantação
+TLS descrita no início. O diagnóstico detalhado permanece no estado canônico
+da plataforma.
 
 Limpeza dos dispositivos de teste Jellyfin v2/v3: seis registros conferidos,
 quatro já ausentes e dois removidos por IDs de recibos, metadados e janela

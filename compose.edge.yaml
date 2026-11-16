@@ -41,6 +41,11 @@ services:
         read_only: true
         bind: {create_host_path: false}
       - type: bind
+        source: /srv/appdata/edge/tls/streaming
+        target: /etc/homelab-tls/streaming
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
         source: /srv/appdata/edge/caddy
         target: /data
         bind: {create_host_path: false}

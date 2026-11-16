@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import socket
+import ssl
 import subprocess
 import threading
 import time
@@ -55,6 +56,11 @@ def test_edge_has_only_bounded_public_services_and_no_core_authority():
         ("80", 8080, "tcp"), ("443", 8443, "tcp")}
     assert all(p["host_ip"] == "${EDGE_BIND_IP:?verified private edge address required}"
                for p in ports)
+    certificate = next((mount for mount in data["services"]["edge-tls"]["volumes"]
+        if mount["target"] == "/etc/homelab-tls/streaming"), None)
+    assert certificate is not None, "edge TLS must consume the separately delivered certificate"
+    assert certificate["source"] == "/srv/appdata/edge/tls/streaming"
+    assert certificate["read_only"] is True
     guard = data["services"]["public-security"]
     assert "HOMESERVER_JELLYFIN_URL=http://172.28.64.20:8096/jellyfin" in guard["entrypoint"]
     assert "HOMESERVER_PUBLIC_ACCESS_TRUSTED_PROXY_IPS=172.30.248.3" in guard["entrypoint"]
@@ -102,10 +108,28 @@ def test_edge_caddy_preserves_external_authority_and_redirect(tmp_path):
     caddy = os.environ.get("HOMESERVER_TEST_CADDY") or shutil.which("caddy")
     if not caddy:
         pytest.skip("real Caddy fixture binary is required")
-    adapted = subprocess.run([caddy, "adapt", "--config", str(ROOT / "deploy/edge/Caddyfile"),
+    openssl = shutil.which("openssl")
+    if not openssl:
+        pytest.skip("OpenSSL is required for a disposable TLS certificate")
+    certificate, key = tmp_path / "fullchain.pem", tmp_path / "privkey.pem"
+    generated = subprocess.run([openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", str(key), "-out", str(certificate), "-days", "1",
+        "-subj", "/CN=streaming.greis.dev.br",
+        "-addext", "subjectAltName=DNS:streaming.greis.dev.br"],
+        capture_output=True, text=True, timeout=15)
+    assert generated.returncode == 0, generated.stderr
+    key.chmod(0o600)
+    fixture_config = tmp_path / "Caddyfile"
+    fixture_config.write_text((ROOT / "deploy/edge/Caddyfile").read_text().replace(
+        "/etc/homelab-tls/streaming", str(tmp_path)))
+    adapted = subprocess.run([caddy, "adapt", "--config", str(fixture_config),
                               "--adapter", "caddyfile"], capture_output=True, text=True, timeout=10)
     assert adapted.returncode == 0, adapted.stderr
     data = json.loads(adapted.stdout)
+    certificates = data["apps"].get("tls", {}).get("certificates", {})
+    assert certificates.get("load_files") == [{
+        "certificate": str(certificate), "key": str(key), "tags": ["cert0"]}]
+    assert not certificates.get("automate"), "the edge must not request ACME certificates"
     servers = data["apps"]["http"]["servers"]
     assert {address for server in servers.values() for address in server["listen"]} == {
         ":8080", ":8443"}
@@ -127,12 +151,14 @@ def test_edge_caddy_preserves_external_authority_and_redirect(tmp_path):
     assert headers["host"] == ["streaming.greis.dev.br:10443"]
     assert headers["x-forwarded-host"] == ["streaming.greis.dev.br:10443"]
     assert headers["x-forwarded-port"] == ["10443"]
-    # Run only the adapted HTTP redirect server; never request a real ACME certificate.
+    # Exercise the delivered leaf and redirect locally without real ACME or upstream traffic.
     http_server = next(server for server in servers.values() if ":8080" in server["listen"])
-    port = free_port()
+    port, tls_port = free_port(), free_port()
     http_server["listen"] = [f"127.0.0.1:{port}"]
     http_server["automatic_https"] = {"disable": True}
-    data["apps"] = {"http": {"http_port": port, "servers": {"fixture": http_server}}}
+    https["listen"] = [f"127.0.0.1:{tls_port}"]
+    data["apps"]["http"]["http_port"] = port
+    data["apps"]["http"]["https_port"] = tls_port
     path = tmp_path / "caddy.json"
     path.write_text(json.dumps(data))
     process = subprocess.Popen([caddy, "run", "--config", str(path)],
@@ -140,6 +166,11 @@ def test_edge_caddy_preserves_external_authority_and_redirect(tmp_path):
                                env={"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
     try:
         wait_port(port, process)
+        wait_port(tls_port, process)
+        context = ssl.create_default_context(cafile=str(certificate))
+        with socket.create_connection(("127.0.0.1", tls_port), timeout=5) as connection:
+            with context.wrap_socket(connection, server_hostname="streaming.greis.dev.br") as tls:
+                assert ("DNS", "streaming.greis.dev.br") in tls.getpeercert()["subjectAltName"]
         for host in ("streaming.greis.dev.br", "streaming.greis.dev.br:10443"):
             conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
             try:
@@ -156,6 +187,12 @@ def test_edge_caddy_preserves_external_authority_and_redirect(tmp_path):
     finally:
         process.terminate()
         process.wait(5)
+    # Missing delivery is a startup error, never a reason to fall back to HTTP-01.
+    key.unlink()
+    checked = subprocess.run([caddy, "validate", "--config", str(path)],
+                             capture_output=True, text=True, timeout=10)
+    assert checked.returncode != 0
+    assert "privkey.pem" in checked.stderr
 
 
 @contextmanager

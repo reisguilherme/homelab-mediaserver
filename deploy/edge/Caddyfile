@@ -17,6 +17,7 @@ http://streaming.greis.dev.br {
 }
 
 streaming.greis.dev.br {
+    tls /etc/homelab-tls/streaming/fullchain.pem /etc/homelab-tls/streaming/privkey.pem
     reverse_proxy 172.30.248.3:8097 {
         header_up Host streaming.greis.dev.br:10443
         header_up X-Forwarded-For {http.request.remote.host}
