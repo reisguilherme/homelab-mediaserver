@@ -164,17 +164,15 @@ o código da versão restaurada e testar o início antes de montar mídia parcia
    `/var/lib/homelab-storage/admission` nem aceitar o protocolo exclusivo de
    playback. A implementação/deploy da plataforma e o consumidor são trabalho
    separado; este manifesto não publica nem consome a nova lease.
-3. Implementar e testar o novo guard consumidor: campos exatos, arquivos/ancestrais
-   confiáveis, boot atual, TTL, geração e papel; prova local do mount ext4 correto
-   em `/srv/external3`, UUID e bind de `/srv/external3/homeserver` sem fallback para
-   SSD, NFS ou diretório comum. A prova física pertence à plataforma. O guard
-   combina lease fresca, identidade local e recibo de restauração/contenção;
-   ausência, hold, expiração, remount RO e perda de mount negam execução.
-4. Adicionar acompanhamento contínuo que pare escritores quando a prova falhar,
-   preserve parada manual e exija resume explícito com prova nova. Testar ausência
-   de lease, oferta da lease de playback, boot anterior, corrupção, expiração,
-   alteração de mount e falha física em fixtures. O guard histórico mergerfs do
-   worker não aceita esse layout; criar contrato ext4 explícito sem enfraquecê-lo.
+3. Integrar o componente consumidor descrito abaixo somente após conferir os
+   binds reais e empacotar Python comprovado nas imagens que não o possuem.
+   Combinar a prova de storage com um recibo auditado de restauração/contenção;
+   a verificação isolada de storage não autoriza a aplicação.
+4. Ligar o supervisor ao comando nativo em foreground, sem daemonização nem
+   saída do grupo de processos, e provar isso em cópia descartável de cada imagem.
+   Preservar parada manual e exigir resume explícito com prova nova. O guard
+   histórico mergerfs do worker não aceita esse layout; criar contrato ext4
+   explícito sem enfraquecê-lo.
 5. Somente após revisão independente, substituir a recusa fixa por esse guard,
    ligar comandos nativos comprovados, configurar rede/segredos por papel, permitir
    escrita apenas nos binds necessários e validar o proxy administrativo. Liberar
@@ -186,11 +184,64 @@ escritor. Dashboard, controle por VM e otimização de RAM permanecem no radar;
 não são pré-requisitos inventados para a cópia de mídia nem justificam iniciar
 aplicações antes da contenção.
 
+## Componente consumidor de storage, ainda inativo
+
+`scripts/core-storage-guard.py` implementa o protocolo de storage. Sua interface
+pública aceita somente verificação: `python3 core-storage-guard.py --check
+--filesystem-uuid UUID_ESPERADO --data-mode rw` (ou `ro`/`none` conforme o papel).
+Não existe `--run`. Sem `--check`, recusa com código 78; verificação bem-sucedida
+não muda o entrypoint preparado nem inicia processos nativos. O manifesto ainda
+não instala os binds abaixo.
+
+| Origem na VM core | Destino no container | Contrato |
+| --- | --- | --- |
+| `/var/lib/homelab-storage/core-writer-admission` | `/run/core-writer-admission` | diretório no SSD, bind RO; `lease` root 0644 |
+| `/proc/sys/kernel/random/boot_id` | `/run/guest-boot-id` | bind RO, root 0444 |
+| `/proc/1/mountinfo` | `/run/host-mountinfo` | bind RO, root 0444 |
+| `/srv/external3/.homelab-volume-id` | `/run/core-filesystem-uuid` | bind RO, root 0444, UUID esperado e LF |
+| `/srv/external3/homeserver` | `/data` | bind exato RO/RW conforme o papel; ausente para `none` |
+
+O marker é uma pré-condição a provisionar exclusivamente pela operação, após
+conferir UUID ext4 e identidade física. O script nunca cria esse arquivo. Todos
+os binds devem usar `create_host_path: false`. O mount host `/srv/external3` deve
+ser ext4 local, RW, `nosuid,nodev,noexec`, distinto do disco raiz da VM; `/data`
+deve apontar à raiz `/homeserver` desse mesmo filesystem, com as mesmas restrições.
+O marker deve vir da raiz `/.homelab-volume-id` do mesmo dispositivo. Mounts
+empilhados ou filhos inesperados e a lease fora do bind RO esperado são recusados.
+
+O leitor fixa descritores, recusa symlinks/hardlinks, arquivos especiais,
+ancestrais sem confiança, modos incorretos e entradas grandes. Uptime é lido
+depois dos demais arquivos; nenhuma demora renova o prazo. A sequência não pode
+retroceder ou alterar o conteúdo mantendo seu número. Troca de geração da
+autoridade, boot, UUID, dispositivo ou IDs dos mounts exige nova entrada. Uma
+sequência maior pode renovar a prova física sem trocar a autoridade. Uma lease
+já expirada não pode ser recuperada por uma atualização tardia.
+
+A API interna `supervise` foi exercitada apenas com processos sintéticos. Faz
+duas verificações antes de criar o filho, acompanha a prova em intervalos de até
+um segundo e mantém prazo monotônico independente de um leitor bloqueado. Um
+relógio Linux `CLOCK_BOOTTIME` inclui o tempo suspenso nesse prazo, conforme o
+[contrato do Python](https://docs.python.org/3.12/library/time.html#time.CLOCK_BOOTTIME). Um
+único check pode estar em andamento. Erro, HOLD, expiração ou troca de identidade
+causam TERM e depois KILL no grupo; SIGTERM/SIGINT preservam a parada manual,
+sem restart. O PID principal permanece reservado até terminar os sinais. A
+confirmação de parada inspeciona os membros do grupo, incluindo descendentes;
+processos em I/O ininterruptível impedem declarar contenção bem-sucedida. Os
+limites são três segundos para um check e até dois segundos em cada espera de
+parada. Isso não substitui fencing físico da plataforma.
+
+Ainda faltam o recibo nativo, integração por papel, prova de que cada comando
+permanece no grupo e validação operacional. As imagens restauradas de Sonarr,
+Radarr, Prowlarr e Seerr não oferecem o Python necessário nos caminhos auditados;
+exigem empacotamento derivado privado ou outra integração revisada, sem copiar
+um interpretador isolado. Não usar a API interna para contornar a recusa fixa.
+
 ## Verificação local
 
 ```sh
 uv run --frozen pytest -q tests/unit/test_core_state_audit.py \
-  tests/unit/test_core_entrypoint.py tests/contract/test_core_compose.py
+  tests/unit/test_core_entrypoint.py tests/unit/test_core_storage_guard.py \
+  tests/contract/test_core_compose.py
 sh -n scripts/core-entrypoint.sh
 docker compose --env-file /private/core.env -f compose.core.yaml \
   --profile core-prepared config --quiet
@@ -199,6 +250,8 @@ docker compose --env-file /private/core.env -f compose.core.yaml \
 `config` valida sintaxe e interpolação sem iniciar containers. Não usar `up`,
 `run`, overrides ou o monólito como verificação. Testes locais usam somente
 fixtures; não comprovam filesystem, rede, versões, capacidade ou restauração da VM.
+As fixtures de ownership do guard exigem Linux root e criam somente diretórios
+temporários sob `/var/lib`; sem root, esses casos são declarados como skipped.
 
 Referências de contrato: [serviços e binds do Compose](https://docs.docker.com/reference/compose-file/services/),
 [SQLite WAL e sidecars](https://sqlite.org/wal.html) e
