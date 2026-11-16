@@ -345,6 +345,10 @@ def test_seerr_masks_its_default_config_even_if_environment_is_ignored(runner):
     assert "/app/config" in runner.recipe("seerr")["tmpfs"]
 
 
+def test_seerr_readiness_uses_local_api_without_release_lookup_or_query_flags(runner):
+    assert runner.recipe("seerr")["endpoint"] == "/api/v1"
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="real procfs identity")
 def test_process_identity_disappears_after_real_child_is_reaped(runner):
     child = subprocess.Popen([sys.executable, "-c", "import time;time.sleep(20)"],
@@ -393,7 +397,10 @@ def test_probe_implementation_contains_no_application_credentials_or_mutations(r
     ("arr", b'{"status":"OK"}', True),
     ("arr", b'{"status":"not ready"}', False),
     ("arr", b'{"status":"OK","secret":"PRIVATE_SENTINEL"}', True),
-    ("seerr", b'{"version":"3.5.0"}', True),
+    ("seerr", b'{"api":"Seerr API","version":"1.0"}', True),
+    ("seerr", b'{"version":"3.5.0"}', False),
+    ("seerr", b'{"api":"other API","version":"1.0"}', False),
+    ("seerr", b'{"api":"Seerr API","version":1}', False),
     ("seerr", b'[]', False),
     ("openapi", b'{"openapi":"3.1.0"}', True),
     ("html", b'<!doctype html><title>fixture</title>', True),

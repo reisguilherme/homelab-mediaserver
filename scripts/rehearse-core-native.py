@@ -72,7 +72,8 @@ def recipe(role: str) -> dict:
         argv = ["/usr/local/bin/node", "/app/dist/index.js"]
         tmpfs["/app/config"] = tmpfs["/config"]
         env += ["NODE_ENV=production", "CONFIG_DIRECTORY=/app/config", "PORT=5055"]
-        port, endpoint, kind = 5055, "/api/v1/status", "seerr"
+        # /status may await GitHub release lookup even with a local healthy server.
+        port, endpoint, kind = 5055, "/api/v1", "seerr"
     else:
         cwd = "/app"
         argv = ["/app/.venv/bin/python", "/app/main.py"]
@@ -315,7 +316,7 @@ try:
         if kind == "arr":
             valid = valid and value.get("status") == "OK"
         elif kind == "seerr":
-            valid = valid and isinstance(value.get("version"), str)
+            valid = valid and value.get("api") == "Seerr API" and value.get("version") == "1.0"
         else:
             valid = valid and isinstance(value.get("openapi"), str)
     elif valid:
