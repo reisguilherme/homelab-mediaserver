@@ -25,7 +25,7 @@ alteração. `runtime/` é versionado para que o build não precise de Python.
 
 ```sh
 python3 deploy/abyss/prepare.py --check
-docker build --tag homeserver-jellyfin-abyss:12.2-2f809171-r5 deploy/abyss
+docker build --tag homeserver-jellyfin-abyss:12.2-2f809171-r6 deploy/abyss
 ```
 
 Para regenerar depois de alterar transformações revisadas:
@@ -55,6 +55,9 @@ Diferenças locais reproduzíveis:
 - Na home com Spotlight visível, `.backgroundContainer` fica transparente
   para mostrar o backdrop difuso. O seletor exige
   `html.abyss-spotlight-visible`, preservando o fundo das demais páginas.
+- A `r6` oculta a barra Início/Favoritos quando `#indexPage.homePage` está
+  visível, a pedido do proprietário. Cabeçalho, menu, busca e abas das
+  bibliotecas permanecem. O import de Branding usa `?v=2f809171-r6`.
 - Aviso e consulta de atualização do Spotlight removidos. CSS e JavaScript
   não dependem de Google, jsDelivr ou GitHub durante o uso.
 - Backdrop compartilhado usa o blob que o Spotlight já buscou autenticado.
@@ -77,8 +80,8 @@ reaplicar preferências às 18 contas; muda a imagem e a URL versionada do boots
 Voltar à imagem anterior não remove layout, marcador ou fundos do navegador.
 
 A `r4` inicializava somente layouts ausentes: um navegador já configurado como
-`modern` conservava o cabeçalho anterior. A `r5` está implantada: o aceite
-conferiu Modern → desktop Legacy e Auto → mobile Legacy, marcador `1` e
+`modern` conservava o cabeçalho anterior. No aceite da `r5`, foi
+conferida a migração Modern → desktop Legacy e Auto → mobile Legacy, marcador `1` e
 preservação de uma escolha Modern posterior ao recarregar. Fontes, Spotlight,
 backdrop e login/logout passaram nos dois contextos, sem erros de página.
 O upstream declara testes com Jellyfin 12.1; o uso em 12.2 exige validação no

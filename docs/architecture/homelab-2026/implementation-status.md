@@ -2,6 +2,10 @@
 
 ## Atualização operacional — 16/11/2026
 
+Abyss `r6` implantado: barra Início/Favoritos oculta a pedido do proprietário,
+preservando menu lateral, busca e abas das bibliotecas. O import de CSS foi
+atualizado; nenhuma preferência das 18 contas foi alterada nesta revisão.
+
 O proprietário retomou a [integração Abyss](../../runbooks/abyss.md) no Jellyfin
 12.2, com fontes locais e apresentação próxima aos previews upstream. A revisão
 `r4` foi implantada e testada em contextos novos, incluindo a transparência limitada à

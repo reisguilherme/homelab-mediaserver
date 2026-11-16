@@ -9,9 +9,11 @@ Em 16/11/2026, o proprietário retomou esta integração e pediu fidelidade aos
 previews upstream. A `r4` foi implantada com fontes locais, home ajustada e
 backdrop difuso. Seu aceite passou em contextos novos, mas um navegador com
 `layout=modern` preservado manteve o cabeçalho anterior; essa diferença foi
-reproduzida. A `r5` está implantada e passou no aceite de migração única do layout
-local, incluindo preservação das escolhas posteriores. CSS, Branding e
-preferências das 18 contas permanecem.
+reproduzida. A `r5` passou no aceite de migração única do layout
+local, incluindo preservação das escolhas posteriores. Nessa revisão, CSS,
+Branding e preferências das 18 contas foram preservados.
+A `r6` está implantada e oculta a barra Início/Favoritos, conforme solicitado.
+Menu lateral, busca e abas das bibliotecas permanecem disponíveis.
 A publicação externa depende das portas
 80/443 e de TLS, conforme o
 [registro operacional](../architecture/homelab-2026/implementation-status.md).
@@ -58,7 +60,7 @@ configuração de Branding continua administrativa.
    node deploy/abyss/test-defaults.mjs
    node deploy/abyss/test-runtime.mjs deploy/abyss/runtime
    docker compose --env-file .env.playback -f compose.playback.yaml config --quiet
-   docker build --network=none --tag homeserver-jellyfin-abyss:12.2-2f809171-r5 deploy/abyss
+   docker build --network=none --tag homeserver-jellyfin-abyss:12.2-2f809171-r6 deploy/abyss
    ```
 
    A imagem base por digest deve estar disponível localmente para o build
@@ -75,12 +77,12 @@ configuração de Branding continua administrativa.
    memória e lease. Falha de storage exige tratar a causa; não remover o guard
    para concluir uma mudança de aparência.
 4. Na primeira aplicação, pela administração privada, preserve os demais campos
-   de Branding e configure o CSS local. O import permanece em `r4`, inclusive
-   com a imagem `r5`, porque o CSS é idêntico:
+   de Branding e configure o CSS local. A revisão `r6` atualiza somente o import
+   do bloco gerenciado para invalidar o cache do CSS:
 
    ```css
    /* HOMELAB ABYSS START */
-   @import url('/jellyfin/web/ui/abyss.css?v=2f809171-r4');
+   @import url('/jellyfin/web/ui/abyss.css?v=2f809171-r6');
    /* HOMELAB ABYSS END */
    ```
 
@@ -106,6 +108,12 @@ configuração de Branding continua administrativa.
    para HTML, imagens ou configuração.
 
 ## Aceite
+
+A `r6` foi conferida em desktop e celular: barra da home com altura zero,
+menu lateral abrindo, abas de filmes visíveis e retorno à home com Spotlight.
+Login/logout passaram sem erros de página. A aplicação atualizou o import de
+CSS e não mudou as preferências das 18 contas. A regra não remove os dados de
+favoritos; a página continua em `#/home?tab=1`, sem a barra de seleção.
 
 O aceite da `r5` conferiu desktop 1910×1000 inicialmente em `modern` e Android
 390×844 inicialmente em `auto`: ambos migraram para o Legacy correspondente,

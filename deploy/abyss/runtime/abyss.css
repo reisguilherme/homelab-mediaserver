@@ -2928,3 +2928,5 @@ html[data-theme="dark"] .MuiDrawer-root *,
 html.layout-desktop { overflow-x: clip; }
 /* Jellyfin 12.2 has no withBackdrop class for the Spotlight overlay. */
 html.abyss-spotlight-visible .backgroundContainer { background: transparent !important; }
+/* Hide the home/favourites pill; keep library navigation tabs. */
+body:has(#indexPage.homePage:not(.hide):not([hidden])) .headerTabs.sectionTabs { display: none !important; }

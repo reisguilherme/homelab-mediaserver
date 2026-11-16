@@ -36,12 +36,13 @@ Spotlight, detalhes e vídeo passaram em desktop/celular com toque, assim como
 página desktop sem deslocamento lateral. A `r4`, com backdrop difuso restrito
 à home, passou nos contextos desktop e Android com toque usados no aceite.
 Um navegador já configurado como Modern preservou o cabeçalho anterior na `r4`.
-A `r5` está implantada com migração local única para Legacy, marcada por
+A `r5` introduziu a migração local única para Legacy, marcada por
 `homeserver.abyss.legacy-layout-v1=1`, preservando TV/Legacy/valores desconhecidos
 e escolhas futuras. Modern salvo no desktop e Auto salvo no Android migraram;
 uma escolha Modern posterior sobreviveu ao reload nos dois contextos. Login,
 home, fontes, Spotlight, backdrop e logout passaram sem erros de página.
-Manter CSS/Branding `r4` e não reaplicar preferências das 18 contas. Backdrops
+A `r6` oculta a barra Início/Favoritos por CSS restrito à home; o import de
+Branding agora usa `r6`. Não reaplicar preferências das 18 contas. Backdrops
 só são ativados quando ausentes. A regressão final de playback passou, incluindo
 detalhes, vídeo 1080p e remoção do backdrop fora da home, sem erros de página.
 Esse aceite não comprova WAN/TLS.

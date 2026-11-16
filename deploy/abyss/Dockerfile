@@ -3,7 +3,7 @@ FROM jellyfin/jellyfin@sha256:357724bf0ae27a672c7cbaa899db2d9abeb13dbd8657ccce75
 
 LABEL org.opencontainers.image.title="HomeServer Jellyfin with Abyss" \
       io.homeserver.abyss.upstream="2f809171ed7f3a34b5e78297608b5f2b63dd3f0f" \
-      io.homeserver.abyss.revision="r5"
+      io.homeserver.abyss.revision="r6"
 
 COPY runtime/ /jellyfin/jellyfin-web/ui/
 

@@ -63,6 +63,9 @@ def prepare_css(source: str) -> str:
         "/* Jellyfin 12.2 has no withBackdrop class for the Spotlight overlay. */\n"
         "html.abyss-spotlight-visible .backgroundContainer "
         "{ background: transparent !important; }\n"
+        "/* Hide the home/favourites pill; keep library navigation tabs. */\n"
+        "body:has(#indexPage.homePage:not(.hide):not([hidden])) "
+        ".headerTabs.sectionTabs { display: none !important; }\n"
     )
 
 
