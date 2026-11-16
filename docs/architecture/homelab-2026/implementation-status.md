@@ -2,6 +2,12 @@
 
 ## Atualização operacional — 16/11/2026
 
+Acesso público com `:10443` aceito pelo proprietário; headers e redirect da
+edge preparados no código, com gestão por Tailscale e domínio próprio em
+etapa separada. Sem deploy desta configuração, certificado público ou alteração
+DNS. Provedor para DNS-01/DDNS ainda por escolher; Cloudflare é opcional, não
+uma condição do domínio próprio. Ver o [runbook da edge](../../runbooks/edge-public.md).
+
 Abyss `r6` implantado: barra Início/Favoritos oculta a pedido do proprietário,
 preservando menu lateral, busca e abas das bibliotecas. O import de CSS foi
 atualizado; nenhuma preferência das 18 contas foi alterada nesta revisão.

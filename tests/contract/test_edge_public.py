@@ -98,6 +98,66 @@ def wait_port(port, process=None):
     pytest.fail("fixture listener did not start")
 
 
+def test_edge_caddy_preserves_external_authority_and_redirect(tmp_path):
+    caddy = os.environ.get("HOMESERVER_TEST_CADDY") or shutil.which("caddy")
+    if not caddy:
+        pytest.skip("real Caddy fixture binary is required")
+    adapted = subprocess.run([caddy, "adapt", "--config", str(ROOT / "deploy/edge/Caddyfile"),
+                              "--adapter", "caddyfile"], capture_output=True, text=True, timeout=10)
+    assert adapted.returncode == 0, adapted.stderr
+    data = json.loads(adapted.stdout)
+    servers = data["apps"]["http"]["servers"]
+    assert {address for server in servers.values() for address in server["listen"]} == {
+        ":8080", ":8443"}
+    https = next(server for server in servers.values() if ":8443" in server["listen"])
+    assert https["automatic_https"]["disable_redirects"] is True
+
+    def handlers(value):
+        if isinstance(value, dict):
+            if "handler" in value:
+                yield value
+            for child in value.values():
+                yield from handlers(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from handlers(child)
+
+    proxy = next(item for item in handlers(https) if item["handler"] == "reverse_proxy")
+    headers = {key.lower(): value for key, value in proxy["headers"]["request"]["set"].items()}
+    assert headers["host"] == ["streaming.greis.dev.br:10443"]
+    assert headers["x-forwarded-host"] == ["streaming.greis.dev.br:10443"]
+    assert headers["x-forwarded-port"] == ["10443"]
+    # Run only the adapted HTTP redirect server; never request a real ACME certificate.
+    http_server = next(server for server in servers.values() if ":8080" in server["listen"])
+    port = free_port()
+    http_server["listen"] = [f"127.0.0.1:{port}"]
+    http_server["automatic_https"] = {"disable": True}
+    data["apps"] = {"http": {"http_port": port, "servers": {"fixture": http_server}}}
+    path = tmp_path / "caddy.json"
+    path.write_text(json.dumps(data))
+    process = subprocess.Popen([caddy, "run", "--config", str(path)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               env={"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+    try:
+        wait_port(port, process)
+        for host in ("streaming.greis.dev.br", "streaming.greis.dev.br:10443"):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            try:
+                conn.request("GET", "/jellyfin/web/index.html?fixture=1", headers={
+                    "Host": host, "X-Forwarded-Host": "attacker.example",
+                    "X-Forwarded-Port": "443"})
+                response = conn.getresponse()
+                assert response.status == 308
+                assert response.getheader("Location") == (
+                    "https://streaming.greis.dev.br:10443/jellyfin/web/index.html?fixture=1")
+                response.read()
+            finally:
+                conn.close()
+    finally:
+        process.terminate()
+        process.wait(5)
+
+
 @contextmanager
 def proxy_fixture(tmp_path):
     path = ROOT / "deploy/edge/nginx.conf"
@@ -191,7 +251,9 @@ def proxy_fixture(tmp_path):
                                                     source_address=(source, 0))
             try:
                 connection.request(method, path, body=body, headers={
-                    "Host": "streaming.greis.dev.br", "X-Forwarded-For": "203.0.113.9",
+                    "Host": "streaming.greis.dev.br:10443",
+                    "Origin": "https://streaming.greis.dev.br:10443",
+                    "X-Forwarded-For": "203.0.113.9",
                     **(headers or {})})
                 response = connection.getresponse()
                 return SimpleNamespace(status=response.status, body=response.read(),
@@ -234,13 +296,16 @@ def test_edge_viewer_login_range_and_elevated_session_denial(tmp_path):
             headers={"Content-Type": "application/json"}).status == 403
         assert proxy.request("GET", "/Items", headers={"X-Emby-Token": "admin-token"}).status == 403
         result = proxy.request("GET", "/Videos/id/stream.mkv?api_key=viewer-token", headers={
-            "Range": "bytes=0-99", "Forwarded": "for=198.51.100.1", "X-Real-IP": "198.51.100.2"})
+            "Range": "bytes=0-99", "Forwarded": "for=198.51.100.1", "X-Real-IP": "198.51.100.2",
+            "X-Forwarded-Host": "attacker.example:8443", "X-Forwarded-Port": "8443"})
         assert result.status == 206
         headers = {k.lower(): v for k, v in json.loads(result.body)["headers"].items()}
         assert headers["x-real-ip"] == "203.0.113.9" and "forwarded" not in headers
         assert headers["range"] == "bytes=0-99" and "viewer-token" in headers["authorization"]
-        assert headers["host"] == "streaming.greis.dev.br"
-        assert headers["x-forwarded-proto"] == "https" and headers["x-forwarded-port"] == "443"
+        assert headers["host"] == "streaming.greis.dev.br:10443"
+        assert headers["x-forwarded-host"] == "streaming.greis.dev.br:10443"
+        assert headers["origin"] == "https://streaming.greis.dev.br:10443"
+        assert headers["x-forwarded-proto"] == "https" and headers["x-forwarded-port"] == "10443"
 
 
 def test_edge_websocket_basepath_and_guard_failure(tmp_path):

@@ -10,8 +10,11 @@ Publicação por hardlinks integrou 8.209 caminhos/6.023 arquivos únicos (5,449
 dois aliases degradados ficam excluídos, com origens preservadas. Backend edge
 e isolamento PVE passaram; DNAT TCP 80/443 aplicado e 33 checks do proxy aprovados.
 Publicação em ativação, sem certificado TLS: 80/443 externas dão timeout;
-10443 temporária chega ao PVE e serve só ao diagnóstico. O proprietário priorizou
-resolver 80/443, sem DNS-01 ou 10443 em produção. Gatilhos Jellyfin
+10443 recebeu conexões externas no diagnóstico. Depois da recusa da operadora,
+o proprietário aceitou a URL com `:10443`, certificado DNS-01 e gestão privada
+por Tailscale com domínio próprio. A configuração da porta 10443 está em preparação;
+certificado, renovação/DDNS e acesso externo seguem pendentes. Cloudflare é
+opcional; não há decisão de migrar o DNS nem zona criada. Gatilhos Jellyfin
 continuam contidos. Esse estado não altera os limites abaixo; consulte o
 [registro atual](docs/architecture/homelab-2026/implementation-status.md).
 

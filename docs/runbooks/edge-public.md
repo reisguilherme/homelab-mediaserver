@@ -1,5 +1,33 @@
 # Entrada pública Jellyfin na edge
 
+## Decisão atual — 16/11/2026
+
+O proprietário aceitou `https://streaming.greis.dev.br:10443/jellyfin/` após
+a recusa da operadora em liberar 80/443 para PF. Esta escolha substitui a
+preferência anterior pela URL sem porta. O código prepara os headers canônicos
+Host/X-Forwarded-Host com `:10443`, X-Forwarded-Port 10443 e redirect HTTP 308
+explícito para a mesma autoridade, preservando caminho e query.
+
+**Preparação, ainda sem deploy:** permanece WAN 10443 → PVE 443 → edge 443 →
+Caddy 8443. Nenhuma porta interna, regra de firewall, Compose, guard ou mídia
+foi alterada nesta preparação. A `https_port` do Caddy não deve virar 10443.
+O redirect HTTP é útil onde a porta 80 estiver alcançável; não faz a porta 80
+bloqueada funcionar. Usuários externos precisam do endereço HTTPS completo.
+
+Faltam emissão DNS-01, renovação e DDNS, aplicação controlada da configuração,
+e testes externos de TLS/reprodução e na LAN. O Caddy padrão ainda usa seus
+issuers anteriores; este patch sozinho não emite o certificado DNS-01. Não
+anunciar o endpoint como disponível nem iniciar tentativas de emissão com
+credenciais inexistentes. A escolha do provedor DNS permanece pendente:
+Cloudflare apenas DNS é opcional, sem zona criada ou nameservers alterados.
+O registro do domínio pode continuar no Registro.br em qualquer alternativa.
+
+Administração permanece privada. A plataforma prepara domínios próprios
+apontando ao IP Tailscale da VM control, com HTTPS na porta 443 e grants; não adicionar
+vhosts administrativos nesta edge. Ver o [plano de execução](../plans/2026-11-16-public-10443.md).
+
+## Evidências anteriores à decisão pela porta 10443
+
 **Estado em 16/11/2026, publicação em ativação:** backend edge → playback:8096 ativo
 (HTTP 200). Firewall PVE `enabled/running`, DROP IN/OUT e chains das NICs
 conferidos; edge → core:8080, controle:443 e PVE:8006/22 deram timeout.
@@ -25,8 +53,8 @@ A porta alternativa chega ao mesmo destino interno, ainda sem TLS. O diagnóstic
 de 80/443 externas concentra-se no caminho anterior à edge, sem distinguir
 definitivamente roteador de operadora.
 
-O proprietário escolheu **resolver primeiro 80/443 para URL sem porta**. 10443
-permanece somente diagnóstico temporário ativo, sem DNS-01 ou uso em produção.
+A preferência então era **resolver primeiro 80/443 para URL sem porta**,
+substituída pela decisão acima. À época, 10443 era somente diagnóstico, sem TLS.
 A consulta RO mostrou firewall Off, Attack Protection Enable, controle parental
 desmarcado e tabela IP Filter vazia. Drop Upstream no formulário não é regra
 aplicada; o menu Access Control do manual não aparece na UI. Próximo passo:
@@ -105,23 +133,32 @@ não é necessário para o ingresso; este caminho usa a resposta nativa Jellyfin
 ## Ordem operacional
 
 1. Conferir imagens, SSD, diretórios, subnet, configuração renderizada e sintaxe
-   dos dois proxies. Manter os serviços administrativos privados inalterados.
-2. Plataforma habilita apenas edge TCP 80/443 de entrada, edge → playback TCP
-   8096 e playback ← edge TCP 8096, preservando as negações para core/gestão.
-3. Iniciar estes três serviços explicitamente. Testar localmente hostname,
-   autenticação comum, negação admin, spoof de headers, Range, WebSocket e guard
-   indisponível. Não encaminhar porta diretamente ao Jellyfin.
-4. Plataforma aplica DNAT estritamente do IP LAN/bridge de entrada TCP 80/443
-   para edge nas mesmas portas, com hooks simétricos no fragmento de rede já
-   existente. Sem flush de firewall, reload global, nova unit ou mudança em fstab.
-   O roteador encaminha essas portas ao IP LAN do host, não a 8096.
-5. Conferir certificado válido para o hostname, HTTP→HTTPS, login/logout comum,
-   negação admin e reprodução externa com seek/legendas. Distinguir teste pela
-   LAN de acesso externo real. Só então registrar a publicação como operante.
+   dos dois proxies. Preparar e testar DNS-01, renovação e DDNS antes da
+   ativação TLS; este Caddyfile ainda não contém essa integração. Se a emissão
+   ocorrer em validador privado separado, conferir a entrega do certificado
+   e a configuração de carregamento no Caddy. Não iniciar a configuração de
+   preparação presumindo que os desafios antigos em 80/443 funcionarão.
+2. Preservar as permissões mínimas existentes: entrada na edge em TCP 443,
+   edge → playback TCP 8096 e as negações para core/gestão. A porta 80 interna
+   existente atende apenas o redirect onde alcançável; não depender dela para
+   clientes externos ou emissão. Manter administração privada.
+3. Com a estratégia de certificado configurada, ativar explicitamente os
+   serviços necessários e testar localmente TLS, hostname, autenticação comum,
+   negação admin, spoof de headers, Range, WebSocket e guard indisponível.
+   Não encaminhar porta diretamente ao Jellyfin.
+4. Conferir o mapeamento já criado pelo proprietário: **WAN TCP 10443 → IP LAN
+   do PVE TCP 443 → IP privado da edge TCP 443 → Caddy TCP 8443**. Não reaplicar
+   regras antigas de encaminhamento WAN 80/443. Preservar os hooks simétricos
+   do DNAT existente, sem flush de firewall, reload global, nova unit ou fstab.
+5. Conferir certificado válido para o hostname na porta 10443, login/logout
+   comum, negação admin e reprodução externa com seek/legendas. Testar também
+   a LAN; NAT loopback de 80 não prova o de 10443. Verificar o redirect apenas
+   onde HTTP estiver alcançável. Só então anunciar a publicação como operante.
 
-O rollback fecha somente as duas regras DNAT de propriedade desta publicação e
-para o projeto `homeserver-edge`, preservando certificados/limites e os demais
-serviços. Sem resetar o estado de storage ou remover pausas manuais.
+O rollback restaura os arquivos anteriores da edge e, se necessário, fecha
+somente as regras DNAT de propriedade desta publicação e para o projeto
+`homeserver-edge`, preservando certificados/limites e os demais serviços.
+Sem resetar o estado de storage ou remover pausas manuais.
 
 Caddy suporta portas internas alternativas mantendo as portas públicas normais
 ([opções globais](https://caddyserver.com/docs/caddyfile/options)); o proxy
