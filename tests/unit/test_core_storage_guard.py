@@ -1,6 +1,8 @@
 """Core writers require their own fresh lease and exact local ext4 identity."""
 
+import hashlib
 import importlib.util
+import json
 import os
 import signal
 import stat
@@ -748,3 +750,271 @@ def test_suspend_jump_expires_writer_while_new_check_is_blocked(guard, tmp_path,
     assert offset == [60]
     assert blocked_at == [len(calls)]
     assert_recorded_processes_stopped(marker)
+
+
+NATIVE_ROLES = ("sonarr", "radarr", "prowlarr", "bazarr", "qbittorrent", "seerr", "byparr")
+
+
+@pytest.mark.parametrize("role", NATIVE_ROLES)
+def test_native_role_is_fixed_foreground_with_clean_environment(guard, role):
+    plan = guard.native_plan(role)
+    assert plan["data_mode"] == (
+        "rw" if role in {"sonarr", "radarr", "bazarr", "qbittorrent"} else "none"
+    )
+    assert plan["argv"][0].startswith("/") and plan["cwd"].startswith("/")
+    assert not {"/init", "sh", "-c", "--daemon", "-d", "uv", "npm"}.intersection(plan["argv"])
+    assert "QBT_DAEMON" not in plan["env"] and "LD_PRELOAD" not in plan["env"]
+    assert "HOME" in plan["env"] and "PATH" in plan["env"]
+    first_hash = guard.native_plan_digest(plan)
+    assert len(first_hash) == 64
+    plan["argv"].append("--not-approved")
+    assert guard.native_plan_digest(guard.native_plan(role)) == first_hash
+    assert guard.native_plan_digest(plan) != first_hash
+
+
+def activation_bytes(guard, role="sonarr", **changes):
+    value = {"schema": 1, "scope": "production-core-activation", "role": role,
+             "filesystem_uuid": FILESYSTEM, "data_mode": guard.native_plan(role)["data_mode"],
+             "image_id": "sha256:" + "a" * 64,
+             "native_command_sha256": guard.native_plan_digest(guard.native_plan(role)),
+             "restore_receipt_sha256": "b" * 64, "configuration_receipt_sha256": "c" * 64,
+             "native_process_group_receipt_sha256": "d" * 64}
+    value.update(changes)
+    return (json.dumps(value, sort_keys=True) + "\n").encode()
+
+
+def parse_activation(guard, raw, role="sonarr", **kwargs):
+    return guard.parse_activation(
+        raw, role, FILESYSTEM, hashlib.sha256(raw).hexdigest(), **kwargs
+    )
+
+
+@pytest.mark.parametrize("role", NATIVE_ROLES)
+def test_pinned_operational_receipt_is_distinct_from_readiness_fixture(guard, role):
+    raw = activation_bytes(guard, role)
+    result = parse_activation(guard, raw, role)
+    assert result["role"] == role
+    fixture = json.dumps({"schema": 1, "role": role, "status": "PASS", "http_ready": True,
+                          "production_ready": False, "under_writer_guard_verified": False})
+    with pytest.raises(guard.GuardError):
+        parse_activation(guard, fixture.encode(), role)
+
+
+@pytest.mark.parametrize("changes", [
+    {"scope": "isolated-native-rehearsal"}, {"schema": True}, {"schema": 2},
+    {"role": "seerr"}, {"filesystem_uuid": BOOT}, {"data_mode": "ro"},
+    {"native_command_sha256": "f" * 64}, {"image_id": "repo:latest"},
+    {"restore_receipt_sha256": None}, {"configuration_receipt_sha256": "pending"},
+    {"native_process_group_receipt_sha256": "D" * 64}, {"approved": True},
+])
+def test_incomplete_or_wrong_activation_receipt_is_refused(guard, changes):
+    with pytest.raises(guard.GuardError):
+        parse_activation(guard, activation_bytes(guard, **changes))
+
+
+def test_activation_receipt_requires_pinned_hash_and_unique_fields(guard):
+    raw = activation_bytes(guard)
+    with pytest.raises(guard.GuardError):
+        guard.parse_activation(raw, "sonarr", FILESYSTEM, "0" * 64)
+    duplicate = raw.rstrip()[:-1] + b', "schema":1}'
+    with pytest.raises(guard.GuardError):
+        parse_activation(guard, duplicate)
+    for invalid in (b"[]", b"null", b"x" * 8193):
+        with pytest.raises(guard.GuardError):
+            parse_activation(guard, invalid)
+
+
+def activation_mounts(role="sonarr", **changes):
+    row = dict(identifier=80, device="8:1", root=f"/srv/appdata/core-activation/{role}",
+               mode="ro")
+    row.update(changes)
+    return mount("/run/core-activation", **row).encode()
+
+
+def test_activation_mount_is_exact_readonly_guest_ssd_bind(guard):
+    host, local = mounts()
+    token = guard.check_activation_mount(host, local + activation_mounts(), "sonarr", "8:1")
+    assert token == ("80", "8:1")
+
+
+@pytest.mark.parametrize("change", ["rw", "device", "role", "file", "stacked", "nested"])
+def test_wrong_activation_mount_never_supplies_runtime_authority(guard, change):
+    host, local = mounts()
+    extra = activation_mounts()
+    if change == "rw":
+        extra = activation_mounts(mode="rw")
+    elif change == "device":
+        extra = activation_mounts(device="8:16")
+    elif change == "role":
+        extra = activation_mounts("seerr")
+    elif change == "file":
+        extra = extra.replace(b"/run/core-activation ", b"/run/core-activation/receipt.json ")
+    elif change == "stacked":
+        extra += extra
+    elif change == "nested":
+        extra += mount("/run/core-activation/receipt.json", identifier=81).encode()
+    with pytest.raises(guard.GuardError):
+        guard.check_activation_mount(host, local + extra, "sonarr", "8:1")
+
+
+def test_execution_checker_pins_activation_as_part_of_storage_identity(guard, monkeypatch):
+    storage = snapshot()
+    monkeypatch.setattr(guard, "check_runtime", lambda *_: dict(storage))
+    monkeypatch.setattr(guard, "check_activation", lambda *_: ("80", "8:1", "f" * 64))
+    checked = guard.execution_check("sonarr", FILESYSTEM, "f" * 64)
+    assert checked["token"] == (*storage["token"], "80", "8:1", "f" * 64)
+    assert checked["expires_at"] == storage["expires_at"]
+
+
+def test_run_cli_has_no_arbitrary_command_or_fixture_override(guard, tmp_path):
+    for args in (["--run", "shell"], ["--run", "sonarr", "--data-mode", "ro"],
+                 ["--run", "sonarr", "--fixture"],
+                 ["--run", "sonarr", "--", "/bin/sh", "-c", "echo invalid"]):
+        result = subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True,
+                                check=False, timeout=3)
+        assert result.returncode != 0
+
+
+def test_cli_run_delegates_only_fixed_context_and_checker(guard, monkeypatch):
+    seen = {}
+
+    def supervise_native(command, checker, **kwargs):
+        seen.update(command=command, kwargs=kwargs, check=checker())
+        return 17
+
+    monkeypatch.setattr(guard, "execution_check", lambda *args: ("checked", args))
+    monkeypatch.setattr(guard, "supervise", supervise_native)
+    code = guard.main(["--run", "sonarr", "--filesystem-uuid", FILESYSTEM,
+                       "--activation-sha256", "f" * 64])
+    plan = guard.native_plan("sonarr")
+    assert code == 17
+    assert seen["command"] == plan["argv"]
+    assert seen["kwargs"] == {"cwd": plan["cwd"], "env": plan["env"]}
+    assert seen["check"] == ("checked", ("sonarr", FILESYSTEM, "f" * 64))
+
+
+def test_activation_reader_checks_real_root_file_and_rejects_changed_bytes(guard, trusted_tree):
+    trusted_tree, _ = trusted_tree
+    receipt = trusted_tree / "activation.json"
+    raw = activation_bytes(guard)
+    receipt.write_bytes(raw)
+    receipt.chmod(0o444)
+    host, local = mounts()
+    host_path = trusted_tree / "host-mountinfo"
+    host_path.write_bytes(host)
+    host_path.chmod(0o444)
+
+    def read(path, limit, **kwargs):
+        value, _ = guard.read_trusted(
+            receipt if path == guard.ACTIVATION_PATH else host_path, limit, **kwargs
+        )
+        return value, "8:1"  # Synthetic mount identity, real trusted file reader.
+
+    digest = hashlib.sha256(raw).hexdigest()
+    token = guard.check_activation("sonarr", FILESYSTEM, digest, read=read,
+                                  kernel_read=lambda *_: local + activation_mounts())
+    assert token == ("80", "8:1", digest)
+    receipt.write_bytes(b'{"PRIVATE_SENTINEL":true}')
+    with pytest.raises(guard.GuardError, match="^activation_changed$"):
+        guard.check_activation("sonarr", FILESYSTEM, digest, read=read,
+                               kernel_read=lambda *_: local + activation_mounts())
+
+
+@pytest.mark.parametrize("stop", ["preflight_hold", "hold", "expiry", "receipt_change", "manual"])
+def test_run_cli_real_subprocess_contains_group_without_restart(guard, trusted_tree, stop):
+    """Only mount/device observations and the native executable are synthetic.
+
+    The shipped CLI, receipt reader, lease parser, watchdog and process signals
+    execute in a separate interpreter. No fixture option exists in the public CLI.
+    """
+    trusted_tree, _ = trusted_tree
+    marker = trusted_tree / "children"
+    plan = guard.native_plan("sonarr")
+    plan["argv"] = child_command(marker, grandchild=True)
+    plan["argv"][2] = "import os; assert 'PRIVATE_SENTINEL' not in os.environ\n" + plan["argv"][2]
+    plan["cwd"] = str(trusted_tree)
+    original_plan = guard.native_plan
+    guard.native_plan = lambda _: plan
+    try:
+        receipt = activation_bytes(guard)
+    finally:
+        guard.native_plan = original_plan
+    digest = hashlib.sha256(receipt).hexdigest()
+    host, local = mounts()
+    files = {
+        str(guard.BOOT_PATH): ("boot", (BOOT + "\n").encode(), 0o444),
+        str(guard.MARKER_PATH): ("marker", (FILESYSTEM + "\n").encode(), 0o444),
+        str(guard.HOST_MOUNT_PATH): ("host", host, 0o444),
+        str(guard.ACTIVATION_PATH): ("activation", receipt, 0o444),
+    }
+    mapped = {}
+    for source, (name, raw, mode) in files.items():
+        path = trusted_tree / name
+        path.write_bytes(raw)
+        path.chmod(mode)
+        mapped[source] = str(path)
+    lease_path = trusted_tree / "lease"
+    seconds = 2 if stop == "expiry" else 20
+    lease_path.write_bytes(lease(expires_uptime_seconds=str(int(guard.uptime_clock()) + seconds)))
+    if stop == "preflight_hold":
+        lease_path.write_bytes(lease(state="hold", physical_generation="none",
+                                     expires_uptime_seconds="0"))
+    lease_path.chmod(0o644)
+    mapped[str(guard.LEASE_PATH)] = str(lease_path)
+    program = f"""
+import importlib.util
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('guard', {str(SCRIPT)!r})
+guard = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(guard)
+mapping = {mapped!r}
+local = {local + activation_mounts()!r}
+plan = {plan!r}
+def read_fixture(path, limit, **kwargs):
+    raw, _ = guard.read_trusted(Path(mapping[str(path)]), limit, **kwargs)
+    return raw, '8:16' if path == guard.MARKER_PATH else '8:1'
+def kernel_fixture(path, limit):
+    return guard.read_kernel(path, limit) if path == guard.UPTIME_PATH else local
+runtime = guard.check_runtime
+activation = guard.check_activation
+guard.check_runtime = lambda uuid, mode: runtime(
+    uuid, mode, read=read_fixture, kernel_read=kernel_fixture)
+guard.check_activation = lambda role, uuid, pin: activation(
+    role, uuid, pin, read=read_fixture, kernel_read=kernel_fixture)
+guard.native_plan = lambda role: plan
+raise SystemExit(guard.main(['--run', 'sonarr', '--filesystem-uuid', {FILESYSTEM!r},
+                            '--activation-sha256', {digest!r}]))
+"""
+    environment = {**os.environ, "PRIVATE_SENTINEL": "must-not-reach-native"}
+    parent = subprocess.Popen([sys.executable, "-c", program], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, env=environment)
+    try:
+        deadline = time.monotonic() + 5
+        while not marker.exists() and parent.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if stop == "preflight_hold":
+            assert not marker.exists()
+        else:
+            assert marker.exists()
+            if stop == "manual":
+                parent.send_signal(signal.SIGTERM)
+            elif stop == "hold":
+                lease_path.write_bytes(lease(state="hold", physical_generation="none",
+                                             expires_uptime_seconds="0", sequence="8"))
+            elif stop == "receipt_change":
+                Path(mapped[str(guard.ACTIVATION_PATH)]).write_bytes(b"{}")
+        out, error = parent.communicate(timeout=10)
+        assert parent.returncode == (0 if stop == "manual" else 78)
+        assert out == b"" and error == b""
+        if marker.exists():
+            assert_recorded_processes_stopped(marker)
+            assert len(marker.read_text().split(",")) == 2
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait(timeout=3)
+        if marker.exists():
+            try:
+                os.killpg(int(marker.read_text().split(",")[0]), signal.SIGKILL)
+            except ProcessLookupError:
+                pass

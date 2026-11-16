@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Inactive core writer storage component; never configures native applications."""
+"""Core storage checks and explicit fixed-role supervision; no application configuration."""
 
 import argparse
 import hashlib
+import json
 import math
 import os
 import queue
@@ -31,6 +32,9 @@ BOOT_PATH = Path("/run/guest-boot-id")
 MARKER_PATH = Path(MARKER_TARGET)
 HOST_MOUNT_PATH = Path("/run/host-mountinfo")
 UPTIME_PATH = Path("/proc/uptime")
+ACTIVATION_PATH = Path("/run/core-activation/receipt.json")
+NATIVE_ROLES = ("sonarr", "radarr", "prowlarr", "bazarr", "qbittorrent", "seerr", "byparr")
+SHA256 = r"[0-9a-f]{64}"
 
 
 class GuardError(RuntimeError):
@@ -285,6 +289,115 @@ def check_runtime(
     }
 
 
+def native_plan(role):
+    """Fixed launchers; callers cannot inject commands, environment or data policy."""
+    require(role in NATIVE_ROLES, "native_role")
+    env = {"PATH": "/lsiopy/bin:/usr/local/bin:/usr/bin:/bin", "HOME": "/config",
+           "TMPDIR": "/tmp", "LANG": "C.UTF-8", "TZ": "UTC"}
+    data_mode = "rw" if role in {"sonarr", "radarr", "bazarr", "qbittorrent"} else "none"
+    if role in {"sonarr", "radarr", "prowlarr"}:
+        cwd = f"/app/{role}/bin"
+        argv = [f"{cwd}/{role.capitalize()}", "-nobrowser", "-data=/config"]
+        env.update(DOTNET_BUNDLE_EXTRACT_BASE_DIR="/config/.net", DOTNET_CLI_TELEMETRY_OPTOUT="1")
+    elif role == "bazarr":
+        cwd = "/app/bazarr/bin"
+        argv = ["/lsiopy/bin/python3", f"{cwd}/bazarr.py", "--no-update", "--no-tasks",
+                "--no-signalr", "--config", "/config"]
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+    elif role == "qbittorrent":
+        cwd = "/"
+        argv = ["/usr/bin/qbittorrent-nox", "--profile=/config", "--webui-port=8080",
+                "--confirm-legal-notice"]
+        env.update(XDG_CONFIG_HOME="/config", XDG_CACHE_HOME="/config/.cache",
+                   XDG_DATA_HOME="/config/.local/share", QT_QPA_PLATFORM="offscreen")
+    elif role == "seerr":
+        cwd = "/app"
+        argv = ["/usr/local/bin/node", "/app/dist/index.js"]
+        env.update(NODE_ENV="production", CONFIG_DIRECTORY="/app/config", PORT="5055")
+    else:
+        cwd = "/app"
+        argv = ["/app/.venv/bin/python", "/app/main.py"]
+        env.update(PYTHONDONTWRITEBYTECODE="1", XDG_CACHE_HOME="/config/.cache")
+    return {"argv": argv, "cwd": cwd, "env": env, "data_mode": data_mode}
+
+
+def native_plan_digest(plan):
+    serialized = json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def parse_activation(raw, role, expected_uuid, pinned_sha256):
+    """Read operator-pinned configuration; never infer proofs from HTTP readiness.
+
+    Evidence digests are references audited by the operator. This parser does
+    not certify unseen receipts or prove the current Docker image identity.
+    """
+    plan = native_plan(role)
+    require(isinstance(expected_uuid, str) and re.fullmatch(UUID, expected_uuid), "expected_uuid")
+    require(isinstance(pinned_sha256, str) and re.fullmatch(SHA256, pinned_sha256),
+            "activation_pin")
+    require(isinstance(raw, bytes) and 0 < len(raw) <= 8192, "activation_size")
+    require(hashlib.sha256(raw).hexdigest() == pinned_sha256, "activation_changed")
+
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            require(key not in value, "activation_duplicate")
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(raw, object_pairs_hook=unique_object)
+    except (ValueError, UnicodeError, RecursionError):
+        raise GuardError("activation_json") from None
+    digest_fields = {"native_command_sha256", "restore_receipt_sha256",
+                     "configuration_receipt_sha256", "native_process_group_receipt_sha256"}
+    require(isinstance(value, dict) and set(value) == {
+        "schema", "scope", "role", "filesystem_uuid", "data_mode", "image_id", *digest_fields,
+    }, "activation_schema")
+    require(type(value["schema"]) is int and value["schema"] == 1, "activation_schema")
+    require(value["scope"] == "production-core-activation", "activation_scope")
+    require(value["role"] == role and value["filesystem_uuid"] == expected_uuid,
+            "activation_identity")
+    require(value["data_mode"] == plan["data_mode"], "activation_data_mode")
+    require(isinstance(value["image_id"], str)
+            and re.fullmatch("sha256:" + SHA256, value["image_id"]), "activation_image")
+    require(all(isinstance(value[key], str) and re.fullmatch(SHA256, value[key])
+                for key in digest_fields), "activation_evidence_digest")
+    require(value["native_command_sha256"] == native_plan_digest(plan), "activation_command")
+    return value
+
+
+def check_activation_mount(host, local, role, receipt_device):
+    native_plan(role)
+    host_rows, local_rows = mount_rows(host), mount_rows(local)
+    root = exact_mount(host_rows, "/")
+    activation = exact_mount(local_rows, "/run/core-activation")
+    require(activation["root"] == f"/srv/appdata/core-activation/{role}"
+            and activation["device"] == receipt_device == root["device"]
+            and activation["source"] == root["source"]
+            and activation["filesystem"] == root["filesystem"]
+            and "ro" in activation["options"] and "rw" not in activation["options"],
+            "activation_mount")
+    return activation["id"], activation["device"]
+
+
+def check_activation(role, expected_uuid, pinned_sha256, *, read=read_trusted,
+                     kernel_read=read_kernel):
+    raw, receipt_device = read(ACTIVATION_PATH, 8192, expected_mode=0o444)
+    parse_activation(raw, role, expected_uuid, pinned_sha256)
+    host, _ = read(HOST_MOUNT_PATH, MAX_MOUNT_BYTES, expected_mode=0o444)
+    local = kernel_read(local_mount_path(), MAX_MOUNT_BYTES)
+    return (*check_activation_mount(host, local, role, receipt_device), pinned_sha256)
+
+
+def execution_check(role, expected_uuid, pinned_sha256):
+    # Read immutable activation first; no delay may refresh an existing lease.
+    activation_token = check_activation(role, expected_uuid, pinned_sha256)
+    storage = check_runtime(expected_uuid, native_plan(role)["data_mode"])
+    return {**storage, "token": (*storage["token"], *activation_token)}
+
+
 def valid_snapshot(value):
     require(
         isinstance(value, dict)
@@ -437,9 +550,10 @@ def stop_group(child, grace):
 
 
 def supervise(
-    command, checker, *, stop_event=None, poll_interval=1.0, check_timeout=3.0, term_grace=2.0
+    command, checker, *, stop_event=None, poll_interval=1.0, check_timeout=3.0, term_grace=2.0,
+    cwd=None, env=None,
 ):
-    """Internal integration API; the public CLI deliberately has no native launch path.
+    """Existing process-group lifecycle, also used by the explicit fixed-role CLI.
 
     Caller must first establish version-proven native containment and its audited
     activation receipt. No receipt or native configuration is manufactured here.
@@ -472,7 +586,7 @@ def supervise(
         if stop_event.is_set():
             raise ManualStop
         valid_snapshot(current)
-        child = subprocess.Popen(command, start_new_session=True)
+        child = subprocess.Popen(command, start_new_session=True, cwd=cwd, env=env)
         pending, pending_deadline = None, 0.0
         next_check = uptime_clock()
         while True:
@@ -521,20 +635,36 @@ def supervise(
     return result
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true")
+    mode.add_argument("--run", choices=NATIVE_ROLES)
     parser.add_argument("--filesystem-uuid")
-    parser.add_argument("--data-mode", choices=("ro", "rw", "none"), default="rw")
-    args = parser.parse_args()
-    if not args.check:
-        print("core native startup denied: activation is not configured", file=sys.stderr)
+    parser.add_argument("--data-mode", choices=("ro", "rw", "none"))
+    parser.add_argument("--activation-sha256")
+    args = parser.parse_args(argv)
+    if not args.check and args.run is None:
+        print("core native startup denied: explicit mode required", file=sys.stderr)
         return 78
     try:
-        check_runtime(args.filesystem_uuid, args.data_mode)
+        if args.run is not None:
+            require(args.data_mode is None, "native_data_mode_is_fixed")
+            require(isinstance(args.filesystem_uuid, str)
+                    and re.fullmatch(UUID, args.filesystem_uuid), "expected_uuid")
+            require(isinstance(args.activation_sha256, str)
+                    and re.fullmatch(SHA256, args.activation_sha256), "activation_pin")
+            plan = native_plan(args.run)
+            return supervise(
+                plan["argv"],
+                lambda: execution_check(args.run, args.filesystem_uuid, args.activation_sha256),
+                cwd=plan["cwd"], env=plan["env"],
+            )
+        require(args.activation_sha256 is None, "check_does_not_activate")
+        check_runtime(args.filesystem_uuid, args.data_mode or "rw")
     except GuardError as error:
-        print(f"core storage check refused: {error}", file=sys.stderr)
-        return 1
+        print(f"core guard refused: {error}", file=sys.stderr)
+        return 78 if args.run is not None else 1
     print("core storage check passed; native startup remains denied")
     return 0
 
