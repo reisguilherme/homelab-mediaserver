@@ -112,6 +112,7 @@ def _permit_id(value: str) -> str:
 class StorageRegistry:
     def __init__(
         self, pools: Mapping[str, StoragePool], *,
+        backend: str = 'mergerfs',
         host_mountinfo: Path = Path('/run/host-mountinfo'),
         mountinfo: Path = Path('/proc/self/mountinfo'),
         uuid_dir: Path = Path('/run/host-uuids'),
@@ -121,6 +122,10 @@ class StorageRegistry:
         download_uid: int = 1000, download_gid: int = 1000,
         set_owner: Callable = os.chown,
     ):
+        if backend not in ('mergerfs', 'ext4-single'):
+            raise StorageRegistryError('unknown storage backend')
+        if backend == 'ext4-single' and set(pools) != {'hdd3'}:
+            raise StorageRegistryError('direct ext4 requires singleton hdd3')
         if set(pools) - set(POOL_IDS):
             raise StorageRegistryError('unknown storage pool')
         if len({pool.root for pool in pools.values()}) != len(pools):
@@ -129,6 +134,7 @@ class StorageRegistry:
             raise StorageRegistryError('pools must have distinct physical identities')
         self.pool_ids = tuple(name for name in POOL_IDS if name in pools)
         self.pools = {name: pools[name] for name in self.pool_ids}
+        self.backend = backend
         self.host_mountinfo, self.mountinfo = host_mountinfo, mountinfo
         self.uuid_dir, self.placement_claims = uuid_dir, placement_claims
         self._device_id, self._usage, self._set_owner = device_id, usage, set_owner
@@ -167,7 +173,8 @@ class StorageRegistry:
             _no_symlinks(pool.root)
             if not pool.root.is_dir():
                 raise StorageUnavailable('pool root absent')
-            hosts = [m for m in self._mounts(self.host_mountinfo) if m.target == pool.host_mount]
+            host_mounts = self._mounts(self.host_mountinfo)
+            hosts = [m for m in host_mounts if m.target == pool.host_mount]
             if len(hosts) != 1:
                 raise StorageUnavailable('physical host mount absent or ambiguous')
             host = hosts[0]
@@ -184,7 +191,8 @@ class StorageRegistry:
                 raise StorageUnavailable('UUID does not identify mounted device')
             if self._device_id(pool.root) != host.device:
                 raise StorageUnavailable('bind device differs from physical host mount')
-            locals_ = [m for m in self._mounts(self.mountinfo)
+            local_mounts = self._mounts(self.mountinfo)
+            locals_ = [m for m in local_mounts
                        if pool.root == m.target or m.target in pool.root.parents]
             if not locals_:
                 raise StorageUnavailable('container mount evidence absent')
@@ -194,6 +202,17 @@ class StorageRegistry:
             if (local.device != host.device or effective_root != expected_root
                     or local.filesystem != host.filesystem):
                 raise StorageUnavailable('container bind does not map the registered subtree')
+            if self.backend == 'ext4-single':
+                roots = [m for m in host_mounts if m.target == Path('/')]
+                direct = [m for m in local_mounts if m.target == pool.root]
+                restrictions = {'nosuid', 'nodev', 'noexec'}
+                if (len(roots) != 1 or roots[0].device == host.device
+                        or len(direct) != 1 or local != direct[0]
+                        or any(pool.host_mount in m.target.parents for m in host_mounts)
+                        or any(pool.root in m.target.parents for m in local_mounts)
+                        or not restrictions.issubset(host.options)
+                        or not restrictions.issubset(local.options)):
+                    raise StorageUnavailable('direct ext4 mount is absent, shadowed or unsafe')
             if writable:
                 if 'rw' not in local.options or 'rw' not in local.super_options:
                     raise StorageUnavailable('container binding is read-only')
@@ -214,6 +233,8 @@ class StorageRegistry:
                 or len(parts) < 3 or parts[:2] != ['', 'data']
                 or parts[2] not in ('torrents', 'media')):
             raise StorageUnavailable('path outside allowed logical storage roots')
+        if self.backend == 'ext4-single' and '' in parts[1:]:
+            raise StorageUnavailable('direct ext4 requires a canonical logical path')
         self.inspect(pool_id, writable=writable)
         pool = self._pool(pool_id)
         physical = pool.root.joinpath(*PurePosixPath(raw).parts[2:])
@@ -401,19 +422,33 @@ class _StorageReadSnapshot(StorageRegistry):
 
 def load_storage_registry(
     path: Path = Path('/run/homeserver/storage.json'),
+    *, required_backend: str | None = None,
 ) -> StorageRegistry | None:
+    if required_backend not in (None, 'mergerfs', 'ext4-single'):
+        raise StorageRegistryError('unknown required storage backend')
     try:
         raw = Path(path).read_text(encoding='utf-8')
     except FileNotFoundError:
         if Path(path).is_symlink():
             raise StorageRegistryError('installed registry is a broken symlink') from None
+        if required_backend is not None:
+            raise StorageRegistryError('required storage registry is absent') from None
         return None
     except OSError as exc:
         raise StorageRegistryError('cannot read installed storage registry') from exc
     try:
         data = json.loads(raw)
-        if not isinstance(data, dict) or set(data) != {'version', 'pools'} or data['version'] != 1:
+        if not isinstance(data, dict) or type(data.get('version')) is not int:
             raise ValueError('unsupported storage registry schema')
+        if data['version'] == 1 and set(data) == {'version', 'pools'}:
+            backend = 'mergerfs'
+        elif (data['version'] == 2 and set(data) == {'version', 'backend', 'pools'}
+              and data['backend'] == 'ext4-single'):
+            backend = 'ext4-single'
+        else:
+            raise ValueError('unsupported storage registry schema')
+        if required_backend is not None and backend != required_backend:
+            raise ValueError('storage backend differs from required layout')
         if not isinstance(data['pools'], list) or len(data['pools']) not in (1, 2, 3, 4):
             raise ValueError('legacy storage pools or singleton hdd3 are required')
         pools = {}
@@ -426,6 +461,10 @@ def load_storage_registry(
             if (not isinstance(uuid, str)
                     or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', uuid)):
                 raise ValueError('invalid filesystem UUID')
+            if backend == 'ext4-single' and not re.fullmatch(
+                r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', uuid,
+            ):
+                raise ValueError('direct ext4 requires a canonical filesystem UUID')
             if (not isinstance(caps, dict) or set(caps) - CAPABILITIES
                     or any(type(value) is not bool for value in caps.values())):
                 raise ValueError('invalid capability evidence')
@@ -434,7 +473,8 @@ def load_storage_registry(
             external = Path('/srv/external' + suffix)
             pools[name] = StoragePool(
                 name, POOL_LABELS[name], uuid,
-                Path('/storage/ssd' if ssd else f'/storage/{name}/homeserver'),
+                (Path('/data') if backend == 'ext4-single'
+                 else Path('/storage/ssd' if ssd else f'/storage/{name}/homeserver')),
                 Path('/srv/data') if ssd else external,
                 Path('/srv/data') if ssd else external / 'homeserver', caps,
             )
@@ -442,6 +482,6 @@ def load_storage_registry(
             raise ValueError('SSD and first HD, or singleton hdd3, are required')
         if len({p.filesystem_id for p in pools.values()}) != len(pools):
             raise ValueError('pools must have distinct physical identities')
-        return StorageRegistry(pools)
+        return StorageRegistry(pools, backend=backend)
     except (ValueError, TypeError, KeyError) as exc:
         raise StorageRegistryError(f'invalid storage registry: {exc}') from exc

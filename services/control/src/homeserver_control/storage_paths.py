@@ -1,8 +1,9 @@
-"""Map union names to verified physical branches without trusting FUSE st_dev."""
+"""Resolve the declared storage backend without inferring physical identity."""
 
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path, PurePosixPath
 
 from homeserver_common.storage import StorageRegistry, StorageUnavailable
@@ -24,11 +25,23 @@ def physical_paths(
     registry: StorageRegistry, logical_path: str | Path, *,
     union_path: Path | None = None, writable: bool = False,
 ) -> list[tuple[str, Path]]:
-    """Use mergerfs allpaths/fullpath to reject foreign or hidden counterparts.
+    """Use explicit ext4 mapping or mergerfs evidence, with no fallback between them.
 
     Directories may span registered branches; files must have exactly one branch.
     See mergerfs runtime_interface.md (file / directory xattrs).
     """
+    if getattr(registry, 'backend', 'mergerfs') == 'ext4-single':
+        physical = registry.resolve('hdd3', logical_path, writable=writable)
+        if union_path is not None and union_path != physical:
+            raise StorageUnavailable('direct ext4 alias differs from registered path')
+        try:
+            info = physical.lstat()
+            if (not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode))
+                    or info.st_dev != registry.primary_pool.root.stat().st_dev):
+                raise StorageUnavailable('direct ext4 object is special or on another device')
+        except (OSError, ValueError) as exc:
+            raise StorageUnavailable('direct ext4 path evidence unavailable') from exc
+        return [('hdd3', physical)]
     logical = PurePosixPath(logical_path)
     local = union_path if union_path is not None else Path(logical_path)
     try:

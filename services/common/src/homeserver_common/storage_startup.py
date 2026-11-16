@@ -1,4 +1,4 @@
-"""Refuse expansion startup if the logical view is an ordinary/stale bind."""
+"""Verify the explicitly registered logical view; never infer a fallback backend."""
 from __future__ import annotations
 
 import os
@@ -8,15 +8,23 @@ from pathlib import Path
 from .storage import StorageUnavailable, _mounts, _no_symlinks, load_storage_registry
 
 
-def verify_storage_startup(registry_path: Path, logical_root: Path) -> bool:
-    registry = load_storage_registry(registry_path)
+def verify_storage_startup(
+    registry_path: Path, logical_root: Path, *, required_backend: str | None = None,
+    writable: bool = False,
+) -> bool:
+    registry = (load_storage_registry(registry_path) if required_backend is None
+                else load_storage_registry(registry_path, required_backend=required_backend))
     if registry is None:
         return False
     try:
         _no_symlinks(logical_root)
-        registry.inspect(registry.primary_pool_id)
+        registry.inspect(registry.primary_pool_id, writable=writable)
         for pool in registry.pools.values():
             registry._guard_parent(pool)
+        if registry.backend == 'ext4-single':
+            if logical_root != registry.primary_pool.root:
+                raise StorageUnavailable('direct ext4 requires the registered logical root')
+            return True
         hosts = [m for m in _mounts(registry.host_mountinfo)
                  if m.target == Path('/srv/media-view')]
         if len(hosts) != 1 or hosts[0].filesystem != 'fuse.mergerfs' or hosts[0].root != Path('/'):
