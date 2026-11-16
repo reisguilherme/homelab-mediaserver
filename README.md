@@ -29,8 +29,10 @@ consolidação continuam pendentes; Abyss permanece adiado.
 
 O core tem [preparação própria](docs/runbooks/core-migration.md), com estado
 restaurado e inicialização ainda negada. A [verificação das cópias no destino](docs/runbooks/consolidation-target-verification.md)
-está em andamento por lotes somente leitura; publicação, delta final das origens
-e readmissão das aplicações continuam pendentes. Os
+foi interrompida a pedido do proprietário, que escolheu triagem de reprodução
+em vez da releitura integral por hashes. O piloto de três arquivos passou em
+entrega HTTP e decodificação de trechos, sem exclusões; isso não testa todo o
+acervo. Publicação, delta final das origens e readmissão das aplicações continuam pendentes. Os
 [domínios greis.dev.br](https://github.com/reisguilherme/homelab-platform/blob/refactor/docs/architecture/access-domains.md)
 estão definidos na plataforma, sem DNS/TLS/entrada pública aplicados.
 

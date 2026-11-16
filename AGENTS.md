@@ -26,11 +26,18 @@ retorno integral desassistido. GPU e reintegração física USB seguem pendentes
 
 A preparação do core e seu guard permanecem inativos, conforme
 `docs/runbooks/core-migration.md`. A verificação somente leitura das cópias no
-destino usa `scripts/verify-consolidation-target.py`; há um executor transitório
-no guest iniciado em 16/11, sem restart. Conferir tarefa e progresso privados
-antes de repetir ou alterar seus pins. Não executar helpers históricos de
+destino usa `scripts/verify-consolidation-target.py`; o executor transitório
+iniciado em 16/11 foi parado a pedido do proprietário no mesmo dia. Não retomar
+a varredura integral: a orientação atual é triagem de reprodução. Conferir os
+recibos privados antes de usar resultados parciais. Não executar helpers históricos de
 consolidação contra as novas identidades. Hashes desse escopo não encerram
 publicação, delta final das origens, caso degradado ou readmissão do core.
+Na triagem solicitada, erro de rede, autorização, codec, transcode ou caminho
+ainda não publicado é inconclusivo, não arquivo corrompido. O proprietário
+autorizou excluir as cópias que comprovadamente não reproduzem por defeito do
+conteúdo; preservar as origens e registrar a evidência e os aliases antes de
+qualquer exclusão. A exceção não permite limpeza indiscriminada por erro HTTP
+ou código de saída do decoder. O piloto somente leitura não apagou arquivos.
 
 Projeto pessoal executado pelo `compose.yaml` da raiz. Parâmetros de comportamento
 e credenciais ficam no `.env` privado; defaults técnicos ficam no código/Compose.
