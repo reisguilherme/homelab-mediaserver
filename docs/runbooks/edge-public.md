@@ -27,8 +27,28 @@ definitivamente roteador de operadora.
 
 O proprietário escolheu **resolver primeiro 80/443 para URL sem porta**. 10443
 permanece somente diagnóstico temporário ativo, sem DNS-01 ou uso em produção.
-Próximo passo: conferir somente leitura Access Control WAN HTTP/HTTPS e filtros
-IP downstream do roteador, conforme o diagnóstico coordenado pela plataforma.
+A consulta RO mostrou firewall Off, Attack Protection Enable, controle parental
+desmarcado e tabela IP Filter vazia. Drop Upstream no formulário não é regra
+aplicada; o menu Access Control do manual não aparece na UI. Próximo passo:
+suporte Brava conferir filtro/reserva de 80/443 no equipamento ou a montante,
+sem atribuir definitivamente a causa à operadora.
+
+A auditoria privada de **15/10/2026** já registrava timeout externo TCP 80/443 e
+resposta em 54443. O proxy antigo era uma TV box Armbian na mesma LAN, não na
+nuvem: WAN 54443 → TV box 443, com DNS-01 na configuração histórica. A execução
+de 18/10 documentou HTTP 200 externo e TLS válido por esse caminho. Portanto,
+o acesso antigo pela porta alta não comprova funcionamento de WAN 443; os
+timeouts padrão antecedem a migração.
+
+Texto preparado para chamado, **não enviado**:
+
+> Solicito verificar filtro ou reserva de TCP 80 e 443 no equipamento fornecido
+> e na rede de acesso. WAN e mapeamentos foram conferidos. As portas padrão dão
+> timeout externo, enquanto um teste temporário em TCP 10443 chega ao mesmo
+> destino interno TCP 443, com SYN externo capturado. O servidor e o loopback
+> local respondem. Há evidência anterior à migração de timeout em 80/443 e
+> funcionamento em porta alta. Precisamos usar 80/443 sem porta alternativa;
+> favor informar o ponto da restrição e o procedimento para liberação.
 
 Limpeza dos dispositivos de teste Jellyfin v2/v3: seis registros conferidos,
 quatro já ausentes e dois removidos por IDs de recibos, metadados e janela
