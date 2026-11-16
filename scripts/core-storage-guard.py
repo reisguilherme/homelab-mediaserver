@@ -307,10 +307,10 @@ def native_plan(role):
         env["PYTHONDONTWRITEBYTECODE"] = "1"
     elif role == "qbittorrent":
         cwd = "/"
-        argv = ["/usr/bin/qbittorrent-nox", "--profile=/config", "--webui-port=8080",
+        argv = ["/usr/bin/qbittorrent-nox", "--webui-port=8080",
                 "--confirm-legal-notice"]
         env.update(XDG_CONFIG_HOME="/config", XDG_CACHE_HOME="/config/.cache",
-                   XDG_DATA_HOME="/config/.local/share", QT_QPA_PLATFORM="offscreen")
+                   XDG_DATA_HOME="/config", QT_QPA_PLATFORM="offscreen")
     elif role == "seerr":
         cwd = "/app"
         argv = ["/usr/local/bin/node", "/app/dist/index.js"]

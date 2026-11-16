@@ -62,10 +62,10 @@ def recipe(role: str) -> dict:
         port, endpoint, kind = 6767, "/", "html"
     elif role == "qbittorrent":
         cwd = "/"
-        argv = ["/usr/bin/qbittorrent-nox", "--profile=/config", "--webui-port=8080",
+        argv = ["/usr/bin/qbittorrent-nox", "--webui-port=8080",
                 "--confirm-legal-notice"]
         env += ["XDG_CONFIG_HOME=/config", "XDG_CACHE_HOME=/config/.cache",
-                "XDG_DATA_HOME=/config/.local/share", "QT_QPA_PLATFORM=offscreen"]
+                "XDG_DATA_HOME=/config", "QT_QPA_PLATFORM=offscreen"]
         port, endpoint, kind = 8080, "/", "html"
     elif role == "seerr":
         cwd = "/app"

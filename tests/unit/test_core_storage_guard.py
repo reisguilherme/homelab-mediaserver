@@ -778,6 +778,34 @@ def test_suspend_jump_expires_writer_while_new_check_is_blocked(guard, tmp_path,
 NATIVE_ROLES = ("sonarr", "radarr", "prowlarr", "bazarr", "qbittorrent", "seerr", "byparr")
 
 
+def test_qbittorrent_uses_restored_xdg_profile_instead_of_new_portable_profile(guard):
+    plan = guard.native_plan("qbittorrent")
+    assert plan["argv"] == ["/usr/bin/qbittorrent-nox", "--webui-port=8080",
+                            "--confirm-legal-notice"]
+    assert plan["env"]["HOME"] == "/config"
+    assert plan["env"]["XDG_CONFIG_HOME"] == "/config"
+    assert plan["env"]["XDG_DATA_HOME"] == "/config"
+
+
+@pytest.mark.parametrize("role,expected", [
+    ("sonarr", "3fdeee593726d1cb01ce28dc5bb6abff401b86e0ad50eb345016efc15853f6bb"),
+    ("radarr", "87383e4dd4950a31d1393a364b9f30e3c341d5bad706b174ed6c73b0709d19b6"),
+    ("prowlarr", "0379e19f84e8da75457ab2173581016d9d606e9aa394fe29b56312f65f2eff83"),
+    ("bazarr", "d8dfa3ccbaac3856bba4901e55c4cf548b52329d37c979092721f669d984cb6a"),
+    ("seerr", "244cd7bdf8ed32203c5e26f2de081d02df543c81c0fccbc84f1acc49fc4e5415"),
+    ("byparr", "e928d27083ffdc84b68ed52b049148ad80a15b8d7990d29d0c12f75e225242cd"),
+])
+def test_qbittorrent_profile_fix_preserves_other_native_commands(guard, role, expected):
+    assert guard.native_plan_digest(guard.native_plan(role)) == expected
+
+
+def test_qbittorrent_old_profile_activation_is_rejected(guard):
+    old = "95ce289e01b8979dcb0132b1b8d6e0a980bbcfbb67a64aa5c5824a8860fcd557"
+    raw = activation_bytes(guard, "qbittorrent", native_command_sha256=old)
+    with pytest.raises(guard.GuardError, match="activation_command"):
+        guard.parse_activation(raw, "qbittorrent", FILESYSTEM, hashlib.sha256(raw).hexdigest())
+
+
 @pytest.mark.parametrize("role", NATIVE_ROLES)
 def test_native_role_is_fixed_foreground_with_clean_environment(guard, role):
     plan = guard.native_plan(role)
