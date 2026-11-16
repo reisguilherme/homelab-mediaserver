@@ -1,7 +1,7 @@
 name: homeserver-playback
 services:
   jellyfin:
-    image: homeserver-jellyfin-abyss:12.2-2f809171-r4
+    image: homeserver-jellyfin-abyss:12.2-2f809171-r5
     build:
       context: ./deploy/abyss
     restart: unless-stopped

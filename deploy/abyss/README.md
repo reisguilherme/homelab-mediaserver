@@ -25,7 +25,7 @@ alteração. `runtime/` é versionado para que o build não precise de Python.
 
 ```sh
 python3 deploy/abyss/prepare.py --check
-docker build --tag homeserver-jellyfin-abyss:12.2-2f809171-r4 deploy/abyss
+docker build --tag homeserver-jellyfin-abyss:12.2-2f809171-r5 deploy/abyss
 ```
 
 Para regenerar depois de alterar transformações revisadas:
@@ -62,17 +62,25 @@ Diferenças locais reproduzíveis:
   com origem correspondente. O proxy não precisa liberar imagens anonimamente.
 - O script é carregado de `ui/spotlight-loader.js`; os demais assets estão no
   mesmo diretório. O prefixo Jellyfin, inclusive `/jellyfin`, é preservado.
-- `local/abyss-defaults.js` inicializa `layout` no localStorage somente quando
-  a chave está ausente: `desktop-legacy` ou `mobile-legacy`, conforme o
-  user-agent, sem selecionar layout em TVs reconhecidas. Qualquer valor
-  existente, inclusive Auto, Modern e TV, permanece intacto. Também ativa
-  fundos somente quando a preferência local da conta está ausente, inclusive
-  após o login. Uma preferência explícita exige ajuste manual pelo usuário.
+- `local/abyss-defaults.js` recebe na `r5` uma migração única do layout local.
+  Valores ausente, vazio, `auto`, `modern`, `desktop` e `mobile` passam para
+  `desktop-legacy` ou `mobile-legacy`, conforme modo e user-agent. TV, Legacy e
+  valores desconhecidos são preservados. O marcador estável
+  `homeserver.abyss.legacy-layout-v1=1` impede repetir a migração e preserva
+  escolhas feitas depois dela. Fundos continuam sendo ativados somente quando
+  a preferência local da conta está ausente, inclusive após login.
 
 O tema exige base Dark. A aplicação pela API privada configura Dark e a ordem
 da home recomendada pelo upstream, preservando os valores anteriores em recibo
-privado e os demais campos. O bootstrap acima modifica apenas defaults locais
-ausentes; voltar à imagem original não remove essas preferências do navegador.
+privado e os demais campos. A `r5` mantém o CSS e o import Branding da `r4`, sem
+reaplicar preferências às 18 contas; muda a imagem e a URL versionada do bootstrap.
+Voltar à imagem anterior não remove layout, marcador ou fundos do navegador.
+
+A `r4` inicializava somente layouts ausentes: um navegador já configurado como
+`modern` conservava o cabeçalho anterior. A `r5` está implantada: o aceite
+conferiu Modern → desktop Legacy e Auto → mobile Legacy, marcador `1` e
+preservação de uma escolha Modern posterior ao recarregar. Fontes, Spotlight,
+backdrop e login/logout passaram nos dois contextos, sem erros de página.
 O upstream declara testes com Jellyfin 12.1; o uso em 12.2 exige validação no
 navegador. Testes locais de empacotamento e JavaScript não comprovam reprodução,
 renderização, isolamento de rede ou aceitação no servidor.

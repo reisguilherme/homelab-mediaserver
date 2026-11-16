@@ -3,8 +3,8 @@
 ## Atualização operacional — 16/11/2026
 
 O proprietário retomou a [integração Abyss](../../runbooks/abyss.md) no Jellyfin
-12.2, com fontes locais e apresentação próxima aos previews upstream. O pacote
-final `r4` está implantado e validado, incluindo a transparência limitada à
+12.2, com fontes locais e apresentação próxima aos previews upstream. A revisão
+`r4` foi implantada e testada em contextos novos, incluindo a transparência limitada à
 home para revelar o backdrop difuso.
 As preferências visuais das 18 contas foram aplicadas e conferidas, preservando
 os valores anteriores privadamente. Login comum, Spotlight, detalhes e frames
@@ -18,6 +18,20 @@ moveram os carrosséis mantendo a página desktop em `scrollX=0`; o clip da raiz
 Treze checks internos pela edge passaram para assets e bloqueios; não atestam
 WAN/TLS. Mídia RO, guards, limite de 3 GiB, transcode no SSD e contenção de scans
 permanecem. Código e documentação da integração estão na branch `refactor`.
+
+Uma conferência posterior reproduziu o cabeçalho anterior em navegador com
+`layout=modern`: a `r4` somente inicializava layouts ausentes. A correção `r5`
+está implantada com migração única para Legacy, marcador persistente e
+preservação de TV, Legacy, valores desconhecidos e escolhas futuras. Desktop
+1910×1000 com Modern salvo e Android 390×844 com Auto salvo migraram; ambos
+preservaram uma escolha Modern posterior ao recarregar. Login/logout,
+Spotlight, fontes locais, backdrop e home passaram sem erros de página, com
+cabeçalho Legacy alinhado ao preview. CSS/import Branding `r4` e preferências
+das 18 contas não mudam. Saúde, rootfs RO, mounts, limite de 3 GiB e guard foram
+conferidos. A regressão final de playback passou em login, Spotlight, detalhes,
+vídeo 1080p, saída do backdrop fora da home e logout, sem erros de página;
+a tela reduzida para 390×844 ficou sem overflow horizontal. A correção e sua
+documentação acompanham a branch `refactor`.
 
 O core mantém **oito processos nativos vivos**: Sonarr, Radarr, Prowlarr,
 Bazarr, Seerr, integration-proxy, qBittorrent e monitor. API, download gateway

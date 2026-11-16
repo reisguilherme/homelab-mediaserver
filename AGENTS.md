@@ -30,12 +30,20 @@ com subpasta RW e marcador de UUID RO no container; não retornar ao tmpfs
 provisório nem aceitar fallback sem o mount. O limite de memória continua
 em 3 GiB. As 18 senhas foram redefinidas e testadas por login/logout; a relação
 fica somente no Windows privado, sem nomes ou credenciais no Git. Em 16/11, o
-proprietário retomou Abyss, com fontes locais,
-defaults Legacy somente quando ausentes e home ajustada nas 18 contas. Login,
+proprietário retomou Abyss, com fontes locais e home ajustada nas 18 contas. Login,
 Spotlight, detalhes e vídeo passaram em desktop/celular com toque, assim como
 13 checks do proxy interno. Busca passou; setas e roda dos carrosséis mantêm a
-página desktop sem deslocamento lateral. O pacote final `r4`, com backdrop
-difuso restrito à home, está implantado e validado em desktop e Android com toque.
+página desktop sem deslocamento lateral. A `r4`, com backdrop difuso restrito
+à home, passou nos contextos desktop e Android com toque usados no aceite.
+Um navegador já configurado como Modern preservou o cabeçalho anterior na `r4`.
+A `r5` está implantada com migração local única para Legacy, marcada por
+`homeserver.abyss.legacy-layout-v1=1`, preservando TV/Legacy/valores desconhecidos
+e escolhas futuras. Modern salvo no desktop e Auto salvo no Android migraram;
+uma escolha Modern posterior sobreviveu ao reload nos dois contextos. Login,
+home, fontes, Spotlight, backdrop e logout passaram sem erros de página.
+Manter CSS/Branding `r4` e não reaplicar preferências das 18 contas. Backdrops
+só são ativados quando ausentes. A regressão final de playback passou, incluindo
+detalhes, vídeo 1080p e remoção do backdrop fora da home, sem erros de página.
 Esse aceite não comprova WAN/TLS.
 Consulte `docs/runbooks/abyss.md`; o adiamento anterior é histórico.
 A lease obrigatória de storage de até 45 segundos está implantada; expiração,
