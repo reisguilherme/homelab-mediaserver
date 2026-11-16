@@ -154,7 +154,7 @@ def test_networks_and_private_ports_do_not_publish_native_qbit_or_gateway():
     assert config["networks"]["egress"]["internal"] is False
     for role, service in config["services"].items():
         assert set(service["networks"]) == (
-            {"core"} if role in {"qbit-monitor", "download-gateway"} else {"core", "egress"})
+            {"core"} if role == "download-gateway" else {"core", "egress"})
         for port in service.get("ports", []):
             assert port["host_ip"] == "${CORE_BIND_IP:?literal private VM address required}"
             assert port["protocol"] == "tcp"
@@ -166,6 +166,15 @@ def test_networks_and_private_ports_do_not_publish_native_qbit_or_gateway():
     assert proxy["ports"][0]["published"] == "18080"
     assert proxy["ports"][0]["target"] == 8080
     assert set(mounts(proxy)) == {"/etc/caddy/Caddyfile"}
+
+
+def test_published_ports_have_a_network_where_docker_installs_port_bindings():
+    config = manifest()
+    for role, service in config["services"].items():
+        if service.get("ports"):
+            assert any(not config["networks"][name].get("internal", False)
+                       for name in service["networks"]), role
+    assert not config["services"]["qbittorrent"].get("ports")
 
 
 def test_seerr_integration_keeps_fixed_policy_factory_without_state_or_private_env():

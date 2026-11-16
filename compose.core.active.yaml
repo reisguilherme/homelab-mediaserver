@@ -456,7 +456,7 @@ services:
   qbit-monitor:
     <<: *core-base
     image: sha256:${CORE_QBIT_MONITOR_IMAGE_ID:?verified final image ID required}
-    networks: [core]
+    networks: [core, egress]
     entrypoint: [/usr/bin/env, -i, PATH=/usr/bin:/bin, HOME=/config,
                  XDG_CONFIG_HOME=/config, XDG_DATA_HOME=/data, /usr/bin/caddy]
     command: [run, --config, /etc/caddy/Caddyfile, --adapter, caddyfile]
