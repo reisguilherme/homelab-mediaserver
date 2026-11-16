@@ -11,6 +11,14 @@ caminhos, portas e redes internas têm defaults no código e no Compose. CPU é
 o padrão, com [Intel UHD opcional](docs/runbooks/jellyfin-hardware.md).
 CYD, MQTT exclusivo, CI/CD, releases próprias e backup do serviço foram retirados.
 
+Na migração para Proxmox, o consumidor Jellyfin tem um
+[Compose independente](compose.playback.yaml) e um
+[runbook de restauração e playback NFS RO](docs/runbooks/playback-nfs.md).
+Esse caminho preserva catálogo e usuários, mantém scans suspensos durante a
+consolidação e usa a infraestrutura do
+[homelab-platform](https://github.com/reisguilherme/homelab-platform/tree/refactor).
+As instruções do monólito abaixo não devem ser usadas para iniciar as novas VMs.
+
 ```mermaid
 flowchart LR
   S[Pedido no Seerr] --> W[Worker]

@@ -9,9 +9,9 @@ configuração, seus testes e runbooks. Nenhuma implantação é acionada pelo G
 
 O [contrato](../platform.contract.json) descreve **somente o exporter privado de
 métricas**, implantável pelo [Compose independente](../compose.observability.yaml).
-Não certifica o Compose principal, sua administração, Jellyfin somente leitura
-ou isolamento entre core e playback. Esses componentes ainda precisam dos
-manifests segregados e de contratos próprios antes do aceite do to-be.
+Não certifica o Compose principal, sua administração ou isolamento entre core e
+playback. Jellyfin tem uma unidade própria descrita abaixo; os demais serviços
+ainda precisam de manifests segregados e de contratos antes do aceite do to-be.
 
 `runtime: compose-vm` descreve o destino previsto. A primeira integração também
 pode ser ensaiada no daemon Docker atual, em janela autorizada. Não há VM criada
@@ -31,6 +31,23 @@ Sua ativação e a publicação opt-in são descritas no
 [guia de observabilidade](observability.md). A rede Docker não atravessa VMs;
 endereçamento, autenticação e firewall entre guests exigem outra etapa.
 
+## Unidade de playback
+
+[platform.playback.contract.json](../platform.playback.contract.json) descreve o
+Jellyfin privado da VM playback, por
+[compose.playback.yaml](../compose.playback.yaml). Solicita 4 vCPUs, 3 GiB de RAM,
+estado/cache locais e visão NFS somente leitura. Usa o mesmo schema v1 fixado no
+lock. Estado e cache têm orçamento, sem quota de filesystem; a mídia é uma visão
+compartilhada, sem nova reserva física. O tmpfs de transcode é limitado a 512 MiB
+dentro da memória do container. A porta 8096 reúne aplicação e administração,
+ambas privadas nesta etapa; a edge continua fechada.
+
+O [runbook](runbooks/playback-nfs.md) registra restauração, contenção de scans,
+guards e evidências de execução. A plataforma controla mount/export e eventual
+recuperação física; o consumidor recusa condições incompatíveis e encerra seu
+processo quando a identidade da montagem muda. Isso não é recuperação USB.
+Métricas nativas ainda estão desabilitadas; healthcheck não atesta reprodução.
+
 ## Versão e validação
 
 [platform.lock.json](../platform.lock.json) fixa o repositório, commit e schema
@@ -43,13 +60,16 @@ revisada, sem download ou execução automáticos. Para validar:
 
    ```bash
    uv run python scripts/validate.py service /caminho/do/homelab-mediaserver/platform.contract.json
+   uv run python scripts/validate.py service /caminho/do/homelab-mediaserver/platform.playback.contract.json
    ```
 
 3. Revisar o Compose e testar os recursos reais na janela autorizada. Validação
    JSON não aplica ACL, não verifica conectividade, não reserva capacidade e não
    comprova conformidade operacional.
 
-A plataforma registra este consumidor por commit imutável e estado `proposed`.
+A plataforma registra as unidades por commit imutável: `media-metrics` permanece
+`proposed`; `media-playback` recebe `deployed` após o aceite privado descrito no
+runbook. Esse estado não certifica entrada pública, GPU ou recuperação USB.
 O catálogo é atualizado depois do commit do consumidor; o lock do consumidor
 fixa uma versão anterior compatível do schema. Assim não há ciclo de commits
 que precisem referenciar seus próprios hashes futuros. Evoluções do contrato

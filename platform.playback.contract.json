@@ -1,0 +1,33 @@
+{
+  "apiVersion": "homelab/v1",
+  "id": "media-playback",
+  "repository": "https://github.com/reisguilherme/homelab-mediaserver",
+  "runtime": "compose-vm",
+  "resources": {"cpu": 4, "memoryMiB": 3072, "gpu": "none"},
+  "network": {
+    "administration": "private",
+    "inheritPlatformPrivileges": false,
+    "exposure": "private",
+    "ingress": [{"port": 8096, "protocol": "tcp", "scope": "private", "purpose": "application"}],
+    "egress": [
+      {"dependency": "core-media-nfs", "port": 2049, "protocol": "tcp"},
+      {"dependency": "public-dns", "port": 53, "protocol": "udp"},
+      {"dependency": "public-dns", "port": 53, "protocol": "tcp"},
+      {"dependency": "public-https", "port": 443, "protocol": "tcp"},
+      {"dependency": "public-http", "port": 80, "protocol": "tcp"}
+    ]
+  },
+  "storage": [
+    {"id": "jellyfin-state", "mountPath": "/config", "kind": "local-block", "access": "rw", "purpose": "database", "requestedGiB": 16},
+    {"id": "jellyfin-cache", "mountPath": "/cache", "kind": "local-block", "access": "rw", "purpose": "cache", "requestedGiB": 8},
+    {"id": "hub-media", "mountPath": "/data/media", "kind": "network-share", "access": "ro", "purpose": "media", "requestedGiB": 16384}
+  ],
+  "telemetry": {"metricsPath": null, "healthcheckPath": "/jellyfin/health", "healthcheckPort": 8096},
+  "secrets": [],
+  "recovery": {
+    "authority": "platform",
+    "runbookPath": "docs/runbooks/playback-nfs.md",
+    "requiresStorageReady": true,
+    "preserveOperatorPauses": true
+  }
+}

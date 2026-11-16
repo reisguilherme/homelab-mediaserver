@@ -6,6 +6,17 @@ entrada pública separados. Use exclusivamente
 [`compose.playback.yaml`](../../compose.playback.yaml); o Compose da raiz depende
 do monólito e não participa deste corte.
 
+O [contrato de playback](../../platform.playback.contract.json) usa o schema
+fixado pelo [lock da plataforma](../../platform.lock.json). A porta privada
+8096 atende aplicação e administração nativa. NFS é uma dependência do guest;
+o container recebe o bind já montado. Os 16/8 GiB de estado/cache são orçamentos,
+sem quotas individuais aplicadas; os 16 TiB de mídia representam a visão
+compartilhada solicitada, sem reservar novamente o espaço físico. `/transcode`
+é tmpfs de 512 MiB dentro do limite de memória e não está representado como
+disco no schema v1. Credenciais de usuários permanecem no estado nativo
+restaurado; nenhum segredo é injetado por este manifest. Métricas ainda não
+estão habilitadas. Validar o contrato não concede acesso nem comprova deploy.
+
 ## Contrato de execução
 
 | Origem na playback | Caminho no container | Uso |
@@ -20,7 +31,10 @@ O processo usa UID/GID 1000, filesystem da imagem somente leitura, sem
 capabilities, com limite de 3 GiB de memória, 4 vCPUs e 256 processos. O tmpfs
 consome memória dentro desse orçamento. Os 512 MiB de transcode são um limite
 inicial para aceite; não comprovam capacidade para dez reproduções simultâneas.
-GPU e transcodificação acelerada continuam sem aceite.
+GPU e transcodificação acelerada continuam sem aceite. Na cópia de trabalho,
+`HardwareAccelerationType=none` e `EnableHardwareEncoding=false` substituem o
+QSV antigo; `TranscodingTempPath=/transcode`, throttling e descarte de segmentos
+mantêm a saída temporária no tmpfs previsto. A configuração original é preservada.
 
 Os caminhos `/data/media/movies` e `/data/media/tv` preservam os caminhos do
 catálogo. O export do core é somente leitura também no servidor NFS; backup,
@@ -90,8 +104,9 @@ documentação genérica de versões anteriores com a lista efetiva da imagem.
 
 A entrada NFS da playback permanece `noauto`: iniciar o Compose não monta o
 export. A plataforma deve estabelecer a montagem e a ordem de inicialização no
-guest antes do Docker. O drop-in da unit Docker existente ainda precisa de aceite;
-não há nova unit no host Proxmox nesta etapa.
+guest antes do Docker. O drop-in da unit Docker existente usa `RequiresMountsFor`,
+`BindsTo` e `After` para solicitar a montagem mesmo com `noauto`. O retorno após
+reboot da VM foi conferido nesta etapa; não há nova unit no host Proxmox.
 
 Configure `.env.playback`, privado e ignorado pelo Git. Os endereços seguintes
 são exclusivamente exemplos de documentação; substitua-os pelo handoff privado:
@@ -115,30 +130,57 @@ O guard compara mountinfo do guest e do container: origem, raiz do export,
 NFSv4.2, TCP, `hard`, modo RO e dispositivo devem coincidir. Recusa mounts ausentes,
 divergentes ou montagens adicionais dentro da mídia. Depois do início, verifica
 a identidade a cada cinco segundos e encerra Jellyfin se ela mudar. O healthcheck
-também verifica o guard e `/health`; uma resposta HTTP não prova login ou vídeo.
+também verifica o guard e `/jellyfin/health`, exigindo o corpo `Healthy`; uma
+resposta HTTP não prova login ou vídeo. O base URL anterior `/jellyfin` é mantido.
 
 A porta 8096 está vinculada ao endereço privado da VM, sujeita ao firewall da
 plataforma. Administração é privada; a edge continua fechada. Não abra a porta
 no roteador nem publique o acesso administrativo nativo para cumprir este aceite.
 
-## Aceite runtime pendente
+## Aceite desta etapa — 15/11/2026
 
 Já verificado nesta etapa: imagem Jellyfin 12.2 amd64 no digest fixado baixada na
-VM; 68 testes focados passaram e `make lint` passou. Fixtures Docker reais
+VM; 75 testes focados passaram e `make lint` passou. Fixtures Docker reais
 confirmaram mount NFS válido, recusa sem mount ou com origem divergente,
 preservação do exit code 7 do processo filho e parada do filho quando a visão
 simulada do mountinfo do guest perde a montagem. Esses testes não desligaram o HD.
 
-A restauração seletiva do checkpoint final está em execução. Ainda não registrar
-esta etapa como deploy concluído. O aceite do serviço restaurado deve registrar:
+A restauração seletiva terminou no core e na playback: 32.777 arquivos,
+25.497 diretórios e 12.944.183.365 bytes, com hashes e metadados conferidos.
+A transferência intermediária teve SHA-256 integral conferido; isso não é uma
+nova leitura integral do tar original de todos os serviços. A referência e o
+checkpoint original foram preservados; a configuração preparada é outra cópia.
 
-- Recibo de restauração, SQLite e contenção offline conferidos.
-- Versão/digest, mounts RO e diretórios locais confirmados no container efetivo.
-- Login autenticado e leitura de bibliotecas, com realtime desativado e tarefas
-  em `Idle`, `Triggers=[]`, sem scan automático nos logs.
-- Catálogo, usuários, coleções, playlists e histórico comparados com a referência.
-- Reinício e ordem mount/Docker verificados; leitura de mídia separada de um
-  teste efetivo de reprodução.
+- SQLite passou no `quick_check`. Após início e reboot, coincidiram os hashes
+  das colunas de identidade/caminho/tipo/nome/parentesco de 32.373 `BaseItems` e
+  de todas as colunas de 18 `Users`, 807 `UserData`, 432 `Permissions` e
+  234 `Preferences`. Isso cobre a referência comparada, sem certificar que
+  todo arquivo do catálogo já está presente no HD de destino.
+- Jellyfin 12.2.0 saudável, mídia RO, root filesystem RO, UID/GID 1000, recursos
+  e binds conferidos no container. Plugins restaurados continuam em quarentena.
+- Autenticação com chave de API existente passou; identidade do servidor
+  preservada, três bibliotecas com realtime desativado e 20 tarefas em `Idle`,
+  `Triggers=[]`. Nenhum erro ou execução de scan apareceu nos logs inspecionados.
+- Uma mídia existente respondeu HTTP 206 com 64 KiB idênticos ao arquivo NFS;
+  ffmpeg decodificou três segundos/72 frames em CPU, sem saída na mídia e sem
+  alterar `UserData`. Isso não é teste de transcode completo, cliente externo
+  ou dez streams simultâneos.
+- Reboot gracioso da playback confirmado por mudança de boot ID; NFS RO,
+  Docker e Jellyfin retornaram automaticamente. Autenticação, agendas e hashes
+  do catálogo foram novamente conferidos. O core alcança o healthcheck; a edge
+  permanece sem acesso às portas de playback.
+- A interface web respondeu pelo túnel SSH em loopback do computador do
+  proprietário. Login interativo com senha e reprodução em navegador/TV não
+  foram testados. O túnel depende da sessão SSH e não publica o serviço.
+
+Os scripts privados usam `Authorization: MediaBrowser Token="..."` para a
+API 12.2; o cabeçalho legado retornou 401. O arquivo original `device.txt`
+contém BOM UTF-8 e foi comparado sem alterar seus bytes. Recibos, hashes,
+logs, endereços e dados de autenticação permanecem no handoff privado.
+
+O deploy aceito é exclusivamente o consumidor privado de playback. Arr,
+workers, GPU, entrada pública, consolidação restante e recuperação física
+do HD continuam pendentes. Não execute scan global durante essa transição.
 
 ## Falhas e reversão
 

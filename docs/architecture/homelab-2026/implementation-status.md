@@ -37,10 +37,66 @@ SSD de mídia com o mesmo UUID ext4, sem montagem; ainda não havia VMs ou
 aplicações iniciadas. Depois, core, playback e edge foram criadas com Ubuntu,
 e os testes de rede, autostart ordenado e reboot foram aceitos. O core passou
 a exportar mídia NFS RO para playback, com leitura e negações de escrita
-testadas. Restauração, aplicações e recuperação USB automática continuam
-pendentes; essa base não comprova prontidão da mídia. O
-[estado canônico da plataforma](https://github.com/reisguilherme/homelab-platform/blob/refactor/docs/implementation-status.md#storage-no-core-e-nfs-ro)
+testadas. Depois, a restauração selecionada da configuração e do cache do
+Jellyfin foi concluída no core e na playback, conforme a etapa abaixo. A
+recuperação USB automática e a retomada da automação continuam pendentes. O
+[estado canônico da plataforma](https://github.com/reisguilherme/homelab-platform/blob/refactor/docs/implementation-status.md#jellyfin-na-playback)
 registra o alcance das verificações e os limites restantes.
+
+## Jellyfin isolado na playback — 15/11/2026
+
+O [Compose de playback](../../../compose.playback.yaml) separa Jellyfin 12.2
+da stack de automação. A imagem foi instalada na VM playback com o digest
+original conferido e iniciou saudável, com HTTP privado na porta 8096. A
+mídia chega do core por NFS RO e permanece somente leitura no container;
+configuração e cache usam o SSD virtual da playback.
+Arr, qBittorrent, controlador e workers não foram iniciados. A edge continua
+sem publicação, e o HD de 18 TB e o backup final foram preservados.
+
+A restauração selecionada conferiu **32.777 arquivos regulares, 25.497
+diretórios e 12.944.183.365 bytes** de configuração e cache, com hashes de
+conteúdo e metadados verificados no core e na playback. A transferência entre
+as VMs também foi conferida por hash. Isso não constitui restauração integral
+do checkpoint nem prova global do acervo. O estado restaurado de referência
+permanece separado da cópia de trabalho usada pela aplicação.
+
+O preparo offline desabilitou as agendas nativas e o monitoramento em tempo
+real e separou os plugins enquanto apenas parte do acervo está acessível.
+A API autenticada confirmou 20 tarefas ociosas sem gatilhos e três bibliotecas
+sem monitoramento em tempo real. Não houve erros nem execução de scans nos
+logs examinados. A configuração de playback usa processamento por CPU, sem
+passthrough de GPU, e transcode temporário limitado a 512 MiB. Esse limite
+não dimensiona dez reproduções simultâneas.
+
+O guard recusa iniciar com mount ausente, estranho ou gravável e encerra o
+processo se a identidade do mount mudar. O drop-in da unit Docker existente
+na VM exige o mount NFS antes de iniciar. Mount NFS `hard` ainda registrado
+pode bloquear I/O após falha do HD; esses guards não demonstram detecção nem
+reintegração automática do USB.
+
+O SQLite passou na verificação de integridade, e os hashes do estado comparado
+coincidiram com a referência: 32.373 itens de catálogo, 18 usuários, 807
+registros de histórico, 432 permissões e 234 preferências. A identidade original
+do servidor foi preservada. No catálogo, a comparação cobriu identificação,
+tipo, nome, hierarquia e caminho dos itens; não se declara hash de toda a base.
+
+Uma requisição autenticada de mídia retornou HTTP `206`; os 64 KiB recebidos
+coincidiram por hash com a leitura NFS. A decodificação por CPU processou três
+segundos e 72 frames, sem alteração do histórico. A autenticação usou uma
+chave API existente; login interativo por senha e reprodução em cliente externo
+não foram testados.
+
+O reboot da playback mudou o boot ID e trouxe o mount NFS RO automaticamente
+pela dependência do Docker, mantendo `noauto` no `fstab`. Docker voltou ativo e
+Jellyfin saudável, com contador de reinícios do container em zero. Identidade,
+catálogo, usuários, histórico e contenção de scans foram conferidos novamente,
+com os mesmos hashes e sem erros nos logs examinados. A saúde HTTP respondeu
+ao core; conexões da edge às portas 8096 e 18096 continuaram negadas. Esse teste
+não simula queda de energia do HD nem valida recuperação física do USB.
+
+O [runbook de playback](../../runbooks/playback-nfs.md) registra os procedimentos
+e o alcance da evidência. A publicação WAN, GPU, consolidação do acervo e
+retomada da automação continuam fora desta entrega.
 
 ## Estado observado por SSH em 14/11/2026
 

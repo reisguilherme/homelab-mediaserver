@@ -32,9 +32,9 @@
 
 **Interfaces:** recebe `PLAYBACK_NFS_SOURCE`, mountinfo do host em `/run/host-mountinfo`, mídia em `/data/media`; executa o comando Jellyfin somente após validar ambos os mounts. O modo `--check` só valida, sem iniciar processos.
 
-- [ ] Escrever e executar testes negativos para mount ausente, fonte errada, subtree, RW, troca de device e saída do filho; observar RED.
-- [ ] Implementar validação e supervisão POSIX, Compose independente com binds explícitos e proteção de recursos; observar GREEN em Linux.
-- [ ] Conferir o Compose renderizado e registrar commit.
+- [x] Escrever e executar testes negativos para mount ausente, fonte errada, subtree, RW, troca de device e saída do filho; observar RED.
+- [x] Implementar validação e supervisão POSIX, Compose independente com binds explícitos e proteção de recursos; observar GREEN em Linux.
+- [x] Conferir o Compose renderizado e registrar commit.
 
 ### Task 2: Restauração seletiva e contenção
 
@@ -42,19 +42,23 @@
 
 **Interfaces:** configuração restaurada inativa, manifesto e arquivo de checkpoint; nenhuma escrita no backup. Preparador offline altera apenas a cópia de trabalho e produz resumo sem credenciais.
 
-- [ ] Testar XML/JSON inválidos, symlinks, realtime e agendas; observar RED antes da implementação.
-- [ ] Identificar versão, mounts e arquivos selecionados; verificar hash, tipos e links no staging novo.
-- [ ] Verificar SQLite, copiar para diretórios finais vazios e aplicar contenção offline.
-- [ ] Instalar Docker na playback e conferir imagem/versão, binds RO e ausência de dependências do monólito.
+- [x] Testar XML/JSON inválidos, symlinks, realtime e agendas; observar RED antes da implementação.
+- [x] Identificar versão, mounts e arquivos selecionados; verificar hash, tipos e links no staging novo.
+- [x] Verificar SQLite, copiar para diretórios finais vazios e aplicar contenção offline.
+- [x] Instalar Docker na playback e conferir imagem/versão, binds RO e ausência de dependências do monólito.
 
 ### Task 3: Aceite e publicação
 
 **Files:** runbook anterior, status dos dois repositórios e contrato de playback da plataforma.
 
-- [ ] Iniciar em rede privada; verificar readiness autenticada, tarefas, bibliotecas, contagens e logs.
-- [ ] Testar recusa de startup sem mount usando fixture isolada; verificar comportamento real de NFS e reinício sem apagar acervo.
-- [ ] Verificar leitura de mídia e limites de reprodução; separar evidência de HTTP de teste real de vídeo.
-- [ ] Revisão independente, checks relevantes, publicação não forçada em `refactor` e confirmação remota.
+- [x] Iniciar em rede privada; verificar readiness autenticada, tarefas, bibliotecas, contagens e logs.
+- [x] Testar recusa de startup sem mount usando fixture isolada; verificar comportamento real de NFS e reinício sem apagar acervo.
+- [x] Verificar leitura de mídia e limites de reprodução; separar evidência de HTTP de teste real de vídeo.
+- [x] Revisão independente e checks relevantes antes da publicação.
+
+O fechamento exige publicação não forçada em `refactor` e confirmação do hash
+remoto. Os recibos da execução registram esses hashes; o catálogo da plataforma
+fixa o commit publicado do consumidor, sem referências circulares.
 
 ## Decisões operacionais
 

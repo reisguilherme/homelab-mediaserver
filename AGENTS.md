@@ -1,5 +1,17 @@
 # HomeServer — guia do agente
 
+## Migração para Proxmox
+
+A etapa atual de playback usa somente `compose.playback.yaml`, conforme o
+[runbook NFS](docs/runbooks/playback-nfs.md). Nesse destino, o proprietário
+determinou mídia somente leitura; a regra histórica de Jellyfin RW abaixo
+descreve o monólito anterior. Não iniciar o Compose monolítico nas novas VMs.
+Preservar os gatilhos de scan suspensos enquanto o acervo estiver parcial.
+Storage físico/exports e coordenação USB pertencem à plataforma; o consumidor
+verifica mounts e contém sua aplicação. Não interpretar mount presente como
+saúde física ou recuperação automática. Backup, cópias de referência e estado
+privado ficam fora do Git.
+
 Projeto pessoal executado pelo `compose.yaml` da raiz. Parâmetros de comportamento
 e credenciais ficam no `.env` privado; defaults técnicos ficam no código/Compose.
 
