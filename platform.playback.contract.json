@@ -20,6 +20,7 @@
   "storage": [
     {"id": "jellyfin-state", "mountPath": "/config", "kind": "local-block", "access": "rw", "purpose": "database", "requestedGiB": 16},
     {"id": "jellyfin-cache", "mountPath": "/cache", "kind": "local-block", "access": "rw", "purpose": "cache", "requestedGiB": 8},
+    {"id": "jellyfin-transcode", "mountPath": "/transcode", "kind": "local-block", "access": "rw", "purpose": "cache", "requestedGiB": 32},
     {"id": "hub-media", "mountPath": "/data/media", "kind": "network-share", "access": "ro", "purpose": "media", "requestedGiB": 16384}
   ],
   "telemetry": {"metricsPath": null, "healthcheckPath": "/jellyfin/health", "healthcheckPort": 8096},

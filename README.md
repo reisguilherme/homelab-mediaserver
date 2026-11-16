@@ -18,6 +18,14 @@ Esse caminho preserva catálogo e usuários, mantém scans suspensos durante a
 consolidação e usa a infraestrutura do
 [homelab-platform](https://github.com/reisguilherme/homelab-platform/tree/refactor).
 As instruções do monólito abaixo não devem ser usadas para iniciar as novas VMs.
+O transcode usa um disco SSD virtual dedicado de 32 GiB, mantendo mídia RO e
+limite de 3 GiB de RAM no container. Um transcode curto por CPU e login/logout
+das 18 contas após redefinição de senha passaram; as credenciais ficam somente
+no Windows privado. A lease obrigatória foi testada para expiração e HOLD,
+preservando parada manual; reboot com SSD e guard passou, recusando a lease do boot anterior. A readmissão exige
+prova nova e ação explícita; reboot do Proxmox pede auditoria do estado, sem
+promessa de retorno integral desassistido. GPU, recuperação física USB, entrada pública, Arr e
+consolidação continuam pendentes; Abyss permanece adiado.
 
 ```mermaid
 flowchart LR

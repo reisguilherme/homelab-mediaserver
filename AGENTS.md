@@ -12,6 +12,18 @@ verifica mounts e contém sua aplicação. Não interpretar mount presente como
 saúde física ou recuperação automática. Backup, cópias de referência e estado
 privado ficam fora do Git.
 
+Transcode usa ext4 no disco virtual dedicado de 32 GiB em `/srv/transcode`,
+com subpasta RW e marcador de UUID RO no container; não retornar ao tmpfs
+provisório nem aceitar fallback sem o mount. O limite de memória continua
+em 3 GiB. As 18 senhas foram redefinidas e testadas por login/logout; a relação
+fica somente no Windows privado, sem nomes ou credenciais no Git. Abyss adiado.
+A lease obrigatória de storage de até 45 segundos está implantada; expiração,
+`HOLD` e preservação de parada manual foram testados. `resume` exige ação
+explícita e prova nova; não confundir retomada permitida por `unless-stopped`
+com remoção de parada manual pelo Docker. Reboot com SSD e guard passou, incluindo
+recusa da lease do boot anterior; após reboot do Proxmox, auditar o estado antes de readmitir. Não prometer
+retorno integral desassistido. GPU e reintegração física USB seguem pendentes.
+
 Projeto pessoal executado pelo `compose.yaml` da raiz. Parâmetros de comportamento
 e credenciais ficam no `.env` privado; defaults técnicos ficam no código/Compose.
 

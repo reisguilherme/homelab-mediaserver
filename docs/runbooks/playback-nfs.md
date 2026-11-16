@@ -12,9 +12,10 @@ fixado pelo [lock da plataforma](../../platform.lock.json). A porta privada
 o container recebe o bind já montado. Os 16/8 GiB de estado/cache são orçamentos,
 sem quotas individuais aplicadas; os 16 TiB de mídia representam a visão
 compartilhada solicitada, sem reservar novamente o espaço físico. `/transcode`
-é tmpfs de 512 MiB dentro do limite de memória e não está representado como
-disco no schema v1. Credenciais de usuários permanecem no estado nativo
-restaurado; nenhum segredo é injetado por este manifest. Métricas ainda não
+usa agora um disco virtual dedicado de 32 GiB em SSD; o tmpfs de 512 MiB foi
+somente o perfil inicial. Credenciais permanecem no estado nativo, com a
+redefinição posterior registrada abaixo; nenhum segredo é injetado por este
+manifest. Métricas ainda não
 estão habilitadas. Validar o contrato não concede acesso nem comprova deploy.
 
 ## Contrato de execução
@@ -25,16 +26,19 @@ estão habilitadas. Validar o contrato não concede acesso nem comprova deploy.
 | `/srv/appdata/jellyfin-cache` | `/cache` | Cache restaurado explicitamente, escrita |
 | `/srv/media-view/media` | `/data/media` | NFSv4.2 `hard`, TCP, somente leitura |
 | `/proc/1/mountinfo` | `/run/host-mountinfo` | Observação das montagens do guest, leitura |
-| tmpfs | `/transcode` | Temporário limitado a 512 MiB |
+| `/srv/transcode/data` | `/transcode` | Temporário RW em disco ext4 dedicado de 32 GiB |
+| `/srv/transcode/.homelab-volume-id` | `/run/transcode-volume-id` | Marcador de identidade, somente leitura |
+| `/var/lib/homelab-storage/admission` | `/run/storage-admission` | Lease de storage publicada pela plataforma, leitura |
+| `/proc/sys/kernel/random/boot_id` | `/run/guest-boot-id` | Identidade do boot do guest, leitura |
 
 O processo usa UID/GID 1000, filesystem da imagem somente leitura, sem
-capabilities, com limite de 3 GiB de memória, 4 vCPUs e 256 processos. O tmpfs
-consome memória dentro desse orçamento. Os 512 MiB de transcode são um limite
-inicial para aceite; não comprovam capacidade para dez reproduções simultâneas.
+capabilities, com limite de 3 GiB de memória, 4 vCPUs e 256 processos. Esse
+limite de RAM não mudou com o disco de transcode. O espaço útil do ext4 é
+menor que os 32 GiB nominais; a alocação não comprova dez reproduções simultâneas.
 GPU e transcodificação acelerada continuam sem aceite. Na cópia de trabalho,
 `HardwareAccelerationType=none` e `EnableHardwareEncoding=false` substituem o
 QSV antigo; `TranscodingTempPath=/transcode`, throttling e descarte de segmentos
-mantêm a saída temporária no tmpfs previsto. A configuração original é preservada.
+mantêm a saída temporária no SSD dedicado. A configuração original é preservada.
 
 Os caminhos `/data/media/movies` e `/data/media/tv` preservam os caminhos do
 catálogo. O export do core é somente leitura também no servidor NFS; backup,
@@ -105,8 +109,10 @@ documentação genérica de versões anteriores com a lista efetiva da imagem.
 A entrada NFS da playback permanece `noauto`: iniciar o Compose não monta o
 export. A plataforma deve estabelecer a montagem e a ordem de inicialização no
 guest antes do Docker. O drop-in da unit Docker existente usa `RequiresMountsFor`,
-`BindsTo` e `After` para solicitar a montagem mesmo com `noauto`. O retorno após
-reboot da VM foi conferido nesta etapa; não há nova unit no host Proxmox.
+`BindsTo` e `After` para solicitar a montagem mesmo com `noauto`. O retorno
+automático foi conferido no perfil inicial, antes da lease obrigatória.
+Não há nova unit no host Proxmox. Com o guard atual, montar storage e iniciar
+Docker não dispensa readmissão explícita; o ensaio posterior com SSD e lease passou.
 
 Configure `.env.playback`, privado e ignorado pelo Git. Os endereços seguintes
 são exclusivamente exemplos de documentação; substitua-os pelo handoff privado:
@@ -114,6 +120,7 @@ são exclusivamente exemplos de documentação; substitua-os pelo handoff privad
 ```dotenv
 PLAYBACK_NFS_SOURCE=192.0.2.10:/
 PLAYBACK_BIND_IP=192.0.2.20
+PLAYBACK_TRANSCODE_ID=UUID_DO_FILESYSTEM_TRANSCODE
 HOMESERVER_TIMEZONE=America/Sao_Paulo
 ```
 
@@ -133,11 +140,20 @@ a identidade a cada cinco segundos e encerra Jellyfin se ela mudar. O healthchec
 também verifica o guard e `/jellyfin/health`, exigindo o corpo `Healthy`; uma
 resposta HTTP não prova login ou vídeo. O base URL anterior `/jellyfin` é mantido.
 
+O guard de transcode também exige o mount ext4 RW esperado, a subárvore de
+dados, o dispositivo e o UUID indicado no marcador RO. A presença da pasta
+ou do marcador isoladamente não autoriza fallback para o disco do banco.
+`PLAYBACK_TRANSCODE_ID` deve conter o UUID real entregue pela plataforma.
+
 A porta 8096 está vinculada ao endereço privado da VM, sujeita ao firewall da
 plataforma. Administração é privada; a edge continua fechada. Não abra a porta
 no roteador nem publique o acesso administrativo nativo para cumprir este aceite.
 
-## Aceite desta etapa — 15/11/2026
+## Aceite inicial — 15/11/2026
+
+Este marco usou transcode provisório em tmpfs. A entrega posterior do SSD e
+a redefinição de senhas estão abaixo; os hashes de todas as colunas de `Users`
+descritos aqui antecedem a alteração deliberada das credenciais.
 
 Já verificado nesta etapa: imagem Jellyfin 12.2 amd64 no digest fixado baixada na
 VM; 75 testes focados passaram e `make lint` passou. Fixtures Docker reais
@@ -181,6 +197,80 @@ logs, endereços e dados de autenticação permanecem no handoff privado.
 O deploy aceito é exclusivamente o consumidor privado de playback. Arr,
 workers, GPU, entrada pública, consolidação restante e recuperação física
 do HD continuam pendentes. Não execute scan global durante essa transição.
+
+## Transcode em SSD e redefinição de acesso
+
+O proprietário autorizou um **novo disco virtual de 32 GiB em `local-lvm`**,
+conectado como `scsi1` somente à playback. Ele recebeu ext4 e foi montado por
+UUID em `/srv/transcode`; a raiz e o marcador de identidade pertencem a root,
+e `/srv/transcode/data` é gravável pelo UID 1000. O container recebe essa
+subpasta em `/transcode` RW e o marcador RO. A mídia permanece RO e o limite
+do container continua em **3 GiB de RAM**. Nenhum disco do acervo foi formatado.
+
+Os testes reais do guard aceitaram a identidade correta e recusaram mount
+ausente ou UUID divergente. A escrita como UID 1000 na área temporária e a
+proteção RO do marcador também passaram. Um transcode por CPU com `libx264`
+produziu **10,01 segundos em 720p**, em **1,149 segundo**, com **281.888 bytes**.
+Somente a saída de teste própria foi removida; `UserData` não mudou. Esse
+trecho curto não mede concorrência, reprodução em TV ou capacidade contínua.
+Um novo reboot confirmou o retorno do SSD por UUID e do NFS RO, com Docker ativo.
+O guard recusou a lease do boot anterior; a aplicação voltou saudável depois
+de prova nova e readmissão explícita. SQLite e os 807 registros originais de
+histórico permaneceram íntegros, preservando também as seis adições observadas.
+
+As **18 senhas** foram redefinidas pela API nativa para valores aleatórios,
+distintos e com dez caracteres. As 18 autenticações com senha nova e seus
+respectivos logouts passaram. As políticas permaneceram iguais, exceto três
+contadores `InvalidLoginAttemptCount` que voltaram naturalmente a zero após
+o login correto. Os hashes de **807 `UserData`, 432 `Permissions` e 234
+`Preferences`** permaneceram estáveis. Isso não afirma encerramento de todas
+as sessões históricas nem teste interativo de navegador/TV.
+
+Uma inspeção posterior encontrou **813 `UserData`**: os 807 registros originais
+continuavam idênticos, com seis novos registros observados enquanto a aplicação
+estava disponível. As adições foram preservadas, sem rollback. O teste ffmpeg
+acima tem sua própria comparação sem mudança; não atribuir a ele essas adições
+nem afirmar que o hash do conjunto atual ainda corresponde ao conjunto de 807.
+
+A relação em texto simples fica somente no Windows privado; nomes, senhas,
+tokens e seu caminho não entram na documentação pública. Abyss foi adiado
+pelo proprietário e não foi instalado. A inspeção somente leitura encontrou
+a iGPU Intel em grupo IOMMU isolado, mas não houve passthrough ou aceite de GPU.
+
+## Admissão obrigatória de storage
+
+A plataforma publica uma autorização temporária de storage no SSD da playback;
+o consumidor implantado a recusa quando ausente, inválida ou expirada. O prazo máximo
+é **45 segundos**, vinculado ao boot do guest. Mount presente não substitui
+essa autorização nem comprova saúde física do disco.
+
+Falhas entram em `HOLD`. A readmissão exige ação explícita de `resume` e prova
+nova do storage; a simples volta do HD não libera o consumidor. O coordenador
+não executa start, mas uma autorização nova pode permitir que a política
+Docker `unless-stopped` reinicie o serviço. Uma parada manual pelo Docker
+permanece respeitada.
+
+O consumidor iniciou saudável com lease obrigatória. Na expiração sintética,
+o filho recebeu TERM em **11,502 segundos**; esse tempo pertence ao ensaio,
+não é um RTO universal. O `HOLD` real deixou HTTP indisponível e nenhum processo
+Jellyfin ativo. No teste de pausa manual, `docker stop` permaneceu respeitado
+após a lease voltar a READY; somente um start explícito retomou a aplicação
+saudável. Nenhum desses testes desligou o HD.
+
+O supervisor usa o cron existente com janelas de **58 segundos**, deadline de
+probe de **15 segundos** e lease de até **45 segundos**. Uma janela inicial
+mais curta provocou HOLD indevido na passagem ao cron; a causa foi identificada
+e a cadência corrigida. Disputa de lock retorna código **75**: comando ocupado
+não é confirmação de `resume`; conferir o estado antes de repetir.
+
+**Reboot não significa retorno integral desassistido.** O guard recusa lease
+de outro boot; a retomada exige prova nova e readmissão explícita. O ensaio de
+reboot com SSD e lease passou, incluindo a recusa anterior à readmissão. Após reboot do host Proxmox, o
+operador deve auditar o estado do coordenador antes de readmitir, por desenho.
+
+Esse contrato não implica reintegração física do USB, reparo automático ou
+resolução de I/O preso em NFS `hard`. Preservar os guards de mount e a contenção
+de scans, sem anunciar recuperação automática.
 
 ## Falhas e reversão
 

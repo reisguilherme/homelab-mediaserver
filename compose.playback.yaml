@@ -17,6 +17,7 @@ services:
     environment:
       TZ: ${HOMESERVER_TIMEZONE:-America/Sao_Paulo}
       PLAYBACK_NFS_SOURCE: ${PLAYBACK_NFS_SOURCE:?NFS export required}
+      PLAYBACK_TRANSCODE_ID: ${PLAYBACK_TRANSCODE_ID:?transcode filesystem UUID required}
     ports:
       - host_ip: ${PLAYBACK_BIND_IP:?private VM address required}
         published: '8096'
@@ -32,6 +33,15 @@ services:
         target: /cache
         bind: {create_host_path: false}
       - type: bind
+        source: /srv/transcode/data
+        target: /transcode
+        bind: {create_host_path: false}
+      - type: bind
+        source: /srv/transcode/.homelab-volume-id
+        target: /run/transcode-volume-id
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
         source: /srv/media-view/media
         target: /data/media
         read_only: true
@@ -42,13 +52,27 @@ services:
         read_only: true
         bind: {create_host_path: false}
       - type: bind
+        source: /var/lib/homelab-storage/admission
+        target: /run/storage-admission
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: /proc/sys/kernel/random/boot_id
+        target: /run/guest-boot-id
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
         source: ./scripts/playback-entrypoint.sh
         target: /usr/local/bin/playback-entrypoint.sh
         read_only: true
         bind: {create_host_path: false}
+      - type: bind
+        source: ./scripts/playback-admission.sh
+        target: /usr/local/bin/playback-admission.sh
+        read_only: true
+        bind: {create_host_path: false}
     tmpfs:
       - /tmp:size=128m,mode=1777
-      - /transcode:size=512m,uid=1000,gid=1000,mode=0700
     healthcheck:
       test: [CMD-SHELL, '/bin/sh /usr/local/bin/playback-entrypoint.sh --check >/dev/null && test "$$(curl -fsS --max-time 5 http://127.0.0.1:8096/jellyfin/health)" = Healthy']
       interval: 30s
