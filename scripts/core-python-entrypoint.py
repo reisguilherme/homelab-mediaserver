@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -23,6 +24,7 @@ _spec.loader.exec_module(guard)
 ROLES = ('control-api', 'control-worker', 'download-gateway')
 REGISTRY_PATH = Path('/run/homeserver/storage.json')
 ENV_PATH = Path('/run/core-runtime.env')
+CAPACITY_DIRECTORY = Path('/run/core-capacity')
 # Deployment requirement, not a claim that this script provisions capabilities.
 # KILL is necessary for the supervisor to contain imports that drop to UID 1000.
 WORKER_CAPABILITIES = frozenset({'CHOWN', 'DAC_OVERRIDE', 'SETUID', 'SETGID', 'KILL'})
@@ -30,12 +32,12 @@ WORKER_CAPABILITIES = frozenset({'CHOWN', 'DAC_OVERRIDE', 'SETUID', 'SETGID', 'K
 
 def python_plan(role):
     guard.require(role in ROLES, 'python_role')
-    argv = ['/app/.venv/bin/python', '-m']
+    argv = ['/app/.venv/bin/python']
     if role == 'control-worker':
-        argv.append('homeserver_control.worker')
+        argv.append('/app/scripts/core-worker-runtime.py')
     else:
         module, port = (('api', '8080') if role == 'control-api' else ('gateway', '8081'))
-        argv.extend(['uvicorn', f'homeserver_control.{module}.app:app',
+        argv.extend(['-m', 'uvicorn', f'homeserver_control.{module}.app:app',
                      '--host', '0.0.0.0', '--port', port])
     uid = 0 if role == 'control-worker' else 1000
     return dict(argv=argv, cwd='/app', data_mode='rw' if uid == 0 else 'ro', uid=uid, gid=uid)
@@ -85,24 +87,45 @@ def parse_activation(raw, role, expected_uuid, pinned_sha256):
     return value
 
 
+def open_capacity_directory():
+    fd = os.open(CAPACITY_DIRECTORY, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    info = os.fstat(fd)
+    if (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (1000, 1000, 0o750):
+        os.close(fd)
+        raise guard.GuardError('capacity_directory_identity')
+    return fd
+
+
+def capacity_device():
+    fd = open_capacity_directory()
+    try:
+        info = os.fstat(fd)
+        return f'{os.major(info.st_dev)}:{os.minor(info.st_dev)}'
+    finally:
+        os.close(fd)
+
+
 def check_bindings(host, local, role, devices):
-    """Use the shared parser; these three Python-specific sources live on the SSD."""
+    """Configuration and the dedicated capacity directory must live on the SSD."""
     python_plan(role)
     root = guard.exact_mount(guard.mount_rows(host), '/')
     rows = guard.mount_rows(local)
     specs = (
-        ('/run/core-activation', f'/srv/appdata/core-activation/{role}'),
-        (str(REGISTRY_PATH), '/srv/appdata/core-runtime/storage.json'),
-        (str(ENV_PATH), f'/srv/appdata/core-runtime/{role}.env'),
+        ('/run/core-activation', f'/srv/appdata/core-activation/{role}', 'ro'),
+        (str(REGISTRY_PATH), '/srv/appdata/core-runtime/storage.json', 'ro'),
+        (str(ENV_PATH), f'/srv/appdata/core-runtime/{role}.env', 'ro'),
+        (str(CAPACITY_DIRECTORY), '/srv/appdata/core-capacity',
+         'rw' if role == 'control-worker' else 'ro'),
     )
     token = []
-    for (target, source), observed_device in zip(specs, devices, strict=True):
+    for (target, source, mode), observed_device in zip(specs, devices, strict=True):
         mount = guard.exact_mount(rows, target)
         guard.require(mount['root'] == source
                       and mount['device'] == observed_device == root['device']
                       and mount['source'] == root['source']
                       and mount['filesystem'] == root['filesystem']
-                      and 'ro' in mount['options'] and 'rw' not in mount['options'],
+                      and mode in mount['options']
+                      and ('rw' if mode == 'ro' else 'ro') not in mount['options'],
                       'python_configuration_mount')
         token.extend((mount['id'], mount['device']))
     return tuple(token)
@@ -120,7 +143,8 @@ def execution_check(role, expected_uuid, pinned_sha256):
                   'runtime_environment_changed')
     host, _ = guard.read_trusted(guard.HOST_MOUNT_PATH, guard.MAX_MOUNT_BYTES, expected_mode=0o444)
     local = guard.read_kernel(guard.local_mount_path(), guard.MAX_MOUNT_BYTES)
-    binding = check_bindings(host, local, role, (activation_device, registry_device, env_device))
+    binding = check_bindings(host, local, role,
+                             (activation_device, registry_device, env_device, capacity_device()))
     registry = load_storage_registry(REGISTRY_PATH, required_backend='ext4-single')
     guard.require(registry is not None and registry.primary_pool.filesystem_id == expected_uuid,
                   'registry_identity')
@@ -159,6 +183,25 @@ def build_environment(role, expected_uuid):
     return apply_runtime_configuration(ENV_PATH, 'prod', environment)
 
 
+def run_supervised(role, plan, checker, environment):
+    if role != 'control-worker':
+        return guard.supervise(plan['argv'], checker, cwd=plan['cwd'], env=environment)
+    # Keep the verified SSD directory FD until the outer guard has stopped the
+    # entire group. A late collector write cannot survive the final invalidation.
+    fd = open_capacity_directory()
+    try:
+        return guard.supervise(plan['argv'], checker, cwd=plan['cwd'], env=environment)
+    finally:
+        try:
+            try:
+                os.unlink('capacity.json', dir_fd=fd)
+            except FileNotFoundError:
+                pass
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--run', choices=ROLES)
@@ -179,7 +222,7 @@ def main(argv=None):
         environment = build_environment(args.run, args.filesystem_uuid)
         # The shared supervisor rechecks twice before Popen, then continuously.
         # These are the only child commands; no Python application imports above.
-        return guard.supervise(plan['argv'], checker, cwd=plan['cwd'], env=environment)
+        return run_supervised(args.run, plan, checker, environment)
     except (guard.GuardError, OSError, RuntimeError, ValueError, TypeError):
         # Configuration exceptions may contain private values; expose no details.
         print('core Python startup denied: configuration or admission unavailable', file=sys.stderr)

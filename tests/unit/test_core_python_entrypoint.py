@@ -51,12 +51,14 @@ def bindings(role='control-api'):
     local += row('/run/homeserver/storage.json', '/srv/appdata/core-runtime/storage.json',
                  identifier=11)
     local += row('/run/core-runtime.env', f'/srv/appdata/core-runtime/{role}.env', identifier=12)
+    local += row('/run/core-capacity', '/srv/appdata/core-capacity',
+                 mode='rw' if role == 'control-worker' else 'ro', identifier=13)
     return host, local
 
 
 @pytest.mark.parametrize('role,mode,uid,module_name,port', [
     ('control-api', 'ro', 1000, 'homeserver_control.api.app:app', '8080'),
-    ('control-worker', 'rw', 0, 'homeserver_control.worker', None),
+    ('control-worker', 'rw', 0, '/app/scripts/core-worker-runtime.py', None),
     ('download-gateway', 'ro', 1000, 'homeserver_control.gateway.app:app', '8081'),
 ])
 def test_fixed_command_and_storage_policy(role, mode, uid, module_name, port):
@@ -64,7 +66,9 @@ def test_fixed_command_and_storage_policy(role, mode, uid, module_name, port):
     plan = module.python_plan(role)
     assert plan['data_mode'] == mode and plan['uid'] == uid and plan['gid'] == uid
     assert plan['cwd'] == '/app'
-    assert plan['argv'][:2] == ['/app/.venv/bin/python', '-m']
+    assert plan['argv'][0] == '/app/.venv/bin/python'
+    if role != 'control-worker':
+        assert plan['argv'][1] == '-m'
     assert module_name in plan['argv']
     if port:
         assert plan['argv'][-2:] == ['--port', port]
@@ -120,7 +124,7 @@ def test_activation_pin_and_duplicate_keys_refuse():
 def test_runtime_bindings_are_readonly_on_the_guest_ssd(role):
     module = load()
     host, local = bindings(role)
-    assert module.check_bindings(host, local, role, ('8:1', '8:1', '8:1'))
+    assert module.check_bindings(host, local, role, ('8:1', '8:1', '8:1', '8:1'))
 
 
 @pytest.mark.parametrize('change', [
@@ -134,7 +138,18 @@ def test_unsafe_or_ambiguous_bindings_refuse(change):
     module = load()
     host, local = bindings()
     with pytest.raises(module.guard.GuardError):
-        module.check_bindings(host, change(local), 'control-api', ('8:1', '8:1', '8:1'))
+        module.check_bindings(host, change(local), 'control-api', ('8:1', '8:1', '8:1', '8:1'))
+
+
+@pytest.mark.parametrize('role', ROLES)
+def test_capacity_bind_policy_is_enforced(role):
+    module = load()
+    host, local = bindings(role)
+    correct = b'rw' if role == 'control-worker' else b'ro'
+    wrong = b'ro' if correct == b'rw' else b'rw'
+    local = local.replace(b'/run/core-capacity ' + correct, b'/run/core-capacity ' + wrong)
+    with pytest.raises(module.guard.GuardError):
+        module.check_bindings(host, local, role, ('8:1',) * 4)
 
 
 def wire_check(module, monkeypatch, role='control-api'):
@@ -153,6 +168,7 @@ def wire_check(module, monkeypatch, role='control-api'):
 
     monkeypatch.setattr(module.guard, 'read_trusted', read)
     monkeypatch.setattr(module.guard, 'read_kernel', lambda *_args: local)
+    monkeypatch.setattr(module, 'capacity_device', lambda: '8:1')
     def registry_loader(*a, **kw):
         calls.append(('load', a, kw))
         return SimpleNamespace(primary_pool=SimpleNamespace(filesystem_id=UUID))
