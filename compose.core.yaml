@@ -1,0 +1,205 @@
+# Prepared layout only. Every entrypoint exits 78 before native application code.
+# Activation requires a separate reviewed implementation; see core-migration.md.
+name: homeserver-core
+
+x-core-base: &core-base
+  profiles: [core-prepared]
+  pull_policy: never
+  restart: 'no'
+  init: false
+  user: '1000:1000'
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  entrypoint: [/bin/sh, /usr/local/bin/core-entrypoint.sh]
+  healthcheck: {disable: true}
+  pids_limit: 128
+  cpus: 1.0
+  stop_grace_period: 30s
+  networks: [core]
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: '3'}
+  labels:
+    homeserver.core.phase: prepared-startup-denied
+
+x-core-guard: &core-guard
+  type: bind
+  source: ./scripts/core-entrypoint.sh
+  target: /usr/local/bin/core-entrypoint.sh
+  read_only: true
+  bind: {create_host_path: false}
+
+x-core-data: &core-data
+  type: bind
+  source: /srv/external3/homeserver
+  target: /data
+  read_only: true
+  bind: {create_host_path: false}
+
+x-core-control: &core-control
+  type: bind
+  source: /srv/appdata/core/control
+  target: /var/lib/homeserver
+  read_only: true
+  bind: {create_host_path: false}
+
+services:
+  sonarr:
+    <<: *core-base
+    image: sha256:${CORE_SONARR_IMAGE_ID:?verified restored image ID required}
+    command: [sonarr]
+    mem_limit: 512m
+    memswap_limit: 512m
+    volumes:
+      - *core-guard
+      - *core-data
+      - type: bind
+        source: /srv/appdata/core/sonarr
+        target: /config
+        read_only: true
+        bind: {create_host_path: false}
+    ports:
+      - host_ip: ${CORE_BIND_IP:?literal private VM address required}
+        published: '8989'
+        target: 8989
+        protocol: tcp
+
+  radarr:
+    <<: *core-base
+    image: sha256:${CORE_RADARR_IMAGE_ID:?verified restored image ID required}
+    command: [radarr]
+    mem_limit: 512m
+    memswap_limit: 512m
+    volumes:
+      - *core-guard
+      - *core-data
+      - type: bind
+        source: /srv/appdata/core/radarr
+        target: /config
+        read_only: true
+        bind: {create_host_path: false}
+    ports:
+      - host_ip: ${CORE_BIND_IP:?literal private VM address required}
+        published: '7878'
+        target: 7878
+        protocol: tcp
+
+  prowlarr:
+    <<: *core-base
+    image: sha256:${CORE_PROWLARR_IMAGE_ID:?verified restored image ID required}
+    command: [prowlarr]
+    mem_limit: 256m
+    memswap_limit: 256m
+    volumes:
+      - *core-guard
+      - type: bind
+        source: /srv/appdata/core/prowlarr
+        target: /config
+        read_only: true
+        bind: {create_host_path: false}
+    ports:
+      - host_ip: ${CORE_BIND_IP:?literal private VM address required}
+        published: '9696'
+        target: 9696
+        protocol: tcp
+
+  bazarr:
+    <<: *core-base
+    image: sha256:${CORE_BAZARR_IMAGE_ID:?verified restored image ID required}
+    command: [bazarr]
+    mem_limit: 256m
+    memswap_limit: 256m
+    volumes:
+      - *core-guard
+      - *core-data
+      - type: bind
+        source: /srv/appdata/core/bazarr
+        target: /config
+        read_only: true
+        bind: {create_host_path: false}
+    ports:
+      - host_ip: ${CORE_BIND_IP:?literal private VM address required}
+        published: '6767'
+        target: 6767
+        protocol: tcp
+
+  qbittorrent:
+    <<: *core-base
+    image: sha256:${CORE_QBITTORRENT_IMAGE_ID:?verified restored image ID required}
+    command: [qbittorrent]
+    mem_limit: 384m
+    memswap_limit: 384m
+    volumes:
+      - *core-guard
+      - *core-data
+      - type: bind
+        source: /srv/appdata/core/qbittorrent
+        target: /config
+        read_only: true
+        bind: {create_host_path: false}
+
+  seerr:
+    <<: *core-base
+    image: sha256:${CORE_SEERR_IMAGE_ID:?verified restored image ID required}
+    command: [seerr]
+    mem_limit: 384m
+    memswap_limit: 384m
+    volumes:
+      - *core-guard
+      - type: bind
+        source: /srv/appdata/core/seerr
+        target: /app/config
+        read_only: true
+        bind: {create_host_path: false}
+    ports:
+      - host_ip: ${CORE_BIND_IP:?literal private VM address required}
+        published: '5055'
+        target: 5055
+        protocol: tcp
+
+  control-api:
+    <<: *core-base
+    image: sha256:${CORE_CONTROL_API_IMAGE_ID:?verified restored image ID required}
+    command: [control-api]
+    mem_limit: 128m
+    memswap_limit: 128m
+    volumes: [*core-guard, *core-control, *core-data]
+    ports:
+      - host_ip: ${CORE_BIND_IP:?literal private VM address required}
+        published: '8080'
+        target: 8080
+        protocol: tcp
+
+  control-worker:
+    <<: *core-base
+    image: sha256:${CORE_CONTROL_WORKER_IMAGE_ID:?verified restored image ID required}
+    command: [control-worker]
+    mem_limit: 384m
+    memswap_limit: 384m
+    volumes: [*core-guard, *core-control, *core-data]
+
+  download-gateway:
+    <<: *core-base
+    image: sha256:${CORE_DOWNLOAD_GATEWAY_IMAGE_ID:?verified restored image ID required}
+    command: [download-gateway]
+    mem_limit: 192m
+    memswap_limit: 192m
+    volumes: [*core-guard, *core-control, *core-data]
+
+  qbit-monitor:
+    <<: *core-base
+    image: sha256:${CORE_QBIT_MONITOR_IMAGE_ID:?verified restored image ID required}
+    command: [qbit-monitor]
+    mem_limit: 64m
+    memswap_limit: 64m
+    volumes: [*core-guard]
+    ports:
+      - host_ip: ${CORE_BIND_IP:?literal private VM address required}
+        published: '18080'
+        target: 8080
+        protocol: tcp
+
+networks:
+  core:
+    internal: true
