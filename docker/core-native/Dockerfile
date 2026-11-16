@@ -23,7 +23,9 @@ RUN /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
       chmod 0444 /usr/local/share/core-native/apk-installed.txt; \
       /usr/bin/python3 -I -B --version'
 
-COPY --chown=0:0 --chmod=0444 scripts/core-storage-guard.py /usr/local/libexec/core-storage-guard.py
+# Separate chmod is supported by the guest's legacy Docker builder too.
+COPY --chown=0:0 scripts/core-storage-guard.py /usr/local/libexec/core-storage-guard.py
+RUN /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/chmod 0444 /usr/local/libexec/core-storage-guard.py
 HEALTHCHECK NONE
 USER 1000:1000
 ENTRYPOINT ["/usr/bin/env", "-i", "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8", "/usr/bin/python3", "-I", "-B", "/usr/local/libexec/core-storage-guard.py"]

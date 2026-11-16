@@ -23,8 +23,8 @@ def test_base_and_python_version_have_no_moving_defaults():
 
 def test_package_install_uses_clean_environment_exact_version_and_default_signature_checks():
     runs = [row for row in instructions() if row.startswith("RUN ")]
-    assert len(runs) == 1
-    assert runs[0].startswith("RUN /usr/bin/env -i ")
+    assert len(runs) == 2
+    assert all(row.startswith("RUN /usr/bin/env -i ") for row in runs)
     assert '"python3=$PYTHON_APK_VERSION"' in runs[0]
     assert "apk add --no-cache" in runs[0]
     assert "apk info -v" in runs[0] and "apk-installed.txt" in runs[0]
@@ -46,7 +46,11 @@ def test_final_entrypoint_clears_image_environment_and_has_no_native_command():
 
 
 def test_only_guard_code_is_copied_and_never_an_interpreter_or_private_state():
-    copies = [row for row in instructions() if row.startswith(("COPY ", "ADD "))]
-    assert copies == ["COPY --chown=0:0 --chmod=0444 scripts/core-storage-guard.py "
+    rows = instructions()
+    copies = [row for row in rows if row.startswith(("COPY ", "ADD "))]
+    assert copies == ["COPY --chown=0:0 scripts/core-storage-guard.py "
                       "/usr/local/libexec/core-storage-guard.py"]
-    assert not any(row.startswith(("VOLUME ", "EXPOSE ", "ONBUILD ")) for row in instructions())
+    assert rows[rows.index(copies[0]) + 1] == (
+        "RUN /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin "
+        "/bin/chmod 0444 /usr/local/libexec/core-storage-guard.py")
+    assert not any(row.startswith(("VOLUME ", "EXPOSE ", "ONBUILD ")) for row in rows)
