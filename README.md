@@ -27,6 +27,13 @@ prova nova e ação explícita; reboot do Proxmox pede auditoria do estado, sem
 promessa de retorno integral desassistido. GPU, recuperação física USB, entrada pública, Arr e
 consolidação continuam pendentes; Abyss permanece adiado.
 
+O core tem [preparação própria](docs/runbooks/core-migration.md), com estado
+restaurado e inicialização ainda negada. A [verificação das cópias no destino](docs/runbooks/consolidation-target-verification.md)
+está em andamento por lotes somente leitura; publicação, delta final das origens
+e readmissão das aplicações continuam pendentes. Os
+[domínios greis.dev.br](https://github.com/reisguilherme/homelab-platform/blob/refactor/docs/architecture/access-domains.md)
+estão definidos na plataforma, sem DNS/TLS/entrada pública aplicados.
+
 ```mermaid
 flowchart LR
   S[Pedido no Seerr] --> W[Worker]

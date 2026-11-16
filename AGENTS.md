@@ -24,6 +24,14 @@ com remoção de parada manual pelo Docker. Reboot com SSD e guard passou, inclu
 recusa da lease do boot anterior; após reboot do Proxmox, auditar o estado antes de readmitir. Não prometer
 retorno integral desassistido. GPU e reintegração física USB seguem pendentes.
 
+A preparação do core e seu guard permanecem inativos, conforme
+`docs/runbooks/core-migration.md`. A verificação somente leitura das cópias no
+destino usa `scripts/verify-consolidation-target.py`; há um executor transitório
+no guest iniciado em 16/11, sem restart. Conferir tarefa e progresso privados
+antes de repetir ou alterar seus pins. Não executar helpers históricos de
+consolidação contra as novas identidades. Hashes desse escopo não encerram
+publicação, delta final das origens, caso degradado ou readmissão do core.
+
 Projeto pessoal executado pelo `compose.yaml` da raiz. Parâmetros de comportamento
 e credenciais ficam no `.env` privado; defaults técnicos ficam no código/Compose.
 
