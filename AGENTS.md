@@ -29,7 +29,15 @@ Transcode usa ext4 no disco virtual dedicado de 32 GiB em `/srv/transcode`,
 com subpasta RW e marcador de UUID RO no container; não retornar ao tmpfs
 provisório nem aceitar fallback sem o mount. O limite de memória continua
 em 3 GiB. As 18 senhas foram redefinidas e testadas por login/logout; a relação
-fica somente no Windows privado, sem nomes ou credenciais no Git. Abyss adiado.
+fica somente no Windows privado, sem nomes ou credenciais no Git. Em 16/11, o
+proprietário retomou Abyss, com fontes locais,
+defaults Legacy somente quando ausentes e home ajustada nas 18 contas. Login,
+Spotlight, detalhes e vídeo passaram em desktop/celular com toque, assim como
+13 checks do proxy interno. Busca passou; setas e roda dos carrosséis mantêm a
+página desktop sem deslocamento lateral. O pacote final `r4`, com backdrop
+difuso restrito à home, está implantado e validado em desktop e Android com toque.
+Esse aceite não comprova WAN/TLS.
+Consulte `docs/runbooks/abyss.md`; o adiamento anterior é histórico.
 A lease obrigatória de storage de até 45 segundos está implantada; expiração,
 `HOLD` e preservação de parada manual foram testados. `resume` exige ação
 explícita e prova nova; não confundir retomada permitida por `unless-stopped`

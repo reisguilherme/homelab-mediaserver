@@ -234,7 +234,10 @@ nem afirmar que o hash do conjunto atual ainda corresponde ao conjunto de 807.
 
 A relação em texto simples fica somente no Windows privado; nomes, senhas,
 tokens e seu caminho não entram na documentação pública. Abyss foi adiado
-pelo proprietário e não foi instalado. A inspeção somente leitura encontrou
+nesse marco; em 16/11, o proprietário retomou a integração. Os testes passaram
+em login, banner, detalhes e vídeo em desktop/celular,
+além dos checks internos de assets e bloqueios na edge, conforme o
+[runbook Abyss](abyss.md). A inspeção somente leitura encontrou
 a iGPU Intel em grupo IOMMU isolado, mas não houve passthrough ou aceite de GPU.
 
 ## Admissão obrigatória de storage

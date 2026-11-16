@@ -2,6 +2,23 @@
 
 ## Atualização operacional — 16/11/2026
 
+O proprietário retomou a [integração Abyss](../../runbooks/abyss.md) no Jellyfin
+12.2, com fontes locais e apresentação próxima aos previews upstream. O pacote
+final `r4` está implantado e validado, incluindo a transparência limitada à
+home para revelar o backdrop difuso.
+As preferências visuais das 18 contas foram aplicadas e conferidas, preservando
+os valores anteriores privadamente. Login comum, Spotlight, detalhes e frames
+1080p passaram em desktop e Android com toque, sem erros de página; fontes e
+backdrop ativo foram conferidos. O celular ficou sem overflow horizontal;
+busca retornou cards de resultados. O aceite final confirmou fontes, backdrop
+e login/logout nos dois contextos, detalhes/vídeo 1080p no desktop e busca sem
+overflow no celular. A transparência saiu ao deixar a home. Setas e roda
+moveram os carrosséis mantendo a página desktop em `scrollX=0`; o clip da raiz
+é contenção preventiva.
+Treze checks internos pela edge passaram para assets e bloqueios; não atestam
+WAN/TLS. Mídia RO, guards, limite de 3 GiB, transcode no SSD e contenção de scans
+permanecem. Código e documentação da integração estão na branch `refactor`.
+
 O core mantém **oito processos nativos vivos**: Sonarr, Radarr, Prowlarr,
 Bazarr, Seerr, integration-proxy, qBittorrent e monitor. API, download gateway
 e **worker estão iniciados em manutenção**, sem readmissão da automação. A fila

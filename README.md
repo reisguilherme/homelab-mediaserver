@@ -36,7 +36,12 @@ no Windows privado. A lease obrigatória foi testada para expiração e HOLD,
 preservando parada manual; reboot com SSD e guard passou, recusando a lease do boot anterior. A readmissão exige
 prova nova e ação explícita; reboot do Proxmox pede auditoria do estado, sem
 promessa de retorno integral desassistido. GPU, recuperação automática USB,
-entrada pública e conclusão da automação continuam pendentes; Abyss permanece adiado.
+entrada pública e conclusão da automação continuam pendentes. O proprietário
+retomou a [integração Abyss](docs/runbooks/abyss.md) em 16/11, com fontes locais e
+home ajustada. Login, banner, detalhes e vídeo passaram em desktop/celular com
+toque; busca também passou. O pacote final `r4`, com backdrop difuso restrito
+à home, está implantado e validado.
+O aceite interno não comprova disponibilidade pública.
 
 O core tem [preparação e ativação próprias](docs/runbooks/core-migration.md), com
 estado restaurado e ativação parcial registrada acima. A [verificação das cópias no destino](docs/runbooks/consolidation-target-verification.md)

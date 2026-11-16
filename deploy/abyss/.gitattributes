@@ -1,0 +1,14 @@
+# Preserve the reviewed upstream bytes and deterministic build output on Windows.
+vendor/** -text
+fonts/** -text
+runtime/** -text
+local/** text eol=lf
+*.mjs text eol=lf
+*.py text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+# These upstream license notices contain CRLF/trailing spaces; retain their hashes.
+fonts/OFL-google-sans.txt -whitespace
+fonts/TRADEMARKS-google-sans.md -whitespace
+runtime/OFL-google-sans.txt -whitespace
+runtime/TRADEMARKS-google-sans.md -whitespace

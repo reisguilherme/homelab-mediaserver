@@ -128,6 +128,8 @@ def anonymous(service: str, path: str, method: str) -> bool:
         return path in {
             '/', '/web', '/web/index.html', '/system/info/public', '/system/ping',
             '/brand/favicon.ico', '/web/manifest.json',
+            # Exact read-only theme assets; no Branding configuration or HTML wildcard.
+            '/branding/css', '/web/ui/spotlight.html',
         } or (path.startswith('/web/') and bool(_STATIC.fullmatch(path)))
     return (path in {'/', '/login', '/api/v1/settings/public', '/favicon.ico',
                      '/manifest.json', '/site.webmanifest', '/logo_full.svg', '/logo_stacked.svg'}

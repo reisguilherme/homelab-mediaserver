@@ -1,0 +1,39 @@
+{
+  "repository": "https://github.com/AumGupta/abyss-jellyfin",
+  "commit": "2f809171ed7f3a34b5e78297608b5f2b63dd3f0f",
+  "base_image": "jellyfin/jellyfin@sha256:357724bf0ae27a672c7cbaa899db2d9abeb13dbd8657ccce750258a4c059d037",
+  "base_index_sha256": "692ac1582fd119b0ec4712de52ec3fc82375bcd844741467df050372ccde5b40",
+  "font_sources": {
+    "material_icons_package": "https://cdn.jsdelivr.net/npm/material-icons@1.13.12/package.json",
+    "material-icons-round.woff2": "https://cdn.jsdelivr.net/npm/material-icons@1.13.12/iconfont/material-icons-round.woff2",
+    "LICENSE-material-icons.txt": "https://cdn.jsdelivr.net/npm/material-icons@1.13.12/LICENSE",
+    "google_sans_css": "https://fonts.googleapis.com/css2?family=Google+Sans:ital,opsz,wght@0,17..18,400..700;1,17..18,400..700&display=swap",
+    "google_sans_css_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "google_sans_license_commit": "fc0842ce25d003e57a2fc72cd4c4a6af6175a2cc",
+    "OFL-google-sans.txt": "https://raw.githubusercontent.com/google/fonts/fc0842ce25d003e57a2fc72cd4c4a6af6175a2cc/ofl/googlesans/OFL.txt",
+    "TRADEMARKS-google-sans.md": "https://raw.githubusercontent.com/google/fonts/fc0842ce25d003e57a2fc72cd4c4a6af6175a2cc/ofl/googlesans/TRADEMARKS.md",
+    "google-sans-italic-latin-ext.woff2": "https://fonts.gstatic.com/s/googlesans/v76/4UaXrENHsxJlGDuGo1OIlL3L2JB874GPhFI9_IqmuTCEjshE7g.woff2",
+    "google-sans-italic-latin.woff2": "https://fonts.gstatic.com/s/googlesans/v76/4UaXrENHsxJlGDuGo1OIlL3L2JB874GPhFI9_IqmuTCKjsg.woff2",
+    "google-sans-normal-latin-ext.woff2": "https://fonts.gstatic.com/s/googlesans/v76/4UaRrENHsxJlGDuGo1OIlJfC6l_24rlCK1Yo_Iq2sACIlsw.woff2",
+    "google-sans-normal-latin.woff2": "https://fonts.gstatic.com/s/googlesans/v76/4UaRrENHsxJlGDuGo1OIlJfC6l_24rlCK1Yo_Iq2vgCI.woff2"
+  },
+  "font_sha256": {
+    "google-sans-italic-latin-ext.woff2": "6314676263f6bab032ece8f282354aa442e9c12d6cab3aedfad2055d9e156891",
+    "google-sans-italic-latin.woff2": "6632ff71a9952d5bbc49dc245c38a83f1d29b6d41338750d67aab8d1083e90d8",
+    "google-sans-normal-latin-ext.woff2": "5d2d1530896c19dda02be41d485cb9d9c10ae9ed8f6805532401b26f89fa5149",
+    "google-sans-normal-latin.woff2": "0accef50190dfad2e5ba3616aeb9bba3dcbcdd3887f71932b6eb57d5344f470c",
+    "google-sans.source.css": "47cf8ea02664f50c33e0093cf37f3dfca51af1d89436673b9126eb0ea0f13c18",
+    "LICENSE-material-icons.txt": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "material-icons-round.woff2": "c948f1263341699b3c1e9c55d8d0f3e446669d0f2b9d55494c6169222c0243a6",
+    "material-icons.package.json": "420e840e01b9c86e803c418d427d6f2133417350c7a4ee943fe359177e72982b",
+    "OFL-google-sans.txt": "2b75ef20f13d83a7514aee452c4782c20cdc9ff2dee17600f44d37a06d4fb958",
+    "TRADEMARKS-google-sans.md": "215bc8c1ce46d1b81531f33ebb5af201e7a5da76b8f3ae4c705336fd70fc89e1"
+  },
+  "vendor_sha256": {
+    "abyss.css": "41b717bc766555ff7d382b4f65ef9ac1e290447715a7c4eb2c630bba9acb9019",
+    "LICENSE": "cb40fd5a6eb4d181e9fb9a1166dc1414c8231aeaaaf5a6a266a61ee52fdc4040",
+    "spotlight-loader.js": "9f7a9dc263623672cc9c9e0435f6fca3e6dc11a4d839cd448d8335c6faf2bd6a",
+    "spotlight.css": "f2ac51da8a89944aa6a9c21cdf65dfa769eec7db179f28311bba0c773c824688",
+    "spotlight.html": "1c71d3d61b54dddc042764c19199d788e06a75ab515187dfb60cbee4709663ec"
+  }
+}
