@@ -6,9 +6,9 @@ estão parados, um em `missingFiles`. Foram publicados 8.209 caminhos/6.023 arqu
 (5,449 TB), preservando as origens e excluindo os dois aliases degradados.
 Scans Jellyfin continuam contidos. Backend edge e isolamento PVE passaram;
 DNAT TCP 80/443 aplicado e 33 checks do proxy aprovados. **Publicação em
-ativação, ainda sem certificado TLS.** ACME e teste 4G deram timeout externo,
-apesar do redirect LAN funcionar; a causa ainda não foi determinada. Manter
-firewall e portas atuais, sem declarar disponibilidade. Veja o
+ativação, ainda sem certificado TLS.** 80/443 externas dão timeout; o teste
+temporário via 10443 chega ao PVE, ainda sem TLS. O proprietário escolheu resolver
+primeiro 80/443 para URL sem porta; 10443 continua apenas diagnóstica. Veja o
 [estado atual e histórico](docs/architecture/homelab-2026/implementation-status.md).
 
 HomeServer reúne Jellyfin, Seerr, Sonarr, Radarr, Prowlarr, Bazarr e qBittorrent

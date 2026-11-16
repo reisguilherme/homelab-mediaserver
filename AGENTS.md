@@ -9,8 +9,9 @@ parados, um `missingFiles`.
 Publicação por hardlinks integrou 8.209 caminhos/6.023 arquivos únicos (5,449 TB);
 dois aliases degradados ficam excluídos, com origens preservadas. Backend edge
 e isolamento PVE passaram; DNAT TCP 80/443 aplicado e 33 checks do proxy aprovados.
-Publicação em ativação, sem certificado TLS após timeouts externos no ACME e
-4G; causa ainda não determinada. Manter firewall e portas atuais. Gatilhos Jellyfin
+Publicação em ativação, sem certificado TLS: 80/443 externas dão timeout;
+10443 temporária chega ao PVE e serve só ao diagnóstico. O proprietário priorizou
+resolver 80/443, sem DNS-01 ou 10443 em produção. Gatilhos Jellyfin
 continuam contidos. Esse estado não altera os limites abaixo; consulte o
 [registro atual](docs/architecture/homelab-2026/implementation-status.md).
 

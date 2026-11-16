@@ -14,28 +14,26 @@ login admin 403, token admin válido 403, GETs administrativos/spoof negados e
 três logouts. Caddy definitivo e os outros dois containers estão Running com
 rootfs RO, UID 1000, capabilities ALL removidas e limites somados de 448 MiB.
 O DNS A foi confirmado e o diretório ACME respondeu 200 até a partir do Caddy.
-**Ainda não há certificado TLS.** Let's Encrypt resolveu o hostname/destino
-esperado, mas registrou timeout externo TCP 80. O proprietário confirmou a WAN
-esperada e mapeamentos TCP 80/443 ativos para o endereço LAN do PVE, com MAC
-correto. HTTP e HTTPS deram timeout pelo 4G. Windows resolveu
-o A esperado e o domínio respondeu HTTP 308 pelo Caddy, com Location HTTPS
-correto; HTTP LAN com Host explícito também retornou 308. NAT loopback funciona
-nesse desktop, superando a tentativa anterior de timeout HTTP. HTTPS falhou no
-Schannel, ainda sem certificado emitido. Essa prova local não comprova acesso 4G.
+**Ainda não há certificado TLS.** ACME e 4G nas portas externas 80/443 deram
+timeout. DNS, WAN e vínculo dos mapeamentos foram conferidos; HTTP pelo domínio
+retorna 308 no desktop, comprovando NAT loopback nesse cliente.
 
-As capturas anteriores em `vmbr0` foram invalidadas: nem o controle LAN apareceu.
-Elas não provam ausência de tráfego externo. A captura SYN corrigida em `nic1`
-validou controles LAN e NAT loopback e cobriu o intervalo da tentativa 4G
-relatada. Outros SYN com origem aparente igual à WAN também apareceram; não foi
-identificada origem externa distinta atribuível à tentativa 4G. Isso orienta
-a investigação do caminho anterior ao servidor, sem concluir bloqueio da
-operadora ou falha do roteador: SNAT pode ocultar a origem real. O status WAN
-enviado pelo proprietário confirmou a conexão IPv4 ativa com o endereço esperado
-pelo DNS e o vínculo correto dos mapeamentos.
+A regra **temporária WAN TCP 10443 → LAN TCP 443 do PVE** está ativa. O teste
+4G retornou `ERR_SSL_PROTOCOL_ERROR`; a captura validada em `nic1` registrou
+oito SYN de origem externa distinta para PVE:443, além dos controles LAN.
+A porta alternativa chega ao mesmo destino interno, ainda sem TLS. O diagnóstico
+de 80/443 externas concentra-se no caminho anterior à edge, sem distinguir
+definitivamente roteador de operadora.
 
-O próximo teste orientado usa regra temporária **WAN TCP 10443 → LAN TCP 443
-do PVE**, na mesma conexão WAN. O proprietário ainda não confirmou sua criação;
-o teste não foi aplicado e não houve mudança adicional no PVE ou na edge.
+O proprietário escolheu **resolver primeiro 80/443 para URL sem porta**. 10443
+permanece somente diagnóstico temporário ativo, sem DNS-01 ou uso em produção.
+Próximo passo: conferir somente leitura Access Control WAN HTTP/HTTPS e filtros
+IP downstream do roteador, conforme o diagnóstico coordenado pela plataforma.
+
+Limpeza dos dispositivos de teste Jellyfin v2/v3: seis registros conferidos,
+quatro já ausentes e dois removidos por IDs de recibos, metadados e janela
+temporal. Logout próprio verificado; registros v1 não identificados com
+segurança não foram alterados. IDs, nomes e tokens permanecem privados.
 
 O túnel temporário de teste foi encerrado. O health privado na porta 18096
 respondeu HTTP 200; essa prova não demonstra acesso pela internet.

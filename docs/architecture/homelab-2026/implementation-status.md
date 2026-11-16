@@ -26,28 +26,25 @@ login comum, identidade, catálogo de 20 itens, Range 206 de 64 KiB, WebSocket
 101, login admin 403, token admin válido 403, GETs administrativos e spoof
 negados e três logouts. Caddy definitivo, Nginx e guard estão Running, com
 rootfs RO, UID 1000, capabilities ALL removidas e limites somados de 448 MiB.
-DNS A confirmado e diretório ACME respondendo 200, inclusive a partir do Caddy,
-**ainda sem certificado TLS**. Let's Encrypt resolveu o destino esperado e
-registrou timeout externo TCP 80. O proprietário confirmou WAN e mapeamentos
-TCP 80/443 ativos para o endereço LAN do PVE, com MAC correto. HTTP/HTTPS pelo
-4G deram timeout. Windows resolveu o A esperado e o domínio
-respondeu HTTP 308 pelo Caddy, com Location HTTPS correto; HTTP LAN com Host
-explícito também retornou 308. NAT loopback funciona nesse desktop, superando
-a tentativa anterior de timeout HTTP. HTTPS falhou no Schannel, sem certificado
-emitido; isso não demonstra acesso externo.
-As capturas anteriores em `vmbr0` foram invalidadas porque nem o controle LAN
-apareceu. A captura SYN corrigida em `nic1` validou LAN e NAT loopback e cobriu
-o intervalo da tentativa 4G relatada. Outros SYN com origem aparente igual à WAN
-também apareceram; não foi identificada origem externa distinta atribuível ao
-4G. Investigar o caminho anterior ao servidor, sem concluir falha de operadora
-ou roteador: SNAT pode ocultar a origem real. O status WAN enviado pelo
-proprietário confirmou a conexão IPv4 ativa com o endereço esperado pelo DNS
-e o vínculo correto dos mapeamentos. Foi orientado teste temporário de
-WAN TCP 10443 → LAN TCP 443 do PVE, na mesma WAN, ainda sem confirmação de
-criação ou aplicação. Nenhuma alteração adicional no PVE/edge.
+DNS A, WAN e vínculo dos mapeamentos conferidos, com NAT loopback HTTP funcional,
+**ainda sem certificado TLS**. ACME e 4G nas portas externas 80/443 deram timeout.
+A regra **temporária WAN TCP 10443 → LAN TCP 443 do PVE** está ativa: o teste
+4G retornou `ERR_SSL_PROTOCOL_ERROR` e a captura validada em `nic1` registrou
+oito SYN de origem externa distinta para PVE:443, além dos controles LAN.
+Isso comprova chegada pela porta alternativa ao mesmo destino interno, sem
+TLS. A falha externa de 80/443 ainda não distingue roteador de operadora.
+O proprietário escolheu **resolver primeiro 80/443 para URL sem porta**;
+10443 é só diagnóstico temporário, sem preparação de DNS-01 ou uso em produção.
+A conferência somente leitura de acesso WAN e filtros IP do roteador segue pendente;
+o diagnóstico detalhado permanece no estado canônico da plataforma.
+
+Limpeza dos dispositivos de teste Jellyfin v2/v3: seis registros conferidos,
+quatro já ausentes e dois removidos por IDs de recibos, metadados e janela
+temporal. Logout próprio verificado. Registros v1 não identificados com
+segurança permaneceram intactos; nenhuma identidade ou token foi publicado.
 O túnel temporário de teste foi encerrado; health privado na porta 18096 deu 200.
 A publicação está em ativação, sem aceite de disponibilidade/reprodução externa.
-Firewall preservado, sem portas adicionais. O log temporário de diagnóstico
+Firewall preservado, sem ampliar portas no PVE/edge. O log temporário de diagnóstico
 TLS do Caddy é privado, 0600 e limitado a 1 MiB; logs HTTP continuam desativados.
 
 A publicação no hub integrou **8.209 caminhos de 6.023 arquivos únicos**
