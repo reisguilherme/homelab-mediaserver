@@ -32,7 +32,7 @@ def mounts(service):
 def test_active_services_are_separate_pinned_and_bounded_without_automatic_restarts():
     config = manifest()
     assert config["name"] == "homeserver-core-active"
-    assert set(config["services"]) == NATIVE | PYTHON | {"qbit-monitor"}
+    assert set(config["services"]) == NATIVE | PYTHON | {"qbit-monitor", "integration-proxy"}
     baseline = 0
     for role, service in config["services"].items():
         assert re.fullmatch(r"sha256:\$\{CORE_[A-Z_]+_IMAGE_ID:\?[^}]+\}", service["image"])
@@ -55,7 +55,7 @@ def test_active_services_are_separate_pinned_and_bounded_without_automatic_resta
         else:
             assert not service.get("profiles")
             baseline += int(service["mem_limit"].removesuffix("m"))
-    assert baseline <= 3072
+    assert baseline == 3200
 
 
 def test_guarded_roles_require_correct_cli_receipts_and_clean_interpreters():
@@ -66,6 +66,9 @@ def test_guarded_roles_require_correct_cli_receipts_and_clean_interpreters():
             assert entry[-1] == "/usr/bin/caddy"
             assert service["command"] == ["run", "--config", "/etc/caddy/Caddyfile",
                                            "--adapter", "caddyfile"]
+            continue
+        if role == "integration-proxy":
+            assert entry[-4:] == ["/app/.venv/bin/python", "-B", "-m", "uvicorn"]
             continue
         variable = role.upper().replace("-", "_")
         assert service["command"] == ["--run", role, "--filesystem-uuid",
@@ -165,6 +168,28 @@ def test_networks_and_private_ports_do_not_publish_native_qbit_or_gateway():
     assert set(mounts(proxy)) == {"/etc/caddy/Caddyfile"}
 
 
+def test_seerr_integration_keeps_fixed_policy_factory_without_state_or_private_env():
+    from homeserver_control.api.integration_jellyfin import BASE
+    from homeserver_control.api.integration_proxy import UPSTREAMS
+
+    service = manifest()["services"]["integration-proxy"]
+    assert service["image"] == (
+        "sha256:${CORE_INTEGRATION_PROXY_IMAGE_ID:?verified final image ID required}")
+    assert service["command"] == ["homeserver_control.api.integration_proxy:create_app",
+        "--factory", "--host", "0.0.0.0", "--port", "8787",
+        "--no-proxy-headers", "--no-access-log"]
+    assert "PYTHONPATH=/app/services/common/src:/app/services/control/src" in service["entrypoint"]
+    assert service["volumes"] == [] and not service.get("ports")
+    assert not service.get("environment") and not service.get("env_file")
+    assert not service.get("cap_add") and service["user"] == "1000:1000"
+    assert service["mem_limit"] == service["memswap_limit"] == "128m"
+    assert service["extra_hosts"] == {
+        "jellyfin": "${CORE_JELLYFIN_IP:?literal playback VM address required}"}
+    assert BASE == "http://jellyfin:8096/jellyfin"
+    assert UPSTREAMS == {"radarr": "http://radarr:7878/radarr/api/v3",
+                         "sonarr": "http://sonarr:8989/sonarr/api/v3"}
+
+
 def compose_config(tmp_path, *, missing=None):
     assert MANIFEST.is_file(), "active core manifest is missing"
     executable = shutil.which("docker")
@@ -173,7 +198,7 @@ def compose_config(tmp_path, *, missing=None):
     names = set(re.findall(r"\$\{([A-Z_0-9]+):\?", MANIFEST.read_text()))
     values = {name: "a" * 64 for name in names}
     values.update(CORE_FILESYSTEM_UUID="11111111-2222-3333-4444-555555555555",
-                  CORE_BIND_IP="10.77.0.10")
+                  CORE_BIND_IP="10.77.0.10", CORE_JELLYFIN_IP="10.77.0.20")
     if missing:
         del values[missing]
     environment = tmp_path / "synthetic.env"
@@ -192,10 +217,14 @@ def test_real_compose_renderer_accepts_synthetic_pins_and_preserves_mount_polici
     assert mounts(parsed["services"]["control-worker"])["/data"].get("read_only", False) is False
     assert mounts(parsed["services"]["control-api"])["/data"]["read_only"] is True
     assert not parsed["services"]["qbittorrent"].get("ports")
+    integration = parsed["services"]["integration-proxy"]
+    assert not integration.get("volumes") and not integration.get("ports")
+    assert integration["extra_hosts"] == ["jellyfin=10.77.0.20"]
 
 
 @pytest.mark.parametrize("missing", ["CORE_FILESYSTEM_UUID", "CORE_BIND_IP",
-                                      "CORE_SONARR_IMAGE_ID", "CORE_SONARR_ACTIVATION_SHA256"])
+                                      "CORE_SONARR_IMAGE_ID", "CORE_SONARR_ACTIVATION_SHA256",
+                                      "CORE_INTEGRATION_PROXY_IMAGE_ID", "CORE_JELLYFIN_IP"])
 def test_real_compose_renderer_rejects_missing_required_input(tmp_path, missing):
     result = compose_config(tmp_path, missing=missing)
     assert result.returncode != 0 and missing in result.stderr

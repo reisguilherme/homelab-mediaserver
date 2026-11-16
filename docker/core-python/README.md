@@ -18,7 +18,8 @@ A operação confere o ID completo da base local, arquitetura e ausência de
 com `--pull=false --no-cache --build-arg BASE_IMAGE=TAG_LOCAL_VERIFICADA` e este
 Dockerfile. Guardar privadamente o ID final, os hashes dos arquivos públicos,
 a identidade efetiva da base e a versão do interpretador. As três funções Python
-podem usar o mesmo ID final; cada função exige seu próprio recibo de ativação.
+guardadas podem usar o mesmo ID final; cada função exige seu próprio recibo de
+ativação. O integration-proxy usa essa imagem com um entrypoint próprio, sem estado.
 As dependências permanecem as da base autenticada; não se afirma build bit a bit
 reproduzível. As imagens capturadas podem conter ENV privado em suas camadas:
 continuam privadas e todos os entrypoints usam `env -i`.
@@ -33,10 +34,11 @@ usam 1000:1000 sem capabilities. Nenhum script legado de configuração é chama
 ## Entradas do manifesto
 
 Usar arquivo de interpolação privado explícito, sem credenciais de aplicação:
-`CORE_BIND_IP`, `CORE_FILESYSTEM_UUID`, `CORE_<ROLE>_IMAGE_ID` e
+`CORE_BIND_IP`, `CORE_JELLYFIN_IP`, `CORE_FILESYSTEM_UUID`, `CORE_<ROLE>_IMAGE_ID` e
 `CORE_<ROLE>_ACTIVATION_SHA256`. `<ROLE>` é o nome do serviço em maiúsculas,
-substituindo hífens por underscores. qbit-monitor exige somente IMAGE_ID; todos
-os outros serviços exigem também o pin do recibo. Os IDs são 64 hex minúsculos
+substituindo hífens por underscores. qbit-monitor e integration-proxy exigem
+somente IMAGE_ID; os consumidores guardados exigem também o pin do recibo.
+Os IDs são 64 hex minúsculos
 sem prefixo; o Compose acrescenta `sha256:`. O deploy valida o formato, confere
 o ID efetivo contra o recibo e exige o endereço privado literal autorizado da VM;
 Compose sozinho não valida essa identidade nem limita o valor ao endereço correto.
@@ -47,12 +49,26 @@ a renderização. Não publicar qBit8080 ou gateway8081: o único acesso qBit ex
 é o proxy privado em 18080, com autenticação/CSRF nativos preservados. API publica
 8080 e as demais interfaces mantêm suas portas privadas conhecidas.
 
-O orçamento padrão soma 3072 MiB, incluindo processos e tmpfs nos limites dos
+O orçamento padrão soma 3200 MiB, incluindo processos e tmpfs nos limites dos
 containers; não representa uma medição de RSS. Byparr acrescenta 768 MiB no perfil
 `byparr` e permanece adiado até revisar a RAM disponível e serviços concorrentes
 na VM de 4 GiB. Rede core é interna; egress existe para provedores/downloads e
-API/worker que precisam alcançar playback em outra VM. Gateway e proxy ficam
-somente na rede interna. Não há restart automático nesta ativação inicial.
+API/worker e integration-proxy que precisam alcançar playback em outra VM.
+Gateway e qbit-monitor ficam somente na rede interna. Não há restart automático
+nesta ativação inicial.
+
+O `integration-proxy` preserva o endpoint interno 8787 usado pelo Seerr restaurado
+e as políticas existentes para Arr/Jellyfin; não apontar Seerr diretamente aos
+Arr para contorná-lo. A factory é
+`homeserver_control.api.integration_proxy:create_app`, com proxy headers e access
+log desativados. Não lê settings, SQLite, mídia ou credenciais próprias; não recebe
+volumes nem lease de storage. Seu limite inicial é 128 MiB, sujeito a medição na VM.
+Os upstreams Arr permanecem `radarr:7878/radarr/api/v3` e
+`sonarr:8989/sonarr/api/v3`. Jellyfin permanece
+`http://jellyfin:8096/jellyfin`; um `extra_hosts` exclusivamente nesse serviço
+resolve jellyfin para `CORE_JELLYFIN_IP`, o endereço literal privado autorizado da
+VM de playback. O deploy confere esse IP. Nenhuma porta do integration-proxy é
+publicada; ele mantém a autorização de peers pelo nome `seerr` da rede core.
 
 ## Layout obrigatório antes de criar containers
 

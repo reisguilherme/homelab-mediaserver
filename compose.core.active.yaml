@@ -437,6 +437,22 @@ services:
         read_only: true
         bind: {create_host_path: false}
 
+  integration-proxy:
+    <<: *core-base
+    image: sha256:${CORE_INTEGRATION_PROXY_IMAGE_ID:?verified final image ID required}
+    working_dir: /app
+    entrypoint: [/usr/bin/env, -i, PATH=/app/.venv/bin:/usr/local/bin:/usr/bin:/bin,
+                 'PYTHONPATH=/app/services/common/src:/app/services/control/src',
+                 PYTHONDONTWRITEBYTECODE=1, PYTHONUNBUFFERED=1, LANG=C.UTF-8,
+                 /app/.venv/bin/python, -B, -m, uvicorn]
+    command: [homeserver_control.api.integration_proxy:create_app, --factory,
+              --host, 0.0.0.0, --port, '8787', --no-proxy-headers, --no-access-log]
+    mem_limit: 128m
+    memswap_limit: 128m
+    volumes: []
+    extra_hosts:
+      jellyfin: ${CORE_JELLYFIN_IP:?literal playback VM address required}
+
   qbit-monitor:
     <<: *core-base
     image: sha256:${CORE_QBIT_MONITOR_IMAGE_ID:?verified final image ID required}
