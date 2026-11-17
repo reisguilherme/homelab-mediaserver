@@ -1,0 +1,35 @@
+# Secrets & local runtime
+.env
+.env.*
+!.env.example
+!**/.env.example
+*.dec.yaml
+*.dec.yml
+*.dec.json
+*.key
+*.pem
+*.crt
+*.agekey
+age.key
+*.sqlite
+*.sqlite3
+*.db
+
+# IaC & tooling state
+.terraform/
+*.tfstate
+*.tfstate.*
+.venv/
+__pycache__/
+*.pyc
+node_modules/
+
+# Forbidden scratch/clutter directories
+.artifacts/
+.runtime/
+.worktrees/
+backup/
+graphify-out/
+*.tar
+*.tar.gz
+*.zip

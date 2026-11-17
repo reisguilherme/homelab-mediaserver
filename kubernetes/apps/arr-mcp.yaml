@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: arr-mcp
+  namespace: spoke-mediaserver
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: arr-mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: arr-mcp
+    spec:
+      restartPolicy: Always
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      initContainers:
+        - name: render-config
+          image: busybox:1.37
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              sed \
+                -e "s|__ARR_MCP_UI_PASSWORD_HASH__|${ARR_MCP_UI_PASSWORD_HASH:-}|g" \
+                -e "s|__ARR_MCP_HERMES_TOKEN_HASH__|${ARR_MCP_HERMES_TOKEN_HASH:-}|g" \
+                -e "s|__QBITTORRENT_USERNAME__|${QBITTORRENT_USERNAME:-}|g" \
+                /template/config.yaml > /config/config.yaml
+          envFrom:
+            - secretRef:
+                name: mediaserver-secrets
+                optional: true
+          volumeMounts:
+            - name: config-template
+              mountPath: /template
+              readOnly: true
+            - name: config
+              mountPath: /config
+      containers:
+        - name: arr-mcp
+          image: ghcr.io/bardesss/arr-mcp:2.2.1@sha256:52267602cdc0847927608bea4c5e7196fc586edda199bde91fa5fe75911827fa
+          env:
+            - name: TZ
+              value: America/Sao_Paulo
+            - name: ARR_MCP_CONFIG_DIR
+              value: /config
+            - name: ARR_MCP_PORT
+              value: "6060"
+            - name: LOG_LEVEL
+              value: info
+          envFrom:
+            - secretRef:
+                name: mediaserver-secrets
+                optional: true
+          ports:
+            - name: http
+              containerPort: 6060
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 6060
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 6060
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          volumeMounts:
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: config-template
+          configMap:
+            name: arr-mcp-config
+        - name: config
+          persistentVolumeClaim:
+            claimName: arr-mcp-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: arr-mcp
+  namespace: spoke-mediaserver
+spec:
+  selector:
+    app.kubernetes.io/name: arr-mcp
+  ports:
+    - name: http
+      port: 6060
+      targetPort: 6060

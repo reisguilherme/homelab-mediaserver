@@ -1,0 +1,15 @@
+title = "HomeServer gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow SOPS encrypted payloads and example templates"
+paths = [
+  '''\.example\.(ya?ml|json|env|tfvars)$''',
+  '''\.env\.example$''',
+]
+regexes = [
+  '''ENC\[AES256_GCM,data:.*\]''',
+  '''REPLACE_WITH_.*''',
+]

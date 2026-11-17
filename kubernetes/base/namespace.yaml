@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: spoke-mediaserver
+  labels:
+    app.kubernetes.io/part-of: spoke-mediaserver
+    pod-security.kubernetes.io/enforce: baseline
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: spoke-mediaserver-quota
+  namespace: spoke-mediaserver
+spec:
+  hard:
+    requests.memory: 4Gi
+    limits.memory: 8500Mi
+    persistentvolumeclaims: "16"

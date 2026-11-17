@@ -1,0 +1,56 @@
+auth:
+  username: admin
+  password_hash: __ARR_MCP_UI_PASSWORD_HASH__
+  allowed_hosts:
+    - media-mcp.greis.dev.br
+    - arr-mcp.spoke-mediaserver.svc.cluster.local
+    - arr-mcp
+  allow_token_in_url: false
+  tokens:
+    - name: hermes-agent
+      tier: destructive
+      hash: __ARR_MCP_HERMES_TOKEN_HASH__
+
+services:
+  radarr:
+    url: http://radarr:7878/radarr
+    api_key: "${RADARR_API_KEY}"
+    permissions: {safe_write: true, destructive: true}
+  sonarr:
+    url: http://sonarr:8989/sonarr
+    api_key: "${SONARR_API_KEY}"
+    permissions: {safe_write: true, destructive: true}
+  prowlarr:
+    url: http://prowlarr:9696/prowlarr
+    api_key: "${PROWLARR_API_KEY}"
+    permissions: {safe_write: true, destructive: false}
+  bazarr:
+    url: http://bazarr:6767/bazarr
+    api_key: "${BAZARR_API_KEY}"
+    permissions: {safe_write: true, destructive: false}
+  seerr:
+    url: http://seerr:5055
+    api_key: "${SEERR_API_KEY}"
+    allow_other_users: true
+    permissions: {safe_write: true, destructive: false}
+  jellyfin:
+    url: http://jellyfin:8096
+    api_key: "${JELLYFIN_API_KEY}"
+    allow_other_users: true
+    permissions: {safe_write: true, destructive: false}
+  qbittorrent:
+    url: http://qbittorrent:8080
+    username: __QBITTORRENT_USERNAME__
+    password: "${QBITTORRENT_PASSWORD}"
+    permissions: {safe_write: true, destructive: false}
+
+tools:
+  hide_unusable: true
+  media_cards: false
+
+metadata:
+  imdb:
+    enabled: false
+
+webhooks:
+  enabled: false
