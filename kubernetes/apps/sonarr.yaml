@@ -26,6 +26,12 @@ spec:
               value: "1000"
             - name: TZ
               value: America/Sao_Paulo
+            - name: SONARR__AUTH__APIKEY
+              valueFrom:
+                secretKeyRef:
+                  name: mediaserver-secrets
+                  key: SONARR_API_KEY
+                  optional: true
           ports:
             - name: http
               containerPort: 8989

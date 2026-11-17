@@ -16,6 +16,40 @@ spec:
         app.kubernetes.io/name: bazarr
     spec:
       restartPolicy: Always
+      initContainers:
+        - name: sync-auth
+          image: lscr.io/linuxserver/bazarr:1.5.1
+          command:
+            - python3
+            - -c
+            - |
+              import hashlib, os, pathlib, yaml
+              cfg = pathlib.Path("/config/config/config.yaml")
+              if not cfg.exists():
+                  raise SystemExit(0)
+              data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
+              auth = data.setdefault("auth", {})
+              auth["username"] = os.environ.get("ROOT_USERNAME") or "root"
+              root_pass = os.environ.get("ROOT_PASSWORD") or ""
+              if root_pass and not root_pass.startswith("REPLACE_WITH_"):
+                  auth["password"] = hashlib.md5(root_pass.encode("utf-8")).hexdigest()
+              for env_key, section in (
+                  ("BAZARR_API_KEY", auth),
+                  ("RADARR_API_KEY", data.setdefault("radarr", {})),
+                  ("SONARR_API_KEY", data.setdefault("sonarr", {})),
+              ):
+                  val = os.environ.get(env_key, "")
+                  if val and not val.startswith("REPLACE_WITH_"):
+                      section["apikey"] = val
+              cfg.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+              os.chown(cfg, 1000, 1000)
+          envFrom:
+            - secretRef:
+                name: mediaserver-secrets
+                optional: true
+          volumeMounts:
+            - name: config
+              mountPath: /config
       containers:
         - name: bazarr
           image: lscr.io/linuxserver/bazarr:1.5.1

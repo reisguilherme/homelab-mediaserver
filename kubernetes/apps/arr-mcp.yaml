@@ -28,11 +28,36 @@ spec:
             - -c
             - |
               set -eu
-              sed \
-                -e "s|__ARR_MCP_UI_PASSWORD_HASH__|${ARR_MCP_UI_PASSWORD_HASH:-}|g" \
-                -e "s|__ARR_MCP_HERMES_TOKEN_HASH__|${ARR_MCP_HERMES_TOKEN_HASH:-}|g" \
-                -e "s|__QBITTORRENT_USERNAME__|${QBITTORRENT_USERNAME:-}|g" \
-                /template/config.yaml > /config/config.yaml
+              EXISTING_UI_HASH=""
+              if [ -f /config/config.yaml ]; then
+                EXISTING_UI_HASH="$(sed -n 's/^  password_hash:[[:space:]]*//p' /config/config.yaml | head -n 1 || true)"
+              fi
+              HERMES_HASH=""
+              case "${ARR_MCP_HERMES_TOKEN:-}" in
+                ""|*REPLACE_WITH_*)
+                  HERMES_HASH=""
+                  ;;
+                *)
+                  HERMES_HASH="sha256:$(printf '%s' "${ARR_MCP_HERMES_TOKEN}" | sha256sum | awk '{print $1}')"
+                  ;;
+              esac
+              ROOT_USER="${ROOT_USERNAME:-root}"
+              case "${EXISTING_UI_HASH}" in
+                ""|__ARR_MCP_UI_PASSWORD_HASH__|'""'|"''")
+                  sed \
+                    -e "/^  password_hash: __ARR_MCP_UI_PASSWORD_HASH__/d" \
+                    -e "s|__ARR_MCP_HERMES_TOKEN_HASH__|${HERMES_HASH}|g" \
+                    -e "s|__ROOT_USERNAME__|${ROOT_USER}|g" \
+                    /template/config.yaml > /config/config.yaml
+                  ;;
+                *)
+                  sed \
+                    -e "s|__ARR_MCP_UI_PASSWORD_HASH__|${EXISTING_UI_HASH}|g" \
+                    -e "s|__ARR_MCP_HERMES_TOKEN_HASH__|${HERMES_HASH}|g" \
+                    -e "s|__ROOT_USERNAME__|${ROOT_USER}|g" \
+                    /template/config.yaml > /config/config.yaml
+                  ;;
+              esac
           envFrom:
             - secretRef:
                 name: mediaserver-secrets

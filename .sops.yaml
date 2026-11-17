@@ -1,4 +1,4 @@
 creation_rules:
   - path_regex: ^secrets/.*\.sops\.ya?ml$
     encrypted_regex: ^(data|stringData)$
-    age: age1REPLACE_WITH_HOMELAB_AGE_PUBLIC_KEY
+    age: age1nct9442jk3wwys45vtsf22qq29g2zgartrsar36smwdamswmacfq8jway0

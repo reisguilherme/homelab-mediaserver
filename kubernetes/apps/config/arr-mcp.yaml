@@ -1,5 +1,5 @@
 auth:
-  username: admin
+  username: root
   password_hash: __ARR_MCP_UI_PASSWORD_HASH__
   allowed_hosts:
     - media-mcp.greis.dev.br
@@ -40,8 +40,8 @@ services:
     permissions: {safe_write: true, destructive: false}
   qbittorrent:
     url: http://qbittorrent:8080
-    username: __QBITTORRENT_USERNAME__
-    password: "${QBITTORRENT_PASSWORD}"
+    username: __ROOT_USERNAME__
+    password: "${ROOT_PASSWORD}"
     permissions: {safe_write: true, destructive: false}
 
 tools:
