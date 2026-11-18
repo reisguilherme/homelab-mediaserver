@@ -18,8 +18,7 @@ spec:
       restartPolicy: Always
       containers:
         - name: byparr
-          image: ghcr.io/thephaseless/byparr:1.0.0
-          command: ["/app/.venv/bin/python3", "main.py"]
+          image: ghcr.io/thephaseless/byparr@sha256:874f719518f617d03a60e03411fc5d090647e1a877041e81f8dc965927c7deb6
           env:
             - name: TZ
               value: America/Sao_Paulo
@@ -49,7 +48,7 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 256Mi
+            sizeLimit: 512Mi
 ---
 apiVersion: v1
 kind: Service

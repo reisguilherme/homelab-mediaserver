@@ -22,42 +22,33 @@ spec:
         fsGroup: 1000
       initContainers:
         - name: render-config
-          image: busybox:1.37
+          image: ghcr.io/bardesss/arr-mcp:2.2.1@sha256:52267602cdc0847927608bea4c5e7196fc586edda199bde91fa5fe75911827fa
           command:
-            - /bin/sh
-            - -c
+            - node
+            - --input-type=module
+            - -e
             - |
-              set -eu
-              EXISTING_UI_HASH=""
-              if [ -f /config/config.yaml ]; then
-                EXISTING_UI_HASH="$(sed -n 's/^  password_hash:[[:space:]]*//p' /config/config.yaml | head -n 1 || true)"
-              fi
-              HERMES_HASH=""
-              case "${ARR_MCP_HERMES_TOKEN:-}" in
-                ""|*REPLACE_WITH_*)
-                  HERMES_HASH=""
-                  ;;
-                *)
-                  HERMES_HASH="sha256:$(printf '%s' "${ARR_MCP_HERMES_TOKEN}" | sha256sum | awk '{print $1}')"
-                  ;;
-              esac
-              ROOT_USER="${ROOT_USERNAME:-root}"
-              case "${EXISTING_UI_HASH}" in
-                ""|__ARR_MCP_UI_PASSWORD_HASH__|'""'|"''")
-                  sed \
-                    -e "/^  password_hash: __ARR_MCP_UI_PASSWORD_HASH__/d" \
-                    -e "s|__ARR_MCP_HERMES_TOKEN_HASH__|${HERMES_HASH}|g" \
-                    -e "s|__ROOT_USERNAME__|${ROOT_USER}|g" \
-                    /template/config.yaml > /config/config.yaml
-                  ;;
-                *)
-                  sed \
-                    -e "s|__ARR_MCP_UI_PASSWORD_HASH__|${EXISTING_UI_HASH}|g" \
-                    -e "s|__ARR_MCP_HERMES_TOKEN_HASH__|${HERMES_HASH}|g" \
-                    -e "s|__ROOT_USERNAME__|${ROOT_USER}|g" \
-                    /template/config.yaml > /config/config.yaml
-                  ;;
-              esac
+              import { createHash } from 'node:crypto';
+              import { readFileSync, writeFileSync } from 'node:fs';
+              import { hashPassword } from '/app/dist/src/core/session.js';
+              const rootUser = process.env.ROOT_USERNAME || 'root';
+              const rootPass = process.env.ROOT_PASSWORD || '';
+              const hermesTok = process.env.ARR_MCP_HERMES_TOKEN || '';
+              const hermesHash = hermesTok && !hermesTok.startsWith('REPLACE_WITH_')
+                ? 'sha256:' + createHash('sha256').update(hermesTok).digest('hex')
+                : '';
+              const uiHash = rootPass && !rootPass.startsWith('REPLACE_WITH_')
+                ? await hashPassword(rootPass)
+                : '';
+              let cfg = readFileSync('/template/config.yaml', 'utf8');
+              cfg = cfg.replaceAll('__ROOT_USERNAME__', rootUser);
+              cfg = cfg.replaceAll('__ARR_MCP_HERMES_TOKEN_HASH__', hermesHash);
+              if (uiHash) {
+                cfg = cfg.replaceAll('__ARR_MCP_UI_PASSWORD_HASH__', uiHash);
+              } else {
+                cfg = cfg.replace(/^  password_hash: __ARR_MCP_UI_PASSWORD_HASH__\r?\n/m, '');
+              }
+              writeFileSync('/config/config.yaml', cfg, 'utf8');
           envFrom:
             - secretRef:
                 name: mediaserver-secrets
@@ -67,7 +58,7 @@ spec:
               cpu: 25m
               memory: 32Mi
             limits:
-              memory: 64Mi
+              memory: 128Mi
           volumeMounts:
             - name: config-template
               mountPath: /template

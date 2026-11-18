@@ -18,7 +18,7 @@ spec:
       restartPolicy: Always
       containers:
         - name: radarr
-          image: lscr.io/linuxserver/radarr:5.18.4
+          image: lscr.io/linuxserver/radarr@sha256:adb6c09d6b729ea5e642c99cea35af72702ef476bf4763f153299ac5db9f0b4f
           env:
             - name: PUID
               value: "1000"
