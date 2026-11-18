@@ -32,7 +32,7 @@ services:
     url: http://seerr:5055
     api_key: "${SEERR_API_KEY}"
     allow_other_users: true
-    permissions: {safe_write: true, destructive: false}
+    permissions: {safe_write: true, destructive: true}
   jellyfin:
     url: http://jellyfin:8096
     api_key: "${JELLYFIN_API_KEY}"
@@ -42,7 +42,7 @@ services:
     url: http://qbittorrent:8080
     username: __ROOT_USERNAME__
     password: "${ROOT_PASSWORD}"
-    permissions: {safe_write: true, destructive: false}
+    permissions: {safe_write: true, destructive: true}
 
 tools:
   hide_unusable: true
