@@ -86,3 +86,34 @@ spec:
                 name: arr-mcp
                 port:
                   number: 6060
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: jellyfin-legacy-strip-prefix
+  namespace: spoke-mediaserver
+spec:
+  stripPrefix:
+    prefixes:
+      - /jellyfin
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jellyfin-legacy-subpath
+  namespace: spoke-mediaserver
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: spoke-mediaserver-jellyfin-legacy-strip-prefix@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: jellyfin.greis.dev.br
+      http:
+        paths:
+          - path: /jellyfin
+            pathType: Prefix
+            backend:
+              service:
+                name: jellyfin
+                port:
+                  number: 8096
