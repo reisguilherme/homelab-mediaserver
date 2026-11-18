@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const FORBIDDEN_DIRS = [".artifacts", ".runtime", ".worktrees", "backup", "graphify-out"];
-const KUSTOMIZE_DIRS = ["kubernetes"];
+const KUSTOMIZE_DIRS = ["kubernetes", "secrets"];
 
 const PRIVATE_KEY_RE = new RegExp(
   "-----BEGIN " + "(?:RSA|OPENSSH|EC|DSA) PRIVATE KEY-----"
