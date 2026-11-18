@@ -23,7 +23,9 @@ spec:
             - python3
             - -c
             - |
-              import hashlib, os, pathlib, yaml
+              import hashlib, os, pathlib, sys
+              sys.path.insert(0, "/app/bazarr/bin/libs")
+              import yaml
               cfg = pathlib.Path("/config/config/config.yaml")
               if not cfg.exists():
                   raise SystemExit(0)
