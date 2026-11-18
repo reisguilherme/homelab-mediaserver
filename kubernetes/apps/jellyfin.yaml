@@ -20,9 +20,9 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
-        supplementalGroups: [44, 109]
+        supplementalGroups: [44, 992] # video and render on homelab-k3s
       initContainers:
-        - name: sync-abyss-branding
+        - name: configure-jellyfin
           image: homeserver-jellyfin-abyss:12.2-2f809171-r6
           imagePullPolicy: IfNotPresent
           command:
@@ -47,6 +47,25 @@ spec:
               </BrandingOptions>
               EOF
               fi
+
+              encoding=/config/config/encoding.xml
+              tmp=$(mktemp "${encoding}.XXXXXX")
+              trap 'rm -f "$tmp"' EXIT
+              if [ -f "$encoding" ]; then
+                sed -E \
+                  -e 's~^([[:space:]]*<HardwareAccelerationType>)[^<]*(</HardwareAccelerationType>[[:space:]]*)$~\1qsv\2~' \
+                  -e 's~^([[:space:]]*<EnableHardwareEncoding>)[^<]*(</EnableHardwareEncoding>[[:space:]]*)$~\1true\2~' "$encoding" > "$tmp"
+                chmod --reference="$encoding" "$tmp"
+              else
+                printf '%s\n' '<EncodingOptions>' '  <HardwareAccelerationType>qsv</HardwareAccelerationType>' \
+                  '  <EnableHardwareEncoding>true</EnableHardwareEncoding>' '</EncodingOptions>' > "$tmp"
+              fi
+              if [ "$(grep -Ec '^[[:space:]]*<HardwareAccelerationType>qsv</HardwareAccelerationType>[[:space:]]*$' "$tmp")" != 1 ] ||
+                 [ "$(grep -Ec '^[[:space:]]*<EnableHardwareEncoding>true</EnableHardwareEncoding>[[:space:]]*$' "$tmp")" != 1 ]; then
+                echo "Expected both Quick Sync settings in Jellyfin encoding.xml" >&2
+                exit 1
+              fi
+              cmp -s "$tmp" "$encoding" || mv "$tmp" "$encoding"
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -82,6 +101,7 @@ spec:
               memory: 512Mi
             limits:
               memory: 3Gi
+              gpu.intel.com/i915: "1"
           livenessProbe:
             httpGet:
               path: /health
@@ -104,8 +124,6 @@ spec:
             - name: media-ro
               mountPath: /data/media
               readOnly: true
-            - name: dri
-              mountPath: /dev/dri
       volumes:
         - name: config
           persistentVolumeClaim:
@@ -120,10 +138,6 @@ spec:
           persistentVolumeClaim:
             claimName: mediaserver-library-ro
             readOnly: true
-        - name: dri
-          hostPath:
-            path: /dev/dri
-            type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service
