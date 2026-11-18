@@ -4,7 +4,7 @@ metadata:
   name: spoke-mediaserver
   labels:
     app.kubernetes.io/part-of: spoke-mediaserver
-    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce: privileged
 ---
 apiVersion: v1
 kind: ResourceQuota
@@ -14,5 +14,5 @@ metadata:
 spec:
   hard:
     requests.memory: 4Gi
-    limits.memory: 8500Mi
+    limits.memory: 9Gi
     persistentvolumeclaims: "16"

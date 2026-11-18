@@ -19,6 +19,7 @@ spec:
       containers:
         - name: byparr
           image: ghcr.io/thephaseless/byparr:1.0.0
+          command: ["/app/.venv/bin/python3", "main.py"]
           env:
             - name: TZ
               value: America/Sao_Paulo

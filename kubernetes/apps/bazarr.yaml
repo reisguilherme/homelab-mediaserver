@@ -56,6 +56,12 @@ spec:
             - secretRef:
                 name: mediaserver-secrets
                 optional: true
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
           volumeMounts:
             - name: config
               mountPath: /config

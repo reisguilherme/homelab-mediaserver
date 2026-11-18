@@ -22,12 +22,14 @@ spec:
         fsGroup: 1000
       containers:
         - name: seerr
-          image: ghcr.io/seerr-team/seerr:v2.4.0
+          image: ghcr.io/seerr-team/seerr@sha256:27602401178d54f1964442287b9f23f67a3fa2252645ee8065839ea1c3f69e45
           env:
             - name: TZ
               value: America/Sao_Paulo
             - name: PORT
               value: "5055"
+            - name: NODE_OPTIONS
+              value: "--no-network-family-autoselection --dns-result-order=ipv4first"
           ports:
             - name: http
               containerPort: 5055
