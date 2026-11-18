@@ -13,19 +13,19 @@ auth:
 
 services:
   radarr:
-    url: http://radarr:7878/radarr
+    url: http://radarr:7878
     api_key: "${RADARR_API_KEY}"
     permissions: {safe_write: true, destructive: true}
   sonarr:
-    url: http://sonarr:8989/sonarr
+    url: http://sonarr:8989
     api_key: "${SONARR_API_KEY}"
     permissions: {safe_write: true, destructive: true}
   prowlarr:
-    url: http://prowlarr:9696/prowlarr
+    url: http://prowlarr:9696
     api_key: "${PROWLARR_API_KEY}"
     permissions: {safe_write: true, destructive: false}
   bazarr:
-    url: http://bazarr:6767/bazarr
+    url: http://bazarr:6767
     api_key: "${BAZARR_API_KEY}"
     permissions: {safe_write: true, destructive: false}
   seerr:

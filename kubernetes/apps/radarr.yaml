@@ -43,13 +43,13 @@ spec:
               memory: 512Mi
           livenessProbe:
             httpGet:
-              path: /radarr/ping
+              path: /ping
               port: 7878
             initialDelaySeconds: 30
             periodSeconds: 30
           readinessProbe:
             httpGet:
-              path: /radarr/ping
+              path: /ping
               port: 7878
             initialDelaySeconds: 15
             periodSeconds: 15

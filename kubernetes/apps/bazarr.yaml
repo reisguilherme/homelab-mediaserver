@@ -33,10 +33,19 @@ spec:
               root_pass = os.environ.get("ROOT_PASSWORD") or ""
               if root_pass and not root_pass.startswith("REPLACE_WITH_"):
                   auth["password"] = hashlib.md5(root_pass.encode("utf-8")).hexdigest()
+              data.setdefault("general", {})["base_url"] = ""
+              radarr_cfg = data.setdefault("radarr", {})
+              radarr_cfg["ip"] = "radarr"
+              radarr_cfg["port"] = 7878
+              radarr_cfg["base_url"] = ""
+              sonarr_cfg = data.setdefault("sonarr", {})
+              sonarr_cfg["ip"] = "sonarr"
+              sonarr_cfg["port"] = 8989
+              sonarr_cfg["base_url"] = ""
               for env_key, section in (
                   ("BAZARR_API_KEY", auth),
-                  ("RADARR_API_KEY", data.setdefault("radarr", {})),
-                  ("SONARR_API_KEY", data.setdefault("sonarr", {})),
+                  ("RADARR_API_KEY", radarr_cfg),
+                  ("SONARR_API_KEY", sonarr_cfg),
               ):
                   val = os.environ.get(env_key, "")
                   if val and not val.startswith("REPLACE_WITH_"):
@@ -71,13 +80,13 @@ spec:
               memory: 384Mi
           livenessProbe:
             httpGet:
-              path: /bazarr/api/system/ping
+              path: /api/system/ping
               port: 6767
             initialDelaySeconds: 30
             periodSeconds: 30
           readinessProbe:
             httpGet:
-              path: /bazarr/api/system/ping
+              path: /api/system/ping
               port: 6767
             initialDelaySeconds: 15
             periodSeconds: 15
