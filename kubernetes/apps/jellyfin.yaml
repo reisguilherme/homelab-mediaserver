@@ -21,6 +21,45 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
         supplementalGroups: [44, 109]
+      initContainers:
+        - name: sync-abyss-branding
+          image: homeserver-jellyfin-abyss:12.2-2f809171-r6
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              mkdir -p /config/config
+              BRANDING="/config/config/branding.xml"
+              if [ -f "$BRANDING" ]; then
+                sed -i "s|/jellyfin/web/ui/abyss.css|/web/ui/abyss.css|g" "$BRANDING"
+              else
+                cat > "$BRANDING" <<'EOF'
+              <?xml version="1.0" encoding="utf-8"?>
+              <BrandingOptions xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+                <LoginDisclaimer />
+                <CustomCss>/* HOMELAB ABYSS START */
+              @import url('/web/ui/abyss.css?v=2f809171-r6');
+              /* HOMELAB ABYSS END */
+              </CustomCss>
+                <SplashscreenEnabled>false</SplashscreenEnabled>
+              </BrandingOptions>
+              EOF
+              fi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            - name: config
+              mountPath: /config
       containers:
         - name: jellyfin
           image: homeserver-jellyfin-abyss:12.2-2f809171-r6
