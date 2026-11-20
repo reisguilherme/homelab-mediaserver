@@ -43,12 +43,23 @@ spec:
               let cfg = readFileSync('/template/config.yaml', 'utf8');
               cfg = cfg.replaceAll('__ROOT_USERNAME__', rootUser);
               cfg = cfg.replaceAll('__ARR_MCP_HERMES_TOKEN_HASH__', hermesHash);
+              const dashboardHash = process.env.DASHBOARD_TOKEN_HASH;
+              if (!/^sha256:[a-f0-9]{64}$/.test(dashboardHash ?? '')) {
+                throw new Error('Dashboard token digest is missing or invalid');
+              }
+              cfg = cfg.replaceAll('__ARR_MCP_DASHBOARD_TOKEN_HASH__', dashboardHash);
               if (uiHash) {
                 cfg = cfg.replaceAll('__ARR_MCP_UI_PASSWORD_HASH__', uiHash);
               } else {
                 cfg = cfg.replace(/^  password_hash: __ARR_MCP_UI_PASSWORD_HASH__\r?\n/m, '');
               }
               writeFileSync('/config/config.yaml', cfg, 'utf8');
+          env:
+            - name: DASHBOARD_TOKEN_HASH
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-reader
+                  key: token-hash
           envFrom:
             - secretRef:
                 name: mediaserver-secrets
