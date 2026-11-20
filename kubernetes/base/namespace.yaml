@@ -4,7 +4,15 @@ metadata:
   name: spoke-mediaserver
   labels:
     app.kubernetes.io/part-of: spoke-mediaserver
+    homelab.greis.dev.br/spoke: "true"
+    homelab.greis.dev.br/domain: media
     pod-security.kubernetes.io/enforce: privileged
+  annotations:
+    homeship.greis.dev.br/title: Mediaserver
+    homeship.greis.dev.br/icon: play
+    homeship.greis.dev.br/accent: mint
+    homeship.greis.dev.br/capabilities: media
+    homeship.greis.dev.br/loki-chip: MEDIA
 ---
 apiVersion: v1
 kind: ResourceQuota
