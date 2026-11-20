@@ -26,6 +26,13 @@ spec:
               value: "1000"
             - name: TZ
               value: America/Sao_Paulo
+            # Restored configs may contain the legacy AuthenticationEnabled override.
+            - name: SONARR__AUTH__ENABLED
+              value: "false"
+            - name: SONARR__AUTH__METHOD
+              value: External
+            - name: SONARR__AUTH__REQUIRED
+              value: Enabled
             - name: SONARR__AUTH__APIKEY
               valueFrom:
                 secretKeyRef:

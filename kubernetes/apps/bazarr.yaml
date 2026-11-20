@@ -16,57 +16,6 @@ spec:
         app.kubernetes.io/name: bazarr
     spec:
       restartPolicy: Always
-      initContainers:
-        - name: sync-auth
-          image: lscr.io/linuxserver/bazarr:1.6.2
-          command:
-            - python3
-            - -c
-            - |
-              import hashlib, os, pathlib, sys
-              sys.path.insert(0, "/app/bazarr/bin/libs")
-              import yaml
-              cfg = pathlib.Path("/config/config/config.yaml")
-              if not cfg.exists():
-                  raise SystemExit(0)
-              data = yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
-              auth = data.setdefault("auth", {})
-              auth["username"] = os.environ.get("ROOT_USERNAME") or "root"
-              root_pass = os.environ.get("ROOT_PASSWORD") or ""
-              if root_pass and not root_pass.startswith("REPLACE_WITH_"):
-                  auth["password"] = hashlib.md5(root_pass.encode("utf-8")).hexdigest()
-              data.setdefault("general", {})["base_url"] = ""
-              radarr_cfg = data.setdefault("radarr", {})
-              radarr_cfg["ip"] = "radarr"
-              radarr_cfg["port"] = 7878
-              radarr_cfg["base_url"] = ""
-              sonarr_cfg = data.setdefault("sonarr", {})
-              sonarr_cfg["ip"] = "sonarr"
-              sonarr_cfg["port"] = 8989
-              sonarr_cfg["base_url"] = ""
-              for env_key, section in (
-                  ("BAZARR_API_KEY", auth),
-                  ("RADARR_API_KEY", radarr_cfg),
-                  ("SONARR_API_KEY", sonarr_cfg),
-              ):
-                  val = os.environ.get(env_key, "")
-                  if val and not val.startswith("REPLACE_WITH_"):
-                      section["apikey"] = val
-              cfg.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
-              os.chown(cfg, 1000, 1000)
-          envFrom:
-            - secretRef:
-                name: mediaserver-secrets
-                optional: true
-          resources:
-            requests:
-              cpu: 25m
-              memory: 64Mi
-            limits:
-              memory: 256Mi
-          volumeMounts:
-            - name: config
-              mountPath: /config
       containers:
         - name: bazarr
           image: lscr.io/linuxserver/bazarr:1.6.2
@@ -77,6 +26,38 @@ spec:
               value: "1000"
             - name: TZ
               value: America/Sao_Paulo
+            - name: DYNACONF_AUTH__TYPE
+              value: "@none"
+            - name: DYNACONF_GENERAL__BASE_URL
+              value: '@json ""'
+            - name: DYNACONF_RADARR__IP
+              value: radarr
+            - name: DYNACONF_RADARR__PORT
+              value: "7878"
+            - name: DYNACONF_RADARR__BASE_URL
+              value: '@json ""'
+            - name: DYNACONF_SONARR__IP
+              value: sonarr
+            - name: DYNACONF_SONARR__PORT
+              value: "8989"
+            - name: DYNACONF_SONARR__BASE_URL
+              value: '@json ""'
+            - name: BAZARR_API_KEY
+              valueFrom:
+                secretKeyRef: { name: mediaserver-secrets, key: BAZARR_API_KEY }
+            - name: RADARR_API_KEY
+              valueFrom:
+                secretKeyRef: { name: mediaserver-secrets, key: RADARR_API_KEY }
+            - name: SONARR_API_KEY
+              valueFrom:
+                secretKeyRef: { name: mediaserver-secrets, key: SONARR_API_KEY }
+            # Force strings, including keys consisting entirely of digits.
+            - name: DYNACONF_AUTH__APIKEY
+              value: "@str $(BAZARR_API_KEY)"
+            - name: DYNACONF_RADARR__APIKEY
+              value: "@str $(RADARR_API_KEY)"
+            - name: DYNACONF_SONARR__APIKEY
+              value: "@str $(SONARR_API_KEY)"
           ports:
             - name: http
               containerPort: 6767
