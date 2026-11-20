@@ -22,7 +22,7 @@ FONT_FILES = {
     "google-sans-italic-latin-ext.woff2",
     "material-icons-round.woff2",
     "LICENSE-material-icons.txt",
-    "OFL-google-sans.txt",
+    "OFL.txt",
     "TRADEMARKS-google-sans.md",
     "material-icons.package.json",
     "google-sans.source.css",
@@ -152,6 +152,8 @@ def prepare_fonts(fonts: dict[str, bytes], sources: dict) -> dict[str, bytes]:
         for name, content in fonts.items()
         if name not in {"google-sans.source.css", "material-icons.package.json"}
     }
+    # Older runtime packages served the Google Sans license at this path.
+    result["OFL-google-sans.txt"] = fonts["OFL.txt"]
     stylesheet = fonts["google-sans.source.css"].decode("utf-8").replace("\r\n", "\n")
     selected = []
     seen = set()

@@ -10,7 +10,7 @@
     "google_sans_css": "https://fonts.googleapis.com/css2?family=Google+Sans:ital,opsz,wght@0,17..18,400..700;1,17..18,400..700&display=swap",
     "google_sans_css_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "google_sans_license_commit": "fc0842ce25d003e57a2fc72cd4c4a6af6175a2cc",
-    "OFL-google-sans.txt": "https://raw.githubusercontent.com/google/fonts/fc0842ce25d003e57a2fc72cd4c4a6af6175a2cc/ofl/googlesans/OFL.txt",
+    "OFL.txt": "https://raw.githubusercontent.com/google/fonts/fc0842ce25d003e57a2fc72cd4c4a6af6175a2cc/ofl/googlesans/OFL.txt",
     "TRADEMARKS-google-sans.md": "https://raw.githubusercontent.com/google/fonts/fc0842ce25d003e57a2fc72cd4c4a6af6175a2cc/ofl/googlesans/TRADEMARKS.md",
     "google-sans-italic-latin-ext.woff2": "https://fonts.gstatic.com/s/googlesans/v76/4UaXrENHsxJlGDuGo1OIlL3L2JB874GPhFI9_IqmuTCEjshE7g.woff2",
     "google-sans-italic-latin.woff2": "https://fonts.gstatic.com/s/googlesans/v76/4UaXrENHsxJlGDuGo1OIlL3L2JB874GPhFI9_IqmuTCKjsg.woff2",
@@ -26,7 +26,7 @@
     "LICENSE-material-icons.txt": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
     "material-icons-round.woff2": "c948f1263341699b3c1e9c55d8d0f3e446669d0f2b9d55494c6169222c0243a6",
     "material-icons.package.json": "420e840e01b9c86e803c418d427d6f2133417350c7a4ee943fe359177e72982b",
-    "OFL-google-sans.txt": "2b75ef20f13d83a7514aee452c4782c20cdc9ff2dee17600f44d37a06d4fb958",
+    "OFL.txt": "2b75ef20f13d83a7514aee452c4782c20cdc9ff2dee17600f44d37a06d4fb958",
     "TRADEMARKS-google-sans.md": "215bc8c1ce46d1b81531f33ebb5af201e7a5da76b8f3ae4c705336fd70fc89e1"
   },
   "vendor_sha256": {
