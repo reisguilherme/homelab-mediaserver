@@ -76,6 +76,17 @@ spec:
                 name: qbittorrent
                 port:
                   number: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: media-mcp
+  namespace: spoke-mediaserver
+  annotations:
+    homeship.greis.dev.br/hidden: "true"
+spec:
+  ingressClassName: traefik
+  rules:
     - host: media-mcp.greis.dev.br
       http:
         paths:
