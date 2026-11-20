@@ -54,6 +54,9 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
       ports:
         - protocol: TCP
           port: 8096
@@ -107,6 +110,9 @@ spec:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: spoke-hermes
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: hermes-agent
       ports:
         - protocol: TCP
           port: 6060
