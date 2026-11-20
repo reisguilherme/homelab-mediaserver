@@ -6,6 +6,7 @@ resources:
   - base/namespace.yaml
   - base/storage.yaml
   - base/network-policies.yaml
+  - base/dashboard-metrics.yaml
   - apps/intel-gpu-plugin.yaml
   - apps/jellyfin.yaml
   - apps/qbittorrent.yaml

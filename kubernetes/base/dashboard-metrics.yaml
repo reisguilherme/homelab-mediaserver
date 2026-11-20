@@ -1,0 +1,23 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dashboard-pod-metrics
+  namespace: spoke-mediaserver
+rules:
+  - apiGroups: [metrics.k8s.io]
+    resources: [pods]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dashboard-pod-metrics
+  namespace: spoke-mediaserver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dashboard-pod-metrics
+subjects:
+  - kind: ServiceAccount
+    name: dashboard
+    namespace: spoke-dashboard
