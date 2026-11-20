@@ -10,6 +10,9 @@ auth:
     - name: hermes-agent
       tier: destructive
       hash: __ARR_MCP_HERMES_TOKEN_HASH__
+    - name: dashboard
+      tier: read
+      hash: __ARR_MCP_DASHBOARD_TOKEN_HASH__
 
 services:
   radarr:
