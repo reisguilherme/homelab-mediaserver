@@ -16,7 +16,7 @@ Stack nativa de streaming e automação de mídia para o cluster **K3s + FluxCD*
 | `bazarr` | Gerenciamento nativo de legendas | `bazarr.greis.dev.br` (SSO Hub) \| `/data` (**RW**) |
 | `qbittorrent` | Cliente BitTorrent preservando seeding e hardlinks | `qbittorrent.greis.dev.br` (SSO Hub) \| `/data` (**RW**) + porta `6881` |
 | `recyclarr` | CronJob de perfis Trash Guides (1080p + Dual-Áudio/PT-BR) | ConfigMap sincronizado via GitOps |
-| `arr-mcp` | Ponte MCP para o Spoke `homelab-hermes` | Interno ClusterIP `:6060` + `media-mcp.greis.dev.br` (SSO Hub) |
+| `arr-mcp` | Ponte MCP para `spoke-hermes` (escrita c/ confirmação) e `spoke-dashboard` (leitura) | Interno ClusterIP `:6060` + `media-mcp.greis.dev.br` (SSO Hub) |
 
 ## Validação e Build Local
 

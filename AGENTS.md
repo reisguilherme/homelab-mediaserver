@@ -8,7 +8,7 @@ Este repositório é o **Spoke de Streaming e Automação de Mídia**, executado
   - `jellyfin`: Imagem `homeserver-jellyfin-abyss:12.2-2f809171-r6` (tema Abyss local em `docker/jellyfin-abyss/`), aceleração Intel QuickSync (`/dev/dri`), transcode no disco `/mnt/transcode/jellyfin` e biblioteca montada em `/data/media` com `readOnly: true`.
   - `qbittorrent`: Monta `/data` (`/mnt/storage/homeserver`) RW preservando os **hardlinks** existentes e mantendo os **733 torrents concluídos em seeding**.
   - `radarr`, `sonarr`, `prowlarr`, `bazarr`, `seerr`, `byparr`, `recyclarr`: Fluxo nativo padrão Trash Guides com `UID:GID 1000:1000`, `restartPolicy: Always` e probes HTTP reais.
-  - `arr-mcp`: Endpoint MCP interno (`http://arr-mcp.spoke-mediaserver.svc.cluster.local:6060/mcp`) consumido pelo `spoke-hermes` via `NetworkPolicy` restrita, com preview e confirmação nativa.
+  - `arr-mcp`: Endpoint MCP interno (`http://arr-mcp.spoke-mediaserver.svc.cluster.local:6060/mcp`) consumido via `NetworkPolicy` restrita pelo `spoke-hermes` (token de escrita com preview/confirmação) e pelo `spoke-dashboard` (token dedicado de leitura `read`).
 
 ## Regras Estritas
 
