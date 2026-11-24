@@ -1,0 +1,9 @@
+resource_providers:
+  - name: homeserver-radarr-cfs
+    type: custom-formats
+    service: radarr
+    path: /config/custom-formats/radarr
+  - name: homeserver-sonarr-cfs
+    type: custom-formats
+    service: sonarr
+    path: /config/custom-formats/sonarr

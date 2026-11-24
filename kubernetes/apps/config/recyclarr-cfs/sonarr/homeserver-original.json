@@ -1,0 +1,16 @@
+{
+  "trash_id": "homeserver-sonarr-original",
+  "name": "HomeServer Original",
+  "includeCustomFormatWhenRenaming": false,
+  "specifications": [
+    {
+      "name": "Original",
+      "implementation": "LanguageSpecification",
+      "negate": false,
+      "required": true,
+      "fields": {
+        "value": -2
+      }
+    }
+  ]
+}

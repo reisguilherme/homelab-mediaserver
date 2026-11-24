@@ -24,6 +24,19 @@ configMapGenerator:
   - name: recyclarr-config
     files:
       - recyclarr.yml=apps/config/recyclarr.yml
+      - settings.yml=apps/config/recyclarr-settings.yml
+  - name: recyclarr-cfs-radarr
+    files:
+      - homeserver-bluray.json=apps/config/recyclarr-cfs/radarr/homeserver-bluray.json
+      - homeserver-original.json=apps/config/recyclarr-cfs/radarr/homeserver-original.json
+      - homeserver-dual-ptbr-original.json=apps/config/recyclarr-cfs/radarr/homeserver-dual-ptbr-original.json
+      - homeserver-asc-dual-original.json=apps/config/recyclarr-cfs/radarr/homeserver-asc-dual-original.json
+  - name: recyclarr-cfs-sonarr
+    files:
+      - homeserver-bluray.json=apps/config/recyclarr-cfs/sonarr/homeserver-bluray.json
+      - homeserver-original.json=apps/config/recyclarr-cfs/sonarr/homeserver-original.json
+      - homeserver-dual-ptbr-original.json=apps/config/recyclarr-cfs/sonarr/homeserver-dual-ptbr-original.json
+      - homeserver-asc-dual-original.json=apps/config/recyclarr-cfs/sonarr/homeserver-asc-dual-original.json
   - name: arr-mcp-config
     files:
       - config.yaml=apps/config/arr-mcp.yaml

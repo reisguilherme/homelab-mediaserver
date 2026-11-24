@@ -1,69 +1,417 @@
 radarr:
-  radarr-hd-bluray-web:
+  radarr-homeserver:
     base_url: http://radarr:7878
     api_key: !env_var RADARR_API_KEY
     delete_old_custom_formats: true
-    replace_existing_custom_formats: true
     quality_definition:
       type: movie
     quality_profiles:
-      - name: HD Bluray + WEB
+      - name: Standard
         reset_unmatched_scores:
           enabled: true
+        min_format_score: 10
+        min_upgrade_format_score: 1
         upgrade:
           allowed: true
-          until_quality: Bluray-1080p
+          until_quality: HomeServer 1080p
           until_score: 10000
         quality_sort: top
         qualities:
-          - name: Bluray-1080p
-          - name: WEB 1080p
+          - name: HomeServer 1080p
             qualities:
+              - Bluray-1080p
               - WEBDL-1080p
-              - WEBRip-1080p
+      - name: Dublado
+        reset_unmatched_scores:
+          enabled: true
+        min_format_score: 10
+        min_upgrade_format_score: 1
+        upgrade:
+          allowed: true
+          until_quality: HomeServer 1080p
+          until_score: 10000
+        quality_sort: top
+        qualities:
+          - name: HomeServer 1080p
+            qualities:
+              - Bluray-1080p
+              - WEBDL-1080p
+      - name: Max Quality
+        reset_unmatched_scores:
+          enabled: true
+        min_format_score: 10
+        min_upgrade_format_score: 1
+        upgrade:
+          allowed: true
+          until_quality: Remux-2160p
+          until_score: 10000
+        quality_sort: top
+        qualities:
+          - name: Remux-2160p
+          - name: HomeServer 2160p
+            qualities:
+              - Bluray-2160p
+              - WEBDL-2160p
+          - name: Remux-1080p
+          - name: HomeServer 1080p
+            qualities:
+              - Bluray-1080p
+              - WEBDL-1080p
     custom_formats:
+      # Unwanted releases (TRaSH Guides)
+      - trash_ids:
+          - ed38b889b31be83fda192888e2286d83 # BR-DISK
+          - 90a6f9a284dff5103f6346090e6280c8 # LQ
+          - e204b80c87be9497a8a6eaff48f72905 # LQ (Release Title)
+          - b6832f586342ef70d9c128d40c07b872 # Bad Dual Groups
+          - 7357cf5161efbf8c4d5d0c30b4815ee2 # Obfuscated
+          - b8cd450cbfa689c0259a01d9e29ba3d6 # 3D
+          - 0a3f082873eb454bde444150b70253cc # Extras
+        assign_scores_to:
+          - name: Standard
+            score: -10000
+          - name: Dublado
+            score: -10000
+          - name: Max Quality
+            score: -10000
+      # HQ Release Groups (calibrated below Dublado PT-BR priority)
+      - trash_ids:
+          - ed27ebfef2f323e964fb1f61391bcb35 # HD Bluray Tier 01
+        assign_scores_to:
+          - name: Standard
+            score: 180
+          - name: Dublado
+            score: 180
+          - name: Max Quality
+            score: 180
+      - trash_ids:
+          - c20c8647f2746a1f4c4262b0fbbeeeae # HD Bluray Tier 02
+        assign_scores_to:
+          - name: Standard
+            score: 160
+          - name: Dublado
+            score: 160
+          - name: Max Quality
+            score: 160
+      - trash_ids:
+          - 5608c71bcebba0a5e666223bae8c9227 # HD Bluray Tier 03
+        assign_scores_to:
+          - name: Standard
+            score: 140
+          - name: Dublado
+            score: 140
+          - name: Max Quality
+            score: 140
+      - trash_ids:
+          - 4d74ac4c4db0b64bff6ce0cffef99bf0 # UHD Bluray Tier 01
+        assign_scores_to:
+          - name: Max Quality
+            score: 180
+      - trash_ids:
+          - a58f517a70193f8e578056642178419d # UHD Bluray Tier 02
+        assign_scores_to:
+          - name: Max Quality
+            score: 160
+      - trash_ids:
+          - e71939fae578037e7aed3ee219bbe7c1 # UHD Bluray Tier 03
+        assign_scores_to:
+          - name: Max Quality
+            score: 140
+      - trash_ids:
+          - c20f169ef63c5f40c2def54abaf4438e # WEB Tier 01
+        assign_scores_to:
+          - name: Standard
+            score: 120
+          - name: Dublado
+            score: 120
+          - name: Max Quality
+            score: 120
+      - trash_ids:
+          - 403816d65392c79236dcb6dd591aeda4 # WEB Tier 02
+        assign_scores_to:
+          - name: Standard
+            score: 110
+          - name: Dublado
+            score: 110
+          - name: Max Quality
+            score: 110
+      - trash_ids:
+          - af94e0fe497124d1f9ce732069ec8c3b # WEB Tier 03
+        assign_scores_to:
+          - name: Standard
+            score: 100
+          - name: Dublado
+            score: 100
+          - name: Max Quality
+            score: 100
+      # Editions & Repacks
       - trash_ids:
           - 0f12c086e289cf966fa5948eac571f44 # Hybrid
-          - 570bc9ebecd92723d2d21500f4be314c # Remaster
-          - eca37840c13c6ef2dd0262b142a54f3f # 4K Remaster
-          - b6832f586342ef70d9c128d40c07b872 # Bad Dual Groups
-          - ae9b7c9efde1f3bd336a8cbd1ec4c5e5 # No-RlsGroup
-          - 7357cf5161efbf8c4d5d0c30b4815ee2 # Obfuscated
         assign_scores_to:
-          - name: HD Bluray + WEB
+          - name: Standard
+            score: 30
+          - name: Dublado
+            score: 30
+          - name: Max Quality
+            score: 30
       - trash_ids:
-          - 69aa1e159f97d860440b04cd6d590c4f # Portuguese / Dual Audio preference
+          - 570bc9ebecd92723d2d21500f4be314c # Remaster
+          - eca37840c13c6ef2dd0262b141a5482f # 4K Remaster
         assign_scores_to:
-          - name: HD Bluray + WEB
-            score: 1500
+          - name: Standard
+            score: 25
+          - name: Dublado
+            score: 25
+          - name: Max Quality
+            score: 25
+      - trash_ids:
+          - e7718d7a3ce595f289bfee26adc178f5 # Repack/Proper
+        assign_scores_to:
+          - name: Standard
+            score: 5
+          - name: Dublado
+            score: 5
+          - name: Max Quality
+            score: 5
+      - trash_ids:
+          - ae43b294509409a6a13919dedd4764c4 # Repack2
+        assign_scores_to:
+          - name: Standard
+            score: 6
+          - name: Dublado
+            score: 6
+          - name: Max Quality
+            score: 6
+      - trash_ids:
+          - 5caaaa1c08c1742aa4342d8c4cc463f2 # Repack3
+        assign_scores_to:
+          - name: Standard
+            score: 7
+          - name: Dublado
+            score: 7
+          - name: Max Quality
+            score: 7
+      # HomeServer custom formats (local GitOps provider)
+      - trash_ids:
+          - homeserver-radarr-bluray
+        assign_scores_to:
+          - name: Standard
+            score: 100
+          - name: Dublado
+            score: 100
+          - name: Max Quality
+            score: 100
+      - trash_ids:
+          - homeserver-radarr-original
+        assign_scores_to:
+          - name: Standard
+            score: 20
+          - name: Dublado
+            score: 10
+          - name: Max Quality
+            score: 20
+      - trash_ids:
+          - homeserver-radarr-dual-ptbr-original
+        assign_scores_to:
+          - name: Standard
+            score: -10
+          - name: Dublado
+            score: 1000
+          - name: Max Quality
+            score: -10
+      - trash_ids:
+          - homeserver-radarr-asc-dual-original
+        assign_scores_to:
+          - name: Standard
+            score: 10
+          - name: Dublado
+            score: 1010
+          - name: Max Quality
+            score: 10
 
 sonarr:
-  sonarr-web-1080p:
+  sonarr-homeserver:
     base_url: http://sonarr:8989
     api_key: !env_var SONARR_API_KEY
     delete_old_custom_formats: true
-    replace_existing_custom_formats: true
     quality_definition:
       type: series
     quality_profiles:
-      - name: WEB-1080p
+      - name: Standard
         reset_unmatched_scores:
           enabled: true
+        min_format_score: 10
+        min_upgrade_format_score: 1
         upgrade:
           allowed: true
-          until_quality: WEB 1080p
+          until_quality: HomeServer 1080p
           until_score: 10000
         quality_sort: top
         qualities:
-          - name: WEB 1080p
+          - name: HomeServer 1080p
             qualities:
+              - Bluray-1080p
               - WEBDL-1080p
-              - WEBRip-1080p
-          - name: Bluray-1080p
+      - name: Dublado
+        reset_unmatched_scores:
+          enabled: true
+        min_format_score: 10
+        min_upgrade_format_score: 1
+        upgrade:
+          allowed: true
+          until_quality: HomeServer 1080p
+          until_score: 10000
+        quality_sort: top
+        qualities:
+          - name: HomeServer 1080p
+            qualities:
+              - Bluray-1080p
+              - WEBDL-1080p
+      - name: Max Quality
+        reset_unmatched_scores:
+          enabled: true
+        min_format_score: 10
+        min_upgrade_format_score: 1
+        upgrade:
+          allowed: true
+          until_quality: Bluray-2160p Remux
+          until_score: 10000
+        quality_sort: top
+        qualities:
+          - name: Bluray-2160p Remux
+          - name: HomeServer 2160p
+            qualities:
+              - Bluray-2160p
+              - WEBDL-2160p
+          - name: Bluray-1080p Remux
+          - name: HomeServer 1080p
+            qualities:
+              - Bluray-1080p
+              - WEBDL-1080p
     custom_formats:
+      # Unwanted releases (TRaSH Guides)
       - trash_ids:
+          - 85c61753df5da1fb2aab6f2a47426b09 # BR-DISK
+          - 9c11cd3f07101cdba90a2d81cf0e56b4 # LQ
+          - e2315f990da2e2cbfc9fa5b7a6fcfe48 # LQ (Release Title)
           - 32b367365729d530ca1c124a0b180c64 # Bad Dual Groups
-          - 82d40da2bc6923f41e14394075dd4b03 # No-RlsGroup
           - e1a997ddb54e3ecbfe06341ad323c458 # Obfuscated
+          - fbcb31d8dabd2a319072b84fc0b7249c # Extras
         assign_scores_to:
-          - name: WEB-1080p
+          - name: Standard
+            score: -10000
+          - name: Dublado
+            score: -10000
+          - name: Max Quality
+            score: -10000
+      # HQ Release Groups (calibrated below Dublado PT-BR priority)
+      - trash_ids:
+          - d6819cba26b1a6508138d25fb5e32293 # HD Bluray Tier 01
+        assign_scores_to:
+          - name: Standard
+            score: 180
+          - name: Dublado
+            score: 180
+          - name: Max Quality
+            score: 180
+      - trash_ids:
+          - c2216b7b8aa545dc1ce8388c618f8d57 # HD Bluray Tier 02
+        assign_scores_to:
+          - name: Standard
+            score: 160
+          - name: Dublado
+            score: 160
+          - name: Max Quality
+            score: 160
+      - trash_ids:
+          - e6258996055b9fbab7e9cb2f75819294 # WEB Tier 01
+        assign_scores_to:
+          - name: Standard
+            score: 120
+          - name: Dublado
+            score: 120
+          - name: Max Quality
+            score: 120
+      - trash_ids:
+          - 58790d4e2fdcd9733aa7ae68ba2bb503 # WEB Tier 02
+        assign_scores_to:
+          - name: Standard
+            score: 110
+          - name: Dublado
+            score: 110
+          - name: Max Quality
+            score: 110
+      - trash_ids:
+          - d84935abd3f8556dcd51d4f27e22d0a6 # WEB Tier 03
+        assign_scores_to:
+          - name: Standard
+            score: 100
+          - name: Dublado
+            score: 100
+          - name: Max Quality
+            score: 100
+      # Repacks
+      - trash_ids:
+          - ec8fa7296b64e8cd390a1600981f3923 # Repack/Proper
+        assign_scores_to:
+          - name: Standard
+            score: 5
+          - name: Dublado
+            score: 5
+          - name: Max Quality
+            score: 5
+      - trash_ids:
+          - eb3d5cc0a2be0db205fb823640db6a3c # Repack2
+        assign_scores_to:
+          - name: Standard
+            score: 6
+          - name: Dublado
+            score: 6
+          - name: Max Quality
+            score: 6
+      - trash_ids:
+          - 44e7c4de10ae50265753082e5dc76047 # Repack3
+        assign_scores_to:
+          - name: Standard
+            score: 7
+          - name: Dublado
+            score: 7
+          - name: Max Quality
+            score: 7
+      # HomeServer custom formats (local GitOps provider)
+      - trash_ids:
+          - homeserver-sonarr-bluray
+        assign_scores_to:
+          - name: Standard
+            score: 100
+          - name: Dublado
+            score: 100
+          - name: Max Quality
+            score: 100
+      - trash_ids:
+          - homeserver-sonarr-original
+        assign_scores_to:
+          - name: Standard
+            score: 20
+          - name: Dublado
+            score: 10
+          - name: Max Quality
+            score: 20
+      - trash_ids:
+          - homeserver-sonarr-dual-ptbr-original
+        assign_scores_to:
+          - name: Standard
+            score: -10
+          - name: Dublado
+            score: 1000
+          - name: Max Quality
+            score: -10
+      - trash_ids:
+          - homeserver-sonarr-asc-dual-original
+        assign_scores_to:
+          - name: Standard
+            score: 10
+          - name: Dublado
+            score: 1010
+          - name: Max Quality
+            score: 10

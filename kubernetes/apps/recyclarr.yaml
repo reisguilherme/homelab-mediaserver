@@ -21,7 +21,7 @@ spec:
             runAsGroup: 1000
           containers:
             - name: recyclarr
-              image: ghcr.io/recyclarr/recyclarr:7.4.0
+              image: ghcr.io/recyclarr/recyclarr:8.8.1
               args: ["sync"]
               envFrom:
                 - secretRef:
@@ -30,15 +30,31 @@ spec:
               resources:
                 requests:
                   cpu: 50m
-                  memory: 64Mi
-                limits:
                   memory: 128Mi
+                limits:
+                  memory: 256Mi
               volumeMounts:
                 - name: config
                   mountPath: /config/recyclarr.yml
                   subPath: recyclarr.yml
                   readOnly: true
+                - name: config
+                  mountPath: /config/settings.yml
+                  subPath: settings.yml
+                  readOnly: true
+                - name: cfs-radarr
+                  mountPath: /config/custom-formats/radarr
+                  readOnly: true
+                - name: cfs-sonarr
+                  mountPath: /config/custom-formats/sonarr
+                  readOnly: true
           volumes:
             - name: config
               configMap:
                 name: recyclarr-config
+            - name: cfs-radarr
+              configMap:
+                name: recyclarr-cfs-radarr
+            - name: cfs-sonarr
+              configMap:
+                name: recyclarr-cfs-sonarr

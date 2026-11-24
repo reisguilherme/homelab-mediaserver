@@ -1,0 +1,25 @@
+{
+  "trash_id": "homeserver-radarr-asc-dual-original",
+  "name": "HomeServer ASC Dual Original",
+  "includeCustomFormatWhenRenaming": false,
+  "specifications": [
+    {
+      "name": "ASC declared dual original",
+      "implementation": "ReleaseTitleSpecification",
+      "negate": false,
+      "required": true,
+      "fields": {
+        "value": "(?i)(?<![a-z0-9])dual[ ._-]*audio[ ._-]+brazilian[ ._-]+original(?![a-z0-9])"
+      }
+    },
+    {
+      "name": "Original missing from native parser",
+      "implementation": "LanguageSpecification",
+      "negate": true,
+      "required": true,
+      "fields": {
+        "value": -2
+      }
+    }
+  ]
+}

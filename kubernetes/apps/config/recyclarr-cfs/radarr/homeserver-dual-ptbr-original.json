@@ -1,0 +1,25 @@
+{
+  "trash_id": "homeserver-radarr-dual-ptbr-original",
+  "name": "HomeServer Dual PTBR Original",
+  "includeCustomFormatWhenRenaming": false,
+  "specifications": [
+    {
+      "name": "Original",
+      "implementation": "LanguageSpecification",
+      "negate": false,
+      "required": true,
+      "fields": {
+        "value": -2
+      }
+    },
+    {
+      "name": "Brazilian",
+      "implementation": "LanguageSpecification",
+      "negate": false,
+      "required": true,
+      "fields": {
+        "value": 30
+      }
+    }
+  ]
+}

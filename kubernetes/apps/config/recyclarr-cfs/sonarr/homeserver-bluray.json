@@ -1,0 +1,16 @@
+{
+  "trash_id": "homeserver-sonarr-bluray",
+  "name": "HomeServer BluRay",
+  "includeCustomFormatWhenRenaming": false,
+  "specifications": [
+    {
+      "name": "BluRay",
+      "implementation": "ReleaseTitleSpecification",
+      "negate": false,
+      "required": true,
+      "fields": {
+        "value": "(?i)\\bblu[ ._-]?ray\\b"
+      }
+    }
+  ]
+}
