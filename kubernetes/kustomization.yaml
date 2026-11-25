@@ -22,16 +22,22 @@ resources:
 
 configMapGenerator:
   - name: recyclarr-config
+    options:
+      disableNameSuffixHash: true
     files:
       - recyclarr.yml=apps/config/recyclarr.yml
       - settings.yml=apps/config/recyclarr-settings.yml
   - name: recyclarr-cfs-radarr
+    options:
+      disableNameSuffixHash: true
     files:
       - homeserver-bluray.json=apps/config/recyclarr-cfs/radarr/homeserver-bluray.json
       - homeserver-original.json=apps/config/recyclarr-cfs/radarr/homeserver-original.json
       - homeserver-dual-ptbr-original.json=apps/config/recyclarr-cfs/radarr/homeserver-dual-ptbr-original.json
       - homeserver-asc-dual-original.json=apps/config/recyclarr-cfs/radarr/homeserver-asc-dual-original.json
   - name: recyclarr-cfs-sonarr
+    options:
+      disableNameSuffixHash: true
     files:
       - homeserver-bluray.json=apps/config/recyclarr-cfs/sonarr/homeserver-bluray.json
       - homeserver-original.json=apps/config/recyclarr-cfs/sonarr/homeserver-original.json
@@ -40,6 +46,3 @@ configMapGenerator:
   - name: arr-mcp-config
     files:
       - config.yaml=apps/config/arr-mcp.yaml
-
-generatorOptions:
-  disableNameSuffixHash: true

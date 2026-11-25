@@ -26,11 +26,11 @@ services:
   prowlarr:
     url: http://prowlarr:9696
     api_key: "${PROWLARR_API_KEY}"
-    permissions: {safe_write: true, destructive: false}
+    permissions: {safe_write: true, destructive: true}
   bazarr:
     url: http://bazarr:6767
     api_key: "${BAZARR_API_KEY}"
-    permissions: {safe_write: true, destructive: false}
+    permissions: {safe_write: true, destructive: true}
   seerr:
     url: http://seerr:5055
     api_key: "${SEERR_API_KEY}"
@@ -42,7 +42,7 @@ services:
     api_key: "${JELLYFIN_API_KEY}"
     default_user: root
     allow_other_users: true
-    permissions: {safe_write: true, destructive: false}
+    permissions: {safe_write: true, destructive: true}
   qbittorrent:
     url: http://qbittorrent:8080
     username: __ROOT_USERNAME__
